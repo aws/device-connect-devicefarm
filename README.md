@@ -77,11 +77,12 @@ Flags are scoped to the command they affect (see `devicefarm-connect <command> -
 `--debug` (enable debug-level logging; the default is info) is global. `--version` (or `-v`)
 is accepted by the bare command only. The daemon's
 listener and logfile flags belong to `proxy start`, the only command that stands up
-the daemon: `--port` (default `5037`, matching adb's own default server port),
-`--listen-addr` (default `127.0.0.1`), and `--log` (the daemon logfile, defaulting
-to `devicefarm-connect.log` in the per-user runtime directory alongside the pidfile and
-control socket). `--allow-adb-reverse` belongs to the same command. Without it,
-`adb reverse` is off, and adb prints
+the daemon: `--port` (default `5037`, matching adb's own default server port) and
+`--log` (the daemon logfile, defaulting to `devicefarm-connect.log` in the per-user
+runtime directory alongside the pidfile and control socket). Moving the listener off
+loopback with `--listen-addr` is not recommended; read the [Security notes](#security-notes)
+first. `--allow-adb-reverse` belongs to the same command. Without it, `adb reverse` is off,
+and adb prints
 `error: adb reverse is off for this client; restart it with --allow-adb-reverse`. To
 turn it on, run `proxy stop`, then `proxy start --allow-adb-reverse`. The other
 commands find the running daemon through its control socket, so they do not take
@@ -138,8 +139,12 @@ the reverse path as well.
 - **Any local process can drive the attached device.** The listener has no authentication, like
   a real adb server, so any process that reaches the port is as privileged as the customer's own
   `adb`.
-- **Keep the listener on loopback.** `--listen-addr` defaults to `127.0.0.1` and is only checked
-  for non-empty; a routable address publishes the device to whoever can reach this host.
+- **Keep the listener on loopback.** The daemon listens on `127.0.0.1` by default. `--listen-addr`
+  can move it to any address or hostname, and nothing stops you. Any machine that can reach that
+  address can drive the attached device and use the daemon's remote access session, with no
+  password or token. With `--allow-adb-reverse`, it can also add reverse rules and so reach ports
+  open only to this machine. Move the listener off loopback only on a network you control, never
+  on an address the internet can reach. Scanners such as Shodan find open ports fast.
 - **`adb reverse` makes the device an initiator.** A reverse rule has the daemon dial
   `127.0.0.1:<port>` (then `[::1]:<port>` if that connect is refused; adb tries the same order
   on any failure) for the device. On each announced connection the daemon refuses its own adb

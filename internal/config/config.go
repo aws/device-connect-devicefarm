@@ -3,8 +3,10 @@ package config
 import (
 	"fmt"
 	"math"
+	"net/netip"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -218,6 +220,11 @@ func Default() ProxyConfig {
 func (c ProxyConfig) Validate() error {
 	if c.ListenAddr == "" {
 		return fmt.Errorf("--listen-addr must not be empty")
+	}
+	// A hostname has no colon or bracket. One in a value netip rejects means
+	// host:port or a broken IP literal.
+	if _, err := netip.ParseAddr(c.ListenAddr); err != nil && strings.ContainsAny(c.ListenAddr, ":[]") {
+		return fmt.Errorf("--listen-addr must be an IP address or hostname with no port or brackets, got %q; set the port with --port", c.ListenAddr)
 	}
 	if c.ListenPort < 1 || c.ListenPort > 65535 {
 		return fmt.Errorf("--port must be in 1..65535, got %d", c.ListenPort)
