@@ -62,6 +62,32 @@ func TestGivenInvalidFieldValuesWhenValidatedThenRejected(t *testing.T) {
 	}
 }
 
+func TestGivenNonAddressListenAddrWhenValidatedThenRejected(t *testing.T) {
+	// The port comes from --port. Without this check a host:port, bracketed or
+	// broken address fails only when the detached daemon binds.
+	for _, addr := range []string{"127.0.0.1:5037", "localhost:5037", "[::1]:5037", "[::1]", "::1::2"} {
+		t.Run(addr, func(t *testing.T) {
+			cfg := Default()
+			cfg.ListenAddr = addr
+
+			require.ErrorContains(t, cfg.Validate(), "no port or brackets")
+		})
+	}
+}
+
+func TestGivenBareListenAddrWhenValidatedThenAccepted(t *testing.T) {
+	// Any bare IP or hostname passes, loopback or not; the README security note
+	// carries the warning, not Validate. IPv6 colons are not host:port syntax.
+	for _, addr := range []string{"0.0.0.0", "::", "example.com", "::1", "::1%lo", "::ffff:127.0.0.1"} {
+		t.Run(addr, func(t *testing.T) {
+			cfg := Default()
+			cfg.ListenAddr = addr
+
+			require.NoError(t, cfg.Validate())
+		})
+	}
+}
+
 func TestGivenFullyPopulatedConfigWhenConvertedToDaemonArgsThenForwardedFlagsRoundTrip(t *testing.T) {
 	cfg := ProxyConfig{
 		ListenAddr: "127.0.0.1",
