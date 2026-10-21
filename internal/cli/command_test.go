@@ -1,5 +1,3 @@
-//go:build unix
-
 package cli
 
 import (
@@ -19,7 +17,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/daemon"
 )
 
-// fakeRuntimePaths points XDG_RUNTIME_DIR at a fresh dir, so execRoot resolves
+// fakeRuntimePaths points the runtime dir at a fresh dir, so execRoot resolves
 // the same paths, and writes a live pidfile (this test process) there, so
 // Manager.Status reports "running" and Manager.Start no-ops.
 func fakeRuntimePaths(t *testing.T) daemon.Paths {
@@ -31,7 +29,7 @@ func fakeRuntimePaths(t *testing.T) daemon.Paths {
 	runtimeDir, err := os.MkdirTemp("/tmp", "adbcli")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	isolateRuntimeDir(t, runtimeDir)
 
 	paths, err := daemon.DefaultPaths()
 	require.NoError(t, err)

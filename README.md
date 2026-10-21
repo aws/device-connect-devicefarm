@@ -93,11 +93,20 @@ one it is accepted and ignored, so stop that daemon first.
 
 ## Platform support
 
-Supported (verified by cross-compile): macOS Apple Silicon (`darwin/arm64`), macOS
-Intel (`darwin/amd64`), Linux x86-64 (`linux/amd64`), and Linux ARM64
-(`linux/arm64`). Windows is not supported yet. The binary compiles for Windows but
-exits with a "not supported" message: the daemon's control socket and lifecycle use
-Unix primitives that Windows lacks.
+The build produces binaries for macOS Apple Silicon (`darwin/arm64`), macOS Intel
+(`darwin/amd64`), Linux x86-64 (`linux/amd64`), Linux ARM64 (`linux/arm64`) and Windows
+x86-64 (`windows/amd64`). Only Linux x86-64 runs the tests. For the other targets the
+release build runs `go vet`, which type-checks all of the code for them, tests included; no
+automated test runs on them. On Windows:
+
+- Windows 10 build 17063 or later is required, because the control channel is an AF_UNIX
+  socket.
+- The `.exe` is not signed. When a copy downloaded with a browser is started from Explorer,
+  SmartScreen shows a warning.
+- `adb.exe` connects to `127.0.0.1` only, so a daemon started with `--listen-addr ::1` is
+  not reachable from it.
+- `adb reverse` reaches only servers that listen on `127.0.0.1`; a server that listens on
+  `::1` alone is not reachable.
 
 ## Limits
 
