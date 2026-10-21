@@ -1,5 +1,3 @@
-//go:build unix
-
 package daemon
 
 import (
@@ -17,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -372,28 +369,23 @@ func TestGivenAlreadyDeadOrphanWhenKillOrphanThenDoesNotPanic(t *testing.T) {
 	mgr.killOrphan(0)
 }
 
-func TestGivenRealExecutableWhenSpawnedThenReturnsLivePidAndDetaches(t *testing.T) {
-	logOut, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+func TestGivenDetachedChildWhenSpawnedThenLogfileIsItsStdoutAndStderr(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "daemon.log")
+	logOut, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	require.NoError(t, err)
 	defer logOut.Close()
 
-	// Spawn a real short-lived process through the production spawn path.
-	pid, err := realSpawnDaemon("/bin/sh", []string{"-c", "sleep 30"}, logOut)
+	// The child writes one line per stream through the production spawn path.
+	pid, err := realSpawnDaemon("/bin/sh", []string{"-c", "echo out-marker; echo err-marker >&2"}, logOut)
 	require.NoError(t, err)
 	require.Greater(t, pid, 0)
-	t.Cleanup(func() {
-		if proc, findErr := os.FindProcess(pid); findErr == nil {
-			_ = proc.Signal(syscall.SIGKILL)
-			_ = proc.Release()
-		}
-	})
 
-	assert.True(t, processAlive(pid), "the spawned child must be alive")
-	// Setsid detaches the child into its own session, so it leads a new process
-	// group whose id equals its pid.
-	pgid, err := syscall.Getpgid(pid)
-	require.NoError(t, err)
-	assert.Equal(t, pid, pgid, "the detached child must lead its own session (Setsid)")
+	require.Eventually(t, func() bool {
+		content, readErr := os.ReadFile(logPath)
+		return readErr == nil &&
+			strings.Contains(string(content), "out-marker") &&
+			strings.Contains(string(content), "err-marker")
+	}, testTimeout, testPollInterval, "both streams of the child must land in the logfile")
 }
 
 func TestGivenMissingExecutableWhenSpawnedThenErrors(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -88,4 +89,28 @@ func TestGivenRuntimeDirOwnedByAnotherUidWhenEnsuredThenErrors(t *testing.T) {
 
 	require.ErrorContains(t, err, "owned by uid")
 	assert.ErrorContains(t, err, "set XDG_RUNTIME_DIR")
+}
+
+func TestGivenRealExecutableWhenSpawnedThenReturnsLivePidAndDetaches(t *testing.T) {
+	logOut, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	require.NoError(t, err)
+	defer logOut.Close()
+
+	// Spawn a real short-lived process through the production spawn path.
+	pid, err := realSpawnDaemon("/bin/sh", []string{"-c", "sleep 30"}, logOut)
+	require.NoError(t, err)
+	require.Greater(t, pid, 0)
+	t.Cleanup(func() {
+		if proc, findErr := os.FindProcess(pid); findErr == nil {
+			_ = proc.Signal(syscall.SIGKILL)
+			_ = proc.Release()
+		}
+	})
+
+	assert.True(t, processAlive(pid), "the spawned child must be alive")
+	// Setsid detaches the child into its own session, so it leads a new process
+	// group whose id equals its pid.
+	pgid, err := syscall.Getpgid(pid)
+	require.NoError(t, err)
+	assert.Equal(t, pid, pgid, "the detached child must lead its own session (Setsid)")
 }
