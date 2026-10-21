@@ -15,7 +15,7 @@ import (
 // newDaemonCommand is the hidden foreground daemon body. `proxy start` re-execs
 // the binary with this subcommand as a detached process; it is not intended for
 // direct use, so it is hidden from help output. It runs the bridge until
-// SIGINT/SIGTERM, which the start/stop lifecycle delivers.
+// SIGINT/SIGTERM from a console or a control shutdown (`proxy stop`).
 func newDaemonCommand(state *rootState) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:    daemon.DaemonSubcommand,
