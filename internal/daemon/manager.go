@@ -1,5 +1,3 @@
-//go:build unix
-
 package daemon
 
 import (
@@ -10,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"syscall"
 	"time"
 
 	"github.com/aws/device-connect-devicefarm/internal/bridge"
@@ -115,11 +112,8 @@ func (m *DaemonManager) Start() error {
 		return fmt.Errorf("locate own executable: %w", err)
 	}
 
-	// O_NOFOLLOW refuses to open the logfile through a symlink. The logfile lives
-	// in the per-user 0700 runtime dir, but on the XDG_RUNTIME_DIR-unset fallback
-	// that dir can sit under a world-writable temp dir, so this closes a
-	// symlink-preplant against the log itself.
-	logOut, err := os.OpenFile(m.paths.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
+	// openNoFollow refuses a symlink where the OS can.
+	logOut, err := os.OpenFile(m.paths.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND|openNoFollow, 0o600)
 	if err != nil {
 		return fmt.Errorf("open daemon logfile %q: %w", m.paths.LogFile, err)
 	}
@@ -608,15 +602,15 @@ func (m *DaemonManager) killOrphan(pid int) {
 	_ = proc.Kill()
 }
 
-// realSpawnDaemon starts the binary at self with the given args as a detached,
-// session-leading background process, redirecting its stdout/stderr to logOut.
+// realSpawnDaemon starts the binary at self with the given args as a detached
+// background process, redirecting its stdout/stderr to logOut.
 // It returns the child's pid after fully releasing it (the parent never reaps
 // it), mirroring adb's fork-server detachment.
 func realSpawnDaemon(self string, args []string, logOut *os.File) (int, error) {
 	cmd := exec.Command(self, args...)
 	cmd.Stdout = logOut
 	cmd.Stderr = logOut
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.SysProcAttr = detachedProcessAttributes
 	if err := cmd.Start(); err != nil {
 		return 0, err
 	}
