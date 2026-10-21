@@ -55,13 +55,13 @@ const (
 // the pidfile) without forking the real binary.
 var spawnDaemon = realSpawnDaemon
 
-// findProcess returns the handle Stop signals through. Package var: a test
+// findProcess returns the handle Stop kills through. Package var: a test
 // kills the daemon between Stop's first probe and this call, the window the
 // re-probe covers.
 var findProcess = os.FindProcess
 
 // DaemonManager drives the daemon lifecycle: Start (detach a background daemon),
-// Stop (signal and drain it), Status (report it), and RunForeground (the daemon
+// Stop (shut it down and wait), Status (report it), and RunForeground (the daemon
 // body itself). RunForeground is the composition root that wires config into the
 // control channel, the active-device state, the bridge, the keep-alive loop, and
 // the endpoint refresh loop. It holds the session.RemoteAccessClient it resolves
@@ -152,9 +152,9 @@ func (m *DaemonManager) Start() error {
 	return nil
 }
 
-// Stop signals the running daemon to shut down, waits up to the configured stop
-// timeout for it to drain, escalates to SIGKILL if it does not, and clears the
-// pidfile. Stopping a daemon that is not running is a no-op.
+// Stop sends shutdown over the control socket, waits up to the stop timeout for
+// the daemon to exit, kills it if it stays, and clears the pidfile. No-op when
+// no daemon runs.
 func (m *DaemonManager) Stop() error {
 	pid, running := m.pidFile.RunningPID()
 	if !running {
@@ -164,44 +164,64 @@ func (m *DaemonManager) Stop() error {
 
 	proc, err := findProcess(pid)
 	if err != nil {
-		return fmt.Errorf("find daemon process %d: %w", pid, err)
+		// Windows fails here for a dead pid; Unix never does. The lock decides:
+		// released means exited, held means out of reach.
+		if m.stillRunning(pid) {
+			if errors.Is(err, os.ErrPermission) {
+				return fmt.Errorf("find daemon process %d: %w; stop it from an elevated shell", pid, err)
+			}
+			return fmt.Errorf("find daemon process %d: %w", pid, err)
+		}
+		m.logger.Info("daemon exited before shutdown was sent", "pid", pid)
+		return nil
 	}
 	// os.FindProcess opens a pidfd on Linux (Go 1.23+); release it on return so
 	// the fd is not leaked across the polling waits below.
 	defer proc.Release()
 	// Re-probe with the handle in hand. With a pidfd (Linux) a held lock proves
 	// the handle names the writer, not a reused pid. A bare pid (macOS, or Linux
-	// without pidfd) keeps a small window between this probe and the signal.
+	// without pidfd) keeps a small window between this probe and the kill.
 	if !m.stillRunning(pid) {
-		m.logger.Info("daemon not running; nothing signaled", "pid", pid)
+		m.logger.Info("daemon not running; nothing sent", "pid", pid)
 		return nil
 	}
-	// ErrProcessDone: the daemon exited between probe and signal. Stopped, not
-	// failed.
-	if err := proc.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		return fmt.Errorf("send SIGTERM to daemon %d: %w", pid, err)
-	}
 
-	if !m.waitUntilStopped(pid, m.config.StopTimeout) {
+	resp, err := control.NewDaemonClient(m.paths.ControlSocket).Send(control.Request{Op: control.OpShutdown})
+	grace := m.config.StopTimeout
+	switch {
+	case errors.Is(err, control.ErrDaemonNotRunning):
+		// Lock held, dial failed: shutdown cannot reach it. Skip the stop wait.
+		m.logger.Warn("control socket unreachable; killing daemon", "pid", pid)
+		grace = 0
+	case err != nil:
+		// The handler cancels the daemon context before it encodes the reply, so
+		// a clean exit can lose the reply. Any other error counts as acknowledged.
+		m.logger.Warn("shutdown not confirmed; waiting for the daemon to exit", "pid", pid, "error", err)
+	case !resp.OK:
+		// Refused: the daemon is reachable, so it keeps the stop timeout before the kill.
+		m.logger.Warn("daemon refused shutdown; waiting for it to exit", "pid", pid, "error", resp.Error)
+	}
+	// A zero grace still probes once, so a daemon already gone is not killed.
+	if !m.waitUntilStopped(pid, grace) {
 		if !m.stillRunning(pid) {
-			m.logger.Info("daemon record released after SIGTERM; not escalating", "pid", pid)
+			m.logger.Info("daemon record released; not escalating", "pid", pid)
 			return nil
 		}
-		m.logger.Warn("daemon did not stop gracefully; sending SIGKILL", "pid", pid)
-		// A failed SIGKILL is tolerated (the process may have just exited on its own),
-		// so the error is intentionally not propagated; the survival check below is
-		// what actually decides whether the stop succeeded.
-		_ = proc.Signal(syscall.SIGKILL)
+		if grace > 0 {
+			m.logger.Warn("daemon did not stop gracefully; killing it", "pid", pid)
+		}
+		// Kill may fail because the process just exited; the wait below decides
+		// whether the stop succeeded.
+		_ = proc.Kill()
 		if !m.waitUntilStopped(pid, killTimeout) {
-			// The pidfile is deliberately left in place: the process is still alive,
-			// so removing it would make status falsely report "not running" while a
-			// daemon still holds the listen port.
-			return fmt.Errorf("daemon %d survived SIGKILL after %s; pidfile left in place", pid, killTimeout)
+			// Keep the pidfile: the process lives and holds the listen port, so
+			// status must not report "not running".
+			return fmt.Errorf("daemon %d survived kill after %s; pidfile left in place", pid, killTimeout)
 		}
 	}
 	m.logger.Info("daemon stopped", "pid", pid)
-	// A daemon killed by a signal leaves its record unlocked; clear it. The probe
-	// removes only an unlocked file, so a successor's record stays.
+	// A killed daemon leaves its record unlocked; clear it. The probe removes
+	// only an unlocked file, so a successor's record stays.
 	_, _ = m.pidFile.RunningPID()
 	return nil
 }
@@ -362,10 +382,11 @@ func runPeriodic(ctx context.Context, interval time.Duration, tick func()) {
 // enforcing the one-device limit except that re-adding the same ARN is an
 // idempotent no-op; remove drops the device only if its ARN matches (so a stale
 // remove cannot disconnect a different device); shutdown cancels the daemon
-// context after replying. ctx is the daemon context and is the parent of the
+// context, then replies. ctx is the daemon context and is the parent of the
 // add path's bounded resolve, so a SIGTERM/SIGINT that cancels it also cancels an
 // add in flight (a control shutdown, being serialized behind the add on the
-// inline loop, cannot).
+// inline loop, cannot). `proxy stop` is that shutdown: it queues behind an
+// in-flight add, bounded by resolveTimeout.
 func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.ActiveDevice, shutdown context.CancelFunc) control.Handler {
 	return func(req control.Request) control.Response {
 		switch req.Op {
@@ -548,8 +569,8 @@ func (m *DaemonManager) waitUntilRunning(timeout time.Duration) error {
 }
 
 // stillRunning reports whether the pidfile still names pid under its writer's
-// lock. Stop calls it before each signal to skip a reused pid. RunningPID clears
-// a stale file on the way.
+// lock. Stop calls it before the shutdown and each kill to skip a reused pid.
+// RunningPID clears a stale file on the way.
 func (m *DaemonManager) stillRunning(pid int) bool {
 	current, running := m.pidFile.RunningPID()
 	return running && current == pid
@@ -584,7 +605,7 @@ func (m *DaemonManager) killOrphan(pid int) {
 		return
 	}
 	defer proc.Release()
-	_ = proc.Signal(syscall.SIGKILL)
+	_ = proc.Kill()
 }
 
 // realSpawnDaemon starts the binary at self with the given args as a detached,
