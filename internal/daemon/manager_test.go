@@ -13,7 +13,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -47,8 +46,8 @@ func newTestManager(t *testing.T) *DaemonManager {
 }
 
 // newTestManagerWithConfig is newTestManager with a caller-supplied config, used
-// by the Stop tests to shrink the stop timeout so the SIGKILL escalation path
-// runs quickly.
+// by the Stop tests to shrink the stop timeout so the kill escalation path runs
+// quickly.
 func newTestManagerWithConfig(t *testing.T, cfg config.ProxyConfig) *DaemonManager {
 	t.Helper()
 	return newTestManagerWithClient(t, cfg, newFakeClient(testEndpoint, "unused"))
@@ -83,19 +82,27 @@ func startRealChild(t *testing.T, script string) int {
 	return startAndReap(t, exec.Command("sh", "-c", script))
 }
 
-// helperPidFileEnv and helperModeEnv configure the child started by
-// startDaemonLikeChild. Unset in a normal test run, where TestHelperProcess is
-// a no-op.
+// Environment for the child started by startDaemonLikeChild. Unset in a normal
+// test run, where TestHelperProcess is a no-op.
 const (
-	helperPidFileEnv = "DEVICEFARM_CONNECT_TEST_HELPER_PIDFILE"
-	helperModeEnv    = "DEVICEFARM_CONNECT_TEST_HELPER_MODE"
+	helperPidFileEnv       = "DEVICEFARM_CONNECT_TEST_HELPER_PIDFILE"
+	helperControlSocketEnv = "DEVICEFARM_CONNECT_TEST_HELPER_SOCKET"
+	helperModeEnv          = "DEVICEFARM_CONNECT_TEST_HELPER_MODE"
+)
+
+// Helper modes: how the child answers a shutdown request.
+const (
+	helperModeExit    = "exit"    // exits, as the daemon does
+	helperModeIgnore  = "ignore"  // replies OK, stays alive, keeps the lock
+	helperModeRelease = "release" // drops its record and stays alive
+	helperModeRefuse  = "refuse"  // replies with an error and stays alive
 )
 
 // TestHelperProcess is the daemon-like child: this test binary re-executed to
 // write and lock the pidfile named in the environment, so the lock drops when
-// the child dies. It prints "ready" once set up, then parks until killed. The
-// mode env selects the SIGTERM behavior: "ignore-term", "release-on-term", or
-// any other value for the default (die).
+// the child dies, and to serve the control socket named there too. It prints
+// "ready" once both are up, then parks until killed or, in exit mode, until
+// shutdown arrives.
 func TestHelperProcess(t *testing.T) {
 	path := os.Getenv(helperPidFileEnv)
 	if path == "" {
@@ -105,41 +112,59 @@ func TestHelperProcess(t *testing.T) {
 	if err := pidFile.Write(); err != nil {
 		t.Fatal(err)
 	}
-	// Keeps pidFile reachable through the sleep, so the GC cannot close the lock.
+	// Keeps pidFile reachable through the park, so the GC cannot close the lock.
 	defer pidFile.Remove()
-	// Mode setup after Write: the goroutine below reads the lock Write stores.
-	switch os.Getenv(helperModeEnv) {
-	case "ignore-term":
-		signal.Ignore(syscall.SIGTERM)
-	case "release-on-term":
-		// Drop the record on SIGTERM but stay alive: looks like a pid reused
-		// while Stop waited.
-		term := make(chan os.Signal, 1)
-		signal.Notify(term, syscall.SIGTERM)
-		go func() {
-			<-term
-			_ = pidFile.Remove()
-		}()
+	controlServer := control.NewLocalSocketServer(os.Getenv(helperControlSocketEnv), nil)
+	if err := controlServer.Listen(); err != nil {
+		t.Fatal(err)
 	}
+	defer controlServer.Close()
+	// As in the daemon, the handler cancels this context before the reply is
+	// written, so an exiting child may leave with the reply unsent.
+	ctx, exit := context.WithCancel(context.Background())
+	defer exit()
+	mode := os.Getenv(helperModeEnv)
+	go func() {
+		_ = controlServer.Serve(ctx, func(req control.Request) control.Response {
+			if req.Op != control.OpShutdown {
+				return control.Response{OK: false, Error: "the helper answers shutdown only"}
+			}
+			switch mode {
+			case helperModeExit:
+				exit()
+			case helperModeRelease:
+				_ = pidFile.Remove()
+			case helperModeRefuse:
+				return control.Response{OK: false, Error: "refused for the test"}
+			}
+			return control.Response{OK: true}
+		})
+	}()
 	os.Stdout.WriteString("ready\n")
-	time.Sleep(time.Hour)
+	<-ctx.Done()
 }
 
 // startDaemonLikeChild runs TestHelperProcess as a child that holds the lock on
-// mgr's pidfile in the given mode. It returns the pid once the child reports
-// ready, so no signal arrives before the child writes the pidfile and sets its
-// SIGTERM mode. It stands in for a detached daemon in the Stop tests.
+// mgr's pidfile and serves mgr's control socket in the given mode. It returns
+// the pid once the child reports ready, so the lock is held and the socket
+// bound before Stop runs. It stands in for a detached daemon in the Stop tests.
 func startDaemonLikeChild(t *testing.T, mgr *DaemonManager, mode string) int {
 	t.Helper()
 	self, err := os.Executable()
 	require.NoError(t, err)
 	cmd := exec.Command(self, "-test.run", "^TestHelperProcess$")
-	cmd.Env = append(os.Environ(), helperPidFileEnv+"="+mgr.paths.PidFile, helperModeEnv+"="+mode)
+	cmd.Env = append(os.Environ(),
+		helperPidFileEnv+"="+mgr.paths.PidFile,
+		helperControlSocketEnv+"="+mgr.paths.ControlSocket,
+		helperModeEnv+"="+mode,
+	)
 	// The child's failures and race reports must reach the test log.
 	cmd.Stderr = os.Stderr
 	readyRead, readyWrite, err := os.Pipe()
 	require.NoError(t, err)
-	defer readyRead.Close()
+	// Open until cleanup: the harness output of an exiting child lands in the
+	// pipe instead of killing it with SIGPIPE.
+	t.Cleanup(func() { readyRead.Close() })
 	cmd.Stdout = readyWrite
 	pid := startAndReap(t, cmd)
 	// Close the parent's write end so a child that dies before "ready" gives EOF,
@@ -220,6 +245,23 @@ func stubSpawn(t *testing.T, fn func(self string, args []string, logOut *os.File
 	original := spawnDaemon
 	spawnDaemon = fn
 	t.Cleanup(func() { spawnDaemon = original })
+}
+
+// stubFindProcess swaps findProcess for the test and restores it on cleanup.
+func stubFindProcess(t *testing.T, fn func(pid int) (*os.Process, error)) {
+	t.Helper()
+	original := findProcess
+	findProcess = fn
+	t.Cleanup(func() { findProcess = original })
+}
+
+// killProcess kills pid and waits until it is gone.
+func killProcess(t *testing.T, pid int) {
+	t.Helper()
+	target, err := os.FindProcess(pid)
+	require.NoError(t, err)
+	require.NoError(t, target.Kill())
+	require.Eventually(t, func() bool { return !processAlive(pid) }, testTimeout, testPollInterval)
 }
 
 func TestGivenNoDaemonRunningWhenStartedThenSpawnsChildAndReportsRunning(t *testing.T) {
@@ -381,31 +423,71 @@ func TestGivenNoDaemonRunningWhenStoppedThenIsNoOp(t *testing.T) {
 	assert.NoError(t, mgr.Stop())
 }
 
-func TestGivenDaemonHonorsSIGTERMWhenStoppedThenProcessKilledAndPidFileRemoved(t *testing.T) {
+func TestGivenDaemonAnsweringControlSocketWhenStoppedThenShutdownRequestedAndProcessGone(t *testing.T) {
 	mgr := newTestManager(t)
-	// The child exits on the default SIGTERM disposition. Killed by a signal, it
-	// leaves the pidfile unlocked for Stop to clear.
-	pid := startDaemonLikeChild(t, mgr, "park")
+	// The child exits on the shutdown request, as the daemon does.
+	pid := startDaemonLikeChild(t, mgr, helperModeExit)
 
+	started := time.Now()
 	require.NoError(t, mgr.Stop())
 
+	assert.Less(t, time.Since(started), mgr.config.StopTimeout,
+		"a daemon that exits on request must not wait out the stop timeout")
 	assert.False(t, processAlive(pid), "process should be gone after Stop")
 	_, err := os.Stat(mgr.paths.PidFile)
 	assert.ErrorIs(t, err, os.ErrNotExist, "pidfile should be removed after a successful stop")
+	// Only a clean exit unlinks the socket; a killed child leaves it.
+	_, err = os.Stat(mgr.paths.ControlSocket)
+	assert.ErrorIs(t, err, os.ErrNotExist, "the child must have exited on the request, not been killed")
 }
 
-func TestGivenDaemonIgnoresSIGTERMWhenStoppedThenEscalatesToSIGKILL(t *testing.T) {
+func TestGivenControlSocketUnreachableWhenStoppedThenKilledWithoutWaitingStopTimeout(t *testing.T) {
+	cfg := config.Default()
+	cfg.StopTimeout = 30 * time.Second
+	mgr := newTestManagerWithConfig(t, cfg)
+	pid := startDaemonLikeChild(t, mgr, helperModeIgnore)
+	// Lock held, but nothing listens at the socket path.
+	require.NoError(t, os.Remove(mgr.paths.ControlSocket))
+
+	started := time.Now()
+	require.NoError(t, mgr.Stop())
+
+	assert.Less(t, time.Since(started), 5*time.Second, "an unreachable socket must skip the stop wait")
+	assert.False(t, processAlive(pid), "a daemon nothing can reach must be killed")
+	_, err := os.Stat(mgr.paths.PidFile)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestGivenDaemonAcknowledgesShutdownButLingersWhenStoppedThenEscalatesToKill(t *testing.T) {
 	cfg := config.Default()
 	cfg.StopTimeout = 200 * time.Millisecond // keep the graceful wait short
 	mgr := newTestManagerWithConfig(t, cfg)
-
-	// The child ignores SIGTERM, forcing SIGKILL. SIGKILL cannot be ignored, so
-	// Stop must still succeed.
-	pid := startDaemonLikeChild(t, mgr, "ignore-term")
+	// The child replies OK and stays, so only the kill can end it.
+	pid := startDaemonLikeChild(t, mgr, helperModeIgnore)
 
 	require.NoError(t, mgr.Stop())
 
-	assert.False(t, processAlive(pid), "process should be killed via SIGKILL after ignoring SIGTERM")
+	assert.False(t, processAlive(pid), "process should be killed after the stop timeout")
+	_, err := os.Stat(mgr.paths.PidFile)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestGivenDaemonRefusesShutdownWhenStoppedThenLogsRefusalAndEscalatesToKill(t *testing.T) {
+	cfg := config.Default()
+	cfg.StopTimeout = 200 * time.Millisecond // keep the graceful wait short
+	mgr := newTestManagerWithConfig(t, cfg)
+	logs := &lockedBuffer{}
+	mgr.logger = slog.New(slog.NewTextHandler(logs, nil))
+	// The child refuses and stays, so only the kill can end it.
+	pid := startDaemonLikeChild(t, mgr, helperModeRefuse)
+
+	started := time.Now()
+	require.NoError(t, mgr.Stop())
+
+	assert.GreaterOrEqual(t, time.Since(started), cfg.StopTimeout, "a refused shutdown keeps the stop timeout")
+	assert.Regexp(t, `level=WARN msg="daemon refused shutdown[^\n]*error="refused for the test"`, logs.String(),
+		"the daemon's error text must reach the warn line")
+	assert.False(t, processAlive(pid), "process should be killed after the stop timeout")
 	_, err := os.Stat(mgr.paths.PidFile)
 	assert.ErrorIs(t, err, os.ErrNotExist)
 }
@@ -785,19 +867,16 @@ func TestGivenUnlockedPidFileNamingLiveProcessWhenStoppedThenNothingIsSignaled(t
 
 func TestGivenDaemonPidReusedBetweenProbeAndHandleWhenStoppedThenSuccessorNotSignaledAndRecordCleared(t *testing.T) {
 	mgr := newTestManager(t)
-	daemonPid := startDaemonLikeChild(t, mgr, "park")
+	daemonPid := startDaemonLikeChild(t, mgr, helperModeIgnore)
 	// Stands in for the process that took the daemon's pid.
 	successorPid := startRealChild(t, "exec sleep 60")
 	// The daemon dies between Stop's first probe and the handle, and the handle
 	// lands on the successor. The re-probe must see the lock gone.
-	original := findProcess
-	t.Cleanup(func() { findProcess = original })
-	findProcess = func(target int) (*os.Process, error) {
+	stubFindProcess(t, func(target int) (*os.Process, error) {
 		require.Equal(t, daemonPid, target)
-		require.NoError(t, syscall.Kill(target, syscall.SIGKILL))
-		require.Eventually(t, func() bool { return !processAlive(target) }, testTimeout, 10*time.Millisecond)
+		killProcess(t, target)
 		return os.FindProcess(successorPid)
-	}
+	})
 
 	require.NoError(t, mgr.Stop())
 
@@ -809,19 +888,76 @@ func TestGivenDaemonPidReusedBetweenProbeAndHandleWhenStoppedThenSuccessorNotSig
 	assert.ErrorIs(t, err, os.ErrNotExist, "the dead daemon's record is cleared")
 }
 
-func TestGivenDaemonReleasesItsRecordButSurvivesSIGTERMWhenStoppedThenNoSIGKILLIsSent(t *testing.T) {
+func TestGivenDaemonReleasesItsRecordOnShutdownButStaysAliveWhenStoppedThenNotKilled(t *testing.T) {
 	cfg := config.Default()
 	cfg.StopTimeout = time.Second
 	mgr := newTestManagerWithConfig(t, cfg)
-	// After SIGTERM the lock is gone but the pid lives: a pid reused during the
-	// stop wait. Stop must not escalate to SIGKILL.
-	pid := startDaemonLikeChild(t, mgr, "release-on-term")
+	// After the OK reply the lock is gone but the pid lives: a pid reused during
+	// the stop wait. Stop must not kill it.
+	pid := startDaemonLikeChild(t, mgr, helperModeRelease)
 
 	require.NoError(t, mgr.Stop())
 
 	assert.True(t, processAlive(pid), "a pid whose writer released the record must not be killed")
 	_, err := os.Stat(mgr.paths.PidFile)
 	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestGivenProcessHandleUnavailableAndRecordReleasedWhenStoppedThenReportsStopped(t *testing.T) {
+	mgr := newTestManager(t)
+	daemonPid := startDaemonLikeChild(t, mgr, helperModeIgnore)
+	// The daemon dies after Stop's first probe; the handle lookup then fails, as
+	// on Windows for a dead pid. A released record must read as stopped, not as
+	// an error.
+	stubFindProcess(t, func(target int) (*os.Process, error) {
+		require.Equal(t, daemonPid, target)
+		killProcess(t, target)
+		return nil, assert.AnError
+	})
+
+	require.NoError(t, mgr.Stop())
+
+	_, err := os.Stat(mgr.paths.PidFile)
+	assert.ErrorIs(t, err, os.ErrNotExist, "the dead daemon's record is cleared")
+}
+
+func TestGivenProcessHandleUnavailableAndRecordHeldWhenStoppedThenErrorReturnedAndDaemonLeftAlone(t *testing.T) {
+	cases := []struct {
+		name      string
+		lookupErr error
+		wantHint  bool
+	}{
+		{name: "permission denied names an elevated shell", lookupErr: fmt.Errorf("open process: %w", os.ErrPermission), wantHint: true},
+		{name: "any other failure carries no hint", lookupErr: assert.AnError, wantHint: false},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			mgr := newTestManager(t)
+			// Release mode: a shutdown request Stop must not send would drop the
+			// record and fail the held-record assertion below.
+			pid := startDaemonLikeChild(t, mgr, helperModeRelease)
+			// The handle lookup fails while the child holds its record, as on
+			// Windows when an elevated daemon is stopped from a normal shell.
+			// Stop must report the failure and leave the daemon alone.
+			stubFindProcess(t, func(target int) (*os.Process, error) {
+				require.Equal(t, pid, target)
+				return nil, testCase.lookupErr
+			})
+
+			err := mgr.Stop()
+
+			require.ErrorIs(t, err, testCase.lookupErr)
+			if testCase.wantHint {
+				assert.Contains(t, err.Error(), "stop it from an elevated shell")
+			} else {
+				assert.NotContains(t, err.Error(), "stop it from an elevated shell")
+			}
+			assert.True(t, processAlive(pid), "a daemon out of reach must not be killed")
+			current, running := mgr.pidFile.RunningPID()
+			assert.True(t, running, "the held record stays")
+			assert.Equal(t, pid, current)
+		})
+	}
 }
 
 // deadPID returns a pid that is guaranteed not to be alive: it starts a trivial
