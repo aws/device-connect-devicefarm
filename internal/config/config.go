@@ -13,7 +13,7 @@ import (
 const BinaryName = "devicefarm-connect"
 
 // Hidden test-only overrides; _MS values are integer milliseconds. Env vars, not
-// flags: they stay out of --help and cross the setsid re-exec with no AsDaemonArgs
+// flags: they stay out of --help and cross the daemon re-exec with no AsDaemonArgs
 // plumbing.
 const (
 	wsRefreshIntervalEnvVar = "DEVICEFARM_CONNECT_REFRESH_MS"
