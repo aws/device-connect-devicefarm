@@ -1,5 +1,3 @@
-//go:build unix
-
 package cli
 
 import (
@@ -18,19 +16,27 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/daemon"
 )
 
-// runRoot executes the command tree with the given args in a fresh temp
-// XDG_RUNTIME_DIR, so the daemon's runtime files never touch the real per-user
-// location. Use it for single-command tests.
+// runRoot executes the command tree with the given args in a fresh temp runtime
+// dir, so the daemon's runtime files never touch the real per-user location. Use
+// it for single-command tests.
 func runRoot(t *testing.T, args ...string) (*bytes.Buffer, error) {
 	t.Helper()
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	isolateRuntimeDir(t, t.TempDir())
 	return execRoot(t, args...)
 }
 
+// isolateRuntimeDir makes the daemon put its runtime files under dir on every OS.
+// Unix reads XDG_RUNTIME_DIR; Windows reads LocalAppData (through os.UserCacheDir).
+func isolateRuntimeDir(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	t.Setenv("LocalAppData", dir)
+}
+
 // execRoot executes the command tree with the given args against the current
-// XDG_RUNTIME_DIR, capturing stdout/stderr into the returned buffer. Tests that
-// run several commands sharing one daemon runtime dir set XDG_RUNTIME_DIR
-// themselves and call execRoot for each.
+// runtime dir, capturing stdout/stderr into the returned buffer. Tests that run
+// several commands against one daemon runtime dir call isolateRuntimeDir once
+// themselves, then execRoot for each command.
 func execRoot(t *testing.T, args ...string) (*bytes.Buffer, error) {
 	t.Helper()
 	root := newRootCommand()
@@ -279,10 +285,10 @@ func TestGivenInvalidPortWhenProxyStartInvokedThenValidationFails(t *testing.T) 
 }
 
 // newTestState builds a rootState with default config and real runtime paths under
-// a temp XDG_RUNTIME_DIR, so the manager constructors can be exercised directly.
+// a temp runtime dir, so the manager constructors can be exercised directly.
 func newTestState(t *testing.T) *rootState {
 	t.Helper()
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	isolateRuntimeDir(t, t.TempDir())
 	paths, err := daemon.DefaultPaths()
 	require.NoError(t, err)
 	return &rootState{cfg: config.Default(), paths: paths}

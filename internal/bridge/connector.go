@@ -89,7 +89,8 @@ func openConnector(ctx context.Context, cfg *featureConfig, device *ActiveDevice
 
 // dialCustomerPort connects to customerPort on the IPv4 loopback, or on the IPv6 one when the IPv4
 // connect is refused. Any other IPv4 failure ends the dial. If both fail, the error names both
-// attempts and wraps the first, the address a customer expects.
+// attempts and wraps the first, the address a customer expects. On Windows a refused connect
+// never matches syscall.ECONNREFUSED, so the IPv6 attempt never runs there.
 func dialCustomerPort(ctx context.Context, dial portDialer, customerPort int) (net.Conn, error) {
 	port := strconv.Itoa(customerPort)
 	conn, ipv4Err := dial(ctx, "tcp", net.JoinHostPort(connectorLoopbackIPv4, port))
