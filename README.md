@@ -535,3 +535,17 @@ The macOS release binary differs from a rebuild in two more ways. The AWS Device
 binary with a Developer ID, and Apple notarizes it. A rebuilt macOS binary has no Developer ID signature and
 no notarization. A rebuilt macOS binary still runs on Apple silicon. The Go linker gives the Apple silicon
 half an ad-hoc signature, which is a signature with no developer identity.
+
+## Contributing
+
+Read `CONTRIBUTING.md` first. It explains how a maintainer imports a pull request instead of merging it on
+GitHub.
+
+## Security
+
+To report a security issue, follow `SECURITY.md`. Never open a public issue for it.
+
+## License
+
+This project is licensed under the Apache License 2.0. The license text is in `LICENSE`. The copyright
+notice is in `NOTICE`.
