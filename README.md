@@ -451,4 +451,87 @@ build follows in a later release. If you build the Windows binary yourself:
 
 ## Build from source
 
-Build steps will be added here together with the public Dockerfile.
+There are two ways to build the program from source. Build it with Go, or rebuild the release binaries with
+Docker. You can do one without the other.
+
+First, get the source code. Download the source archive from this repository's Releases page and unpack it,
+or clone this repository. Run every command in this section from the top directory of the source code. The
+top directory holds `go.mod` and the `Dockerfile`.
+
+### Build with Go
+
+You need Go 1.26 or later and an internet connection. Go downloads the modules that the program uses.
+
+1. Build the program. Go writes the file `devicefarm-connect` into the current directory. On Windows, the
+   file is `devicefarm-connect.exe`.
+
+   ```sh
+   go build ./cmd/devicefarm-connect
+   ```
+
+2. Run the tests on Linux. The maintainers do not run the tests on other platforms. See "Platform
+   support".
+
+   ```sh
+   go test ./...
+   ```
+
+3. Optional: install the program. Go puts the program into Go's `bin` directory. By default, that directory
+   is `go/bin` in your home directory.
+
+   ```sh
+   go install ./cmd/devicefarm-connect
+   ```
+
+### Rebuild the release binaries with Docker
+
+The `Dockerfile` rebuilds the release binaries with the same Go version and build flags as the release. The
+build does not need Go on your computer.
+
+To compare a rebuild with a release, build the source code of that release. The source archive of the
+release holds that source code. In a clone, check out the tag of the release first.
+
+You need Docker and an internet connection. The build downloads the official Go image, which the Docker
+community maintains, from the Amazon ECR Public Gallery, and Go modules from the Go module proxy.
+
+1. Run the build. The `--pull` option makes Docker download the newest copy of the Go image.
+
+   ```sh
+   docker build --pull --output type=local,dest=dist .
+   ```
+
+   Docker writes six files into the directory `dist/`:
+
+   | File | What it is |
+   |---|---|
+   | `devicefarm-connect_darwin_universal` | The program for macOS. One file for Apple silicon and Intel. |
+   | `devicefarm-connect_darwin_arm64` | The Apple silicon half of the macOS file. |
+   | `devicefarm-connect_darwin_amd64` | The Intel half of the macOS file. |
+   | `devicefarm-connect_linux_amd64` | The program for Linux on x86-64. |
+   | `devicefarm-connect_linux_arm64` | The program for Linux on ARM64. |
+   | `devicefarm-connect_windows_amd64.exe` | The program for Windows on x86-64. This release has no Windows download to compare it with. |
+
+2. Compare the build information of a rebuilt binary and a release binary. This step needs Go on your
+   computer. Run the command below on each file. Both outputs show the same Go version, the same module
+   line and the same build settings.
+
+   ```sh
+   go version -m dist/devicefarm-connect_linux_amd64
+   ```
+
+3. Compare the checksums. The release notes give the SHA-256 checksum of each release binary. The release
+   notes also give the checksum of a rebuild that the AWS Device Farm team made with this `Dockerfile`.
+   Compare the checksum of your rebuild with both. On macOS, use `shasum -a 256` in place of `sha256sum`.
+
+   ```sh
+   sha256sum dist/devicefarm-connect_linux_amd64
+   ```
+
+**NOTE**: A rebuild and a release binary are the same program. The AWS Device Farm team does not promise that
+the two files match byte for byte. The release build and this `Dockerfile` get Go in different ways, and
+they run in different build environments.
+
+The macOS release binary differs from a rebuild in two more ways. The AWS Device Farm team signs the release
+binary with a Developer ID, and Apple notarizes it. A rebuilt macOS binary has no Developer ID signature and
+no notarization. A rebuilt macOS binary still runs on Apple silicon. The Go linker gives the Apple silicon
+half an ad-hoc signature, which is a signature with no developer identity.
