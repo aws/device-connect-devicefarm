@@ -5,12 +5,14 @@
 // endpoint is time-limited and must be renewed while a device stays attached.
 //
 // Public surface: RemoteAccessClient (the application-layer interface the daemon
-// depends on), RemoteAccessInfo (its result), and NewRemoteAccessClient (the real,
-// AWS-backed implementation), and the Err sentinels a GetSession failure carries,
+// depends on), RemoteAccessInfo (its result), NewRemoteAccessClient (the real,
+// AWS-backed implementation), the Err sentinels a GetSession failure carries,
 // with SessionEndedError for the status word, RequestRejectedError for the
-// service's error code and UnsupportedDeviceError for the refused device.
-// Everything else - the SDK-shaped getter, the ARN helper, the config loading - is
-// internal to this package, so no aws-sdk-go-v2 type crosses the package boundary.
+// service's error code and UnsupportedDeviceError for the refused device, and
+// ResolveCredentials with its CredentialSummary (the
+// credential chain's source and expiry, for the doctor). Everything else - the
+// SDK-shaped getter, the ARN helper, the config loading - is internal to this
+// package, so no aws-sdk-go-v2 type crosses the package boundary.
 package session
 
 import (
@@ -162,8 +164,9 @@ type remoteAccessGetter interface {
 }
 
 // awsRemoteAccessClient is the real RemoteAccessClient. It holds one Device Farm
-// client for its lifetime: building one loads the AWS config, which walks the
-// credential chain in order, so it is not cheap enough to redo on every call. The
+// client for its lifetime: building one loads the AWS config, which reads the
+// environment and the shared config files to pick a credential provider, so it is
+// not cheap enough to redo on every call. The
 // client is region-bound and Device Farm remote access is single-region today (see
 // clientRegion), so one instance serves every session and the daemon reuses it
 // across refresh ticks and device swaps.
@@ -182,6 +185,15 @@ func NewRemoteAccessClient(ctx context.Context, logger *slog.Logger) (RemoteAcce
 	if logger == nil {
 		logger = slog.Default()
 	}
+	cfg, err := loadConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return awsRemoteAccessClient{getter: devicefarm.NewFromConfig(cfg), logger: logger}, nil
+}
+
+// loadConfig is the AWS config the Device Farm client and ResolveCredentials share.
+func loadConfig(ctx context.Context) (aws.Config, error) {
 	cfg, err := config.LoadDefaultConfig(
 		ctx,
 		config.WithRegion(clientRegion),
@@ -189,9 +201,9 @@ func NewRemoteAccessClient(ctx context.Context, logger *slog.Logger) (RemoteAcce
 		config.WithRetryMaxAttempts(maxRetryAttempts),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("load AWS config: %w", err)
+		return aws.Config{}, fmt.Errorf("load AWS config: %w", err)
 	}
-	return awsRemoteAccessClient{getter: devicefarm.NewFromConfig(cfg), logger: logger}, nil
+	return cfg, nil
 }
 
 // apiErrorCode and httpResponse match the SDK's API error and its HTTP response by shape, so
