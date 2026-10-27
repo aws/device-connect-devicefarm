@@ -3,12 +3,15 @@ package doctor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/aws/device-connect-devicefarm/internal/session"
 )
 
 // constantCheck answers result at once.
@@ -582,4 +585,65 @@ func TestGivenAnEmptyReportWhenWrittenAsATableThenEveryRowIsNotCheckedAndTheCoun
 +---------------+--------+-----------------------------------------------------+
 doctor: 0 of 4 categories passed, 4 not checked
 `, out.String())
+}
+
+func TestGivenMixedResultsWhenWrittenAsJSONThenOneCompactObjectCarriesEveryRow(t *testing.T) {
+	report := Report{Rows: []Row{
+		{ID: "local.runtime-dir", Title: "working directory", Category: CategoryLocal,
+			Result: Result{Status: Pass, Summary: "working directory /run/user/1000/devicefarm-connect is writable"}, Elapsed: 1500 * time.Microsecond},
+		{ID: "local.daemon", Title: "bridge daemon", Category: CategoryLocal, Needs: []string{"local.runtime-dir"},
+			Result: Result{Status: Warn, Summary: "running (pid 42) on port 6000, not 5037",
+				Hint: "the running daemon listens on port 6000, not 5037. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 5037'."},
+			Elapsed: 20 * time.Millisecond},
+		{ID: "local.listen-port", Title: "listen port", Category: CategoryLocal, Needs: []string{"local.daemon"},
+			Result: Result{Status: Fail, Summary: "held by an adb server (version 41)", Hint: "adb kill-server"}},
+		{ID: "relay.reverse", Title: "adb reverse", Category: CategoryNetwork, Needs: []string{"session.resolve", "local.daemon"},
+			Result: Result{Status: Skip, Summary: "needs session.resolve"}},
+	}}
+	var out bytes.Buffer
+
+	require.NoError(t, WriteJSON(&out, report, "arn:aws:devicefarm:us-west-2:123456789012:session:a/b/0"))
+
+	assert.Equal(t, `{"ok":false,"sessionArn":"arn:aws:devicefarm:us-west-2:123456789012:session:a/b/0",`+
+		`"checks":[`+
+		`{"id":"local.runtime-dir","title":"working directory","category":"local","status":"pass","summary":"working directory /run/user/1000/devicefarm-connect is writable","needs":[],"elapsedMs":1},`+
+		`{"id":"local.daemon","title":"bridge daemon","category":"local","status":"warn","summary":"running (pid 42) on port 6000, not 5037","hint":"the running daemon listens on port 6000, not 5037. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 5037'.","needs":["local.runtime-dir"],"elapsedMs":20},`+
+		`{"id":"local.listen-port","title":"listen port","category":"local","status":"fail","summary":"held by an adb server (version 41)","hint":"adb kill-server","needs":["local.daemon"],"elapsedMs":0},`+
+		`{"id":"relay.reverse","title":"adb reverse","category":"network","status":"skip","summary":"needs session.resolve","needs":["session.resolve","local.daemon"],"elapsedMs":0}],`+
+		`"summary":{"pass":1,"warn":1,"fail":1,"skip":1}}`+"\n", out.String())
+}
+
+func TestGivenAFreshMachineAndNoSessionArnWhenWrittenAsJSONThenOkIsTrueAndTheSessionRowsSkip(t *testing.T) {
+	shortRuntimeDir(t)
+	inputs := localInputs(t)
+	inputs.Credentials = func(context.Context) (session.CredentialSummary, error) {
+		return session.CredentialSummary{Source: "StaticCredentials"}, nil
+	}
+	var out bytes.Buffer
+
+	report := Run(context.Background(), Checks(inputs))
+	require.NoError(t, WriteJSON(&out, report, ""))
+
+	var decoded struct {
+		OK         bool   `json:"ok"`
+		SessionARN string `json:"sessionArn"`
+		Checks     []struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"checks"`
+		Summary map[string]int `json:"summary"`
+	}
+	require.NoError(t, json.Unmarshal(out.Bytes(), &decoded), "one object: %q", out.String())
+	assert.Equal(t, 1, strings.Count(out.String(), "\n"), "one line")
+	assert.True(t, decoded.OK)
+	assert.Empty(t, decoded.SessionARN)
+	statuses := map[string]string{}
+	for _, check := range decoded.Checks {
+		statuses[check.ID] = check.Status
+	}
+	assert.Equal(t, map[string]string{"local.runtime-dir": "pass", "local.daemon": "pass", "local.listen-port": "pass",
+		"local.forward-table": "pass", "aws.credentials": "pass", "session.resolve": "skip", "relay.session": "skip",
+		"relay.reattach": "skip", "relay.reverse": "skip", "relay.adb-version": "skip"}, statuses,
+		"without a session the session and relay rows skip")
+	assert.Equal(t, map[string]int{"pass": 5, "warn": 0, "fail": 0, "skip": 5}, decoded.Summary)
 }

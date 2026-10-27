@@ -287,12 +287,13 @@ Exit code 0 unless a check is `FAIL`; a `WARN` leaves it 0. The table follows th
 or `COLUMNS` when stdout is not a terminal, between 60 and 120 columns. Flags: `--session-arn`
 (optional; without it the session, the connection to the device and the adb versions are not
 checked), `--port` and `--listen-addr` (the address the daemon would bind, same defaults as
-`bridge start`), `--verbose` (one line per check, with its id, instead of the table) and the
-global `--debug`. Run the doctor from the shell that will run `bridge start`: the daemon inherits
-that shell's environment. A running daemon is reported in the Local machine row, not changed; with
-reverse off that row is `WARN` and its fix restarts the daemon with `--allow-adb-reverse`. That
-flag lets the device open connections to this machine, so use it only with a device you trust; a
-public physical device can run software you do not control.
+`bridge start`), `--verbose` (one line per check, with its id, instead of the table), `--json` (one
+compact JSON object instead of the table; same exit code) and the global `--debug`. Run the doctor
+from the shell that will run `bridge start`: the daemon inherits that shell's environment. A
+running daemon is reported in the Local machine row, not changed; with reverse off that row is
+`WARN` and its fix restarts the daemon with `--allow-adb-reverse`. That flag lets the device open
+connections to this machine, so use it only with a device you trust; a public physical device can
+run software you do not control.
 
 Side effects:
 
@@ -309,6 +310,22 @@ Side effects:
 
 `doctor` starts no daemon and installs no forward or reverse rule. Each check has its own timeout;
 a run in which every check times out ends in under two minutes.
+
+`--json` prints one compact object on stdout instead of the table, with the same exit code:
+
+```sh
+devicefarm-connect doctor --json | jq .ok
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `ok` | boolean | `true` when no check is `fail` (the exit code is 0) |
+| `sessionArn` | string | the `--session-arn` value, empty when none |
+| `checks` | array | one object per check in run order: `id`, `title`, `category` (`local`, `aws`, `network` or `dependencies`, the table row), `status` (`pass`, `warn`, `fail`, `skip`), `summary`, `hint` (absent when the row has none: every `pass`, and a `fail` from a timeout or Ctrl-C), `needs` (ids of the checks it needs), `elapsedMs` |
+| `summary` | object | `pass`, `warn`, `fail`, `skip` counts |
+
+Fields may be added in any release; a field is renamed, removed or retyped only in a new major
+version of `devicefarm-connect`.
 
 ## Credentials and permissions
 
