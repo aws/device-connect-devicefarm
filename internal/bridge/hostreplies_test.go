@@ -298,7 +298,7 @@ func TestGivenRepeatedHostQueriesWhenAnsweredThenEachIsFetchedOnceAndRepliedVerb
 }
 
 func TestGivenADetachWhenTheDeviceAttachesAgainThenTheRepliesAreFetchedAgain(t *testing.T) {
-	// Device hosts differ in adb version, so nothing cached may outlive its attachment.
+	// Remote adb servers differ in adb version, so nothing cached may outlive its attachment.
 	proxyAddress, mock, device := startHostReplyProxy(t, cannedHostReplies)
 	require.Equal(t, serverVersionReply, askHost(t, proxyAddress, hostVersionRequest))
 	_, ok := device.Clear()

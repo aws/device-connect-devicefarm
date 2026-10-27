@@ -19,7 +19,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/aws/device-connect-devicefarm/internal/adbwire"
 	"github.com/aws/device-connect-devicefarm/internal/config"
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/daemon"
@@ -456,12 +455,6 @@ func TestGivenABindErrorNobodyAnswersWhenTheHintIsPickedThenOnlyAddrNotAvailBlam
 	}
 }
 
-func TestGivenTheHostVersionRequestWhenFramedByTheEncoderThenTheConstantMatches(t *testing.T) {
-	framed, err := adbwire.EncodeRequest("host:version")
-	require.NoError(t, err)
-	assert.Equal(t, hostVersionRequest, string(framed))
-}
-
 func TestGivenAnUnspecifiedListenAddressWhenTheOccupantIsDialedThenLoopbackIsUsed(t *testing.T) {
 	assert.Equal(t, "127.0.0.1:5037", occupantAddress("0.0.0.0", 5037))
 	assert.Equal(t, "[::1]:5037", occupantAddress("::", 5037))
@@ -556,7 +549,7 @@ func TestGivenAFreshMachineAndNoSessionArnWhenTheTableRunsThenNothingFails(t *te
 		statuses = append(statuses, row.Status)
 	}
 	assert.Equal(t, []string{checkRuntimeDir, checkDaemon, checkListenPort, checkForwardTable, checkCredentials, checkSession,
-		checkRelaySession, checkReattach, checkReverse}, ids)
-	assert.Equal(t, []Status{Pass, Pass, Pass, Pass, Pass, Skip, Skip, Skip, Skip}, statuses, "%v", report.Rows)
+		checkRelaySession, checkReattach, checkReverse, checkAdbVersion}, ids)
+	assert.Equal(t, []Status{Pass, Pass, Pass, Pass, Pass, Skip, Skip, Skip, Skip, Skip}, statuses, "%v", report.Rows)
 	assert.Equal(t, 0, report.Failed())
 }

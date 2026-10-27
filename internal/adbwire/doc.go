@@ -1,5 +1,5 @@
 // Package adbwire implements the pieces of the ADB smart-socket host protocol
-// the daemon speaks itself. Pure protocol logic: no I/O beyond an io.Writer,
+// the daemon or a probe speaks. Pure protocol logic: no I/O beyond an io.Writer,
 // no internal imports.
 //
 //   - Request framing: a 4-hex-digit payload length, then the payload, for the
@@ -23,6 +23,8 @@
 //     OKAY and the 8 raw little-endian bytes of a uint64 transport id for
 //     host:tport:*, a bare OKAY for every other spelling (adb.cpp
 //     handle_host_request; adb.h TransportId).
+//   - host:version: the framed request and the reply parser, for a caller that
+//     asks an adb server its protocol version (adb.cpp handle_host_request).
 //
 // Two markers run through adbwire, forward and bridge. "adb's model": adb
 // defines it and the Go code mirrors it, under adb's name where it has one,
