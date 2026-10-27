@@ -261,11 +261,25 @@ func (s *controlHandlerSuite) TestListWithNoDeviceReportsAnEmptyList() {
 	s.Empty(resp.Devices)
 }
 
-func (s *controlHandlerSuite) TestStatusReportsAttachedLabel() {
+func (s *controlHandlerSuite) TestStatusReportsAttachedLabelAndARNWithReverseOff() {
 	s.Require().True(s.handler(addReq("arn:1")).OK)
 
 	resp := s.handler(control.Request{Op: control.OpStatus})
 
 	s.Require().True(resp.OK)
 	s.Equal("Pixel 10 (OS 17)", resp.DeviceLabel)
+	s.Equal("arn:1", resp.ARN)
+	s.False(resp.ReverseEnabled, "the default config starts with reverse off")
+}
+
+func (s *controlHandlerSuite) TestStatusReportsReverseEnabledFromTheConfig() {
+	cfg := config.Default()
+	cfg.ReverseEnabled = true
+	handler := newTestManagerWithClient(s.T(), cfg, s.client).controlHandler(context.Background(), s.device, s.dialer, func() {})
+
+	resp := handler(control.Request{Op: control.OpStatus})
+
+	s.Require().True(resp.OK)
+	s.True(resp.ReverseEnabled)
+	s.Empty(resp.ARN, "no device is attached")
 }

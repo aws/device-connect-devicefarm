@@ -444,11 +444,11 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 			return control.Response{OK: true, DeviceLabel: removed.Label, Port: m.config.ListenPort}
 
 		case control.OpStatus:
-			current, present := device.Current()
-			if !present {
-				return control.Response{OK: true, Port: m.config.ListenPort}
+			reply := control.Response{OK: true, Port: m.config.ListenPort, ReverseEnabled: m.config.ReverseEnabled}
+			if current, present := device.Current(); present {
+				reply.DeviceLabel, reply.ARN = current.Label, current.ARN
 			}
-			return control.Response{OK: true, DeviceLabel: current.Label, Port: m.config.ListenPort}
+			return reply
 
 		case control.OpList:
 			resp := control.Response{OK: true}

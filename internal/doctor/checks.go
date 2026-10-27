@@ -9,7 +9,7 @@ import (
 )
 
 // Inputs is what one run reads: the listener config the daemon would start with, the session
-// to probe, the AWS boundary, the websocket dialer and the logger.
+// to probe, the AWS boundary, the websocket dialer and the logger. Nil Logger means slog.Default.
 type Inputs struct {
 	Config     config.ProxyConfig
 	SessionARN string
@@ -18,7 +18,10 @@ type Inputs struct {
 	Logger     *slog.Logger
 }
 
-// Checks returns the check table, in run order. No check is registered yet.
-func Checks(_ Inputs) []Check {
-	return nil
+// Checks builds the table in run order. Later checks read what earlier ones store in runState.
+func Checks(inputs Inputs) []Check {
+	if inputs.Logger == nil {
+		inputs.Logger = slog.Default()
+	}
+	return localChecks(inputs, &runState{})
 }
