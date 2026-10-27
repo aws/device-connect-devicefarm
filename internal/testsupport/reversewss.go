@@ -141,6 +141,22 @@ func (mock *ReverseMockWSS) SendRaw(frame []byte) bool {
 	return websocket.Message.Send(target, frame) == nil
 }
 
+// HoldNotifierSlot marks the notifier slot taken by a rival this mock never serves, so every
+// hello is refused with the registered payload until the returned release runs.
+func (mock *ReverseMockWSS) HoldNotifierSlot() (release func()) {
+	rival := &websocket.Conn{}
+	mock.stateMutex.Lock()
+	mock.notifier = rival
+	mock.stateMutex.Unlock()
+	return func() {
+		mock.stateMutex.Lock()
+		defer mock.stateMutex.Unlock()
+		if mock.notifier == rival {
+			mock.notifier = nil
+		}
+	}
+}
+
 // DropNotifier closes the live notifier from the server side, the way a restart or a pool
 // eviction does: the client's next read fails instead of carrying an ERROR frame, which is the
 // only way to drive a caller's Receive-error path. Reports whether a notifier was there to drop.

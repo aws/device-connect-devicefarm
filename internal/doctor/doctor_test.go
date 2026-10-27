@@ -445,12 +445,12 @@ func TestGivenSkipRowsWhenTheirReasonsAreResolvedThenRunnerSkipsReadTheRootAndCh
 func TestGivenAllSkippedChecksWithDifferentReasonsWhenWrittenAsATableThenTheCellNamesEachCheck(t *testing.T) {
 	out := renderTable(t, tableChecks(map[string]Result{
 		"relay.session": {Status: Skip, Summary: "no device transport yet"},
-		"relay.reverse": {Status: Skip, Summary: "the running daemon already uses adb reverse on this session"},
+		"relay.reverse": {Status: Skip, Summary: "the reverse probe is off for this run"},
 	}), 120)
 
 	assert.Contains(t, out, "| Network       | SKIP   | adb session to the device not checked: no device transport yet")
 	assert.Contains(t, out, "|               |        | adb session reconnect not checked: needs adb session to the device")
-	assert.Contains(t, out, "|               |        | adb reverse not checked: the running daemon already uses adb reverse on this")
+	assert.Contains(t, out, "|               |        | adb reverse not checked: the reverse probe is off for this run")
 	assert.Contains(t, out, "| Dependencies  | SKIP   | not checked: needs adb session to the device")
 }
 
