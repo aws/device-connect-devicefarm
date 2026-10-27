@@ -44,13 +44,16 @@ type Request struct {
 // Error carries the reason when it did not. DeviceLabel and Port describe the
 // daemon's resulting state so the CLI can print the listening line without a
 // second round trip. Devices is the OpList reply: one entry per connected device. An
-// OpList reply carries no Port.
+// OpList reply carries no Port. OpStatus also fills ARN (the attached session) and
+// ReverseEnabled (--allow-adb-reverse was set).
 type Response struct {
-	OK          bool             `json:"ok"`
-	Error       string           `json:"error,omitempty"`
-	DeviceLabel string           `json:"deviceLabel,omitempty"`
-	Port        int              `json:"port,omitempty"`
-	Devices     []AttachedDevice `json:"devices,omitempty"`
+	OK             bool             `json:"ok"`
+	Error          string           `json:"error,omitempty"`
+	DeviceLabel    string           `json:"deviceLabel,omitempty"`
+	Port           int              `json:"port,omitempty"`
+	Devices        []AttachedDevice `json:"devices,omitempty"`
+	ARN            string           `json:"arn,omitempty"`
+	ReverseEnabled bool             `json:"reverseEnabled,omitempty"`
 }
 
 // AttachedDevice is one connected device in an OpList reply.
