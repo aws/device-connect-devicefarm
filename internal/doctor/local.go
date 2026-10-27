@@ -55,7 +55,7 @@ const (
 	reverseCaveat = "'--allow-adb-reverse' lets the device open connections to this machine, so use it only with a " +
 		"device you trust; a public physical device can run software you do not control."
 	runtimeDirHint = "the client cannot use this working directory, so '" + bridgeStartCommand + "' cannot launch the daemon. " +
-		"Set 'XDG_RUNTIME_DIR' to a directory with a short path that only this user can write, then rerun '" + doctorCommand +
+		"Set '" + daemon.RuntimeDirEnvVar + "' to a directory with a short path that only this user can write, then rerun '" + doctorCommand +
 		"'. Every " + config.BinaryName + " command reads that variable, so 'bridge start' and the daemon use the new directory too."
 	deadDaemonHint = "a daemon is registered but did not report its status, so '" + bridgeStartCommand + "' starts nothing. Run '" +
 		restartDaemonHint + "'. The stop ends that daemon and the start launches a new one."
