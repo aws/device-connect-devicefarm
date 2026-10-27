@@ -539,7 +539,7 @@ func TestGivenTheClosingOpenerWhenAConnectionArrivesThenItIsClosedAtOnce(t *test
 	listener.Close()
 }
 
-func TestGivenAFreshMachineWhenTheTableRunsThenEveryRowPasses(t *testing.T) {
+func TestGivenAFreshMachineAndNoSessionArnWhenTheTableRunsThenNothingFails(t *testing.T) {
 	shortRuntimeDir(t)
 	inputs := localInputs(t)
 	inputs.Logger = nil
@@ -550,9 +550,12 @@ func TestGivenAFreshMachineWhenTheTableRunsThenEveryRowPasses(t *testing.T) {
 	report := Run(context.Background(), Checks(inputs))
 
 	ids := make([]string, 0, len(report.Rows))
+	statuses := make([]Status, 0, len(report.Rows))
 	for _, row := range report.Rows {
 		ids = append(ids, row.ID)
-		assert.Equal(t, Pass, row.Status, "%s: %s", row.ID, row.Summary)
+		statuses = append(statuses, row.Status)
 	}
-	assert.Equal(t, []string{checkRuntimeDir, checkDaemon, checkListenPort, checkForwardTable, checkCredentials}, ids)
+	assert.Equal(t, []string{checkRuntimeDir, checkDaemon, checkListenPort, checkForwardTable, checkCredentials, checkSession}, ids)
+	assert.Equal(t, []Status{Pass, Pass, Pass, Pass, Pass, Skip}, statuses, "%v", report.Rows)
+	assert.Equal(t, 0, report.Failed())
 }

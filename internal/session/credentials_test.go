@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -66,4 +67,24 @@ func TestGivenAMissingProfileWhenResolvedThenTheConfigLoadFails(t *testing.T) {
 
 	assert.ErrorContains(t, resolveErr, "load AWS config")
 	assert.ErrorContains(t, clientErr, "load AWS config")
+}
+
+func TestGivenACredentialProcessPrintingAKeyWhenASessionIsResolvedThenTheErrorHidesTheOutput(t *testing.T) {
+	// The Device Farm client resolves credentials on its first call, so the same helper output
+	// would reach GetSession's error.
+	noEnvCredentials(t)
+	const keyMarker = "AKIA-KEY-MARKER-9876543210"
+	configFile := filepath.Join(t.TempDir(), "config")
+	require.NoError(t, os.WriteFile(configFile, []byte("[default]\ncredential_process = echo '{\"Version\":1,\"AccessKeyId\":\""+keyMarker+"\"'\n"), 0o600))
+	t.Setenv("AWS_CONFIG_FILE", configFile)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client, err := NewRemoteAccessClient(ctx, nil)
+	require.NoError(t, err)
+
+	_, err = client.GetSession(ctx, testSessionARN)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errCredentialProcessOutput)
+	assert.NotContains(t, err.Error(), keyMarker, "the helper's output must not reach the caller")
 }

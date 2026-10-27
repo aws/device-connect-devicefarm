@@ -214,8 +214,10 @@ type httpResponse interface{ HTTPStatusCode() int }
 
 // classifyAPIError maps an API error to its sentinel: three codes by name, then any other 4xx
 // that is not a throttle as ErrRequestRejected. Throttles (a throttle code, or a 429 whatever its
-// code), 5xx and errors with no response pass through.
+// code), 5xx and errors with no response pass through. The call resolves credentials first, so
+// this scrubs a credential_process failure too.
 func classifyAPIError(err error) error {
+	err = scrubCredentialProcess(err)
 	code := ""
 	var apiErr apiErrorCode
 	if errors.As(err, &apiErr) {
