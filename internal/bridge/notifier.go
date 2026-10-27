@@ -21,8 +21,9 @@ var errNotifierRefused = errors.New("the server refused the notifier")
 // timer clears. Must match the server's text byte for byte.
 const notifierSlotTakenReason = "notifier already registered"
 
-// errNotifierSlotTaken is the refusal carrying notifierSlotTakenReason.
-var errNotifierSlotTaken = fmt.Errorf("%w: %s", errNotifierRefused, notifierSlotTakenReason)
+// ErrNotifierSlotTaken is the refusal carrying notifierSlotTakenReason. Exported for
+// ProbeNotifier's callers.
+var ErrNotifierSlotTaken = fmt.Errorf("%w: %s", errNotifierRefused, notifierSlotTakenReason)
 
 // notifierConn is one attachment's notifier websocket on RouteAdbReverse: the server announces
 // every device-originated reverse connection on it. A bare websocket, not an adbConn, because a
@@ -34,11 +35,8 @@ type notifierConn struct {
 	logger *slog.Logger
 }
 
-// dialNotifier opens a notifier and completes its hello exchange: NOTIFIER_HELLO as the first
-// frame, then one bounded read that must be NOTIFIER_READY. ERROR is the server's refusal and
-// carries its reason; any other status is a protocol violation. Every failure closes the
-// websocket, so a caller holding an error owns nothing. The endpoint is read per dial, never
-// cached: the daemon renews it every four minutes.
+// dialNotifier reads the attachment's endpoint and runs helloNotifier. Read per dial, never
+// cached: the daemon renews the time-limited endpoint.
 func dialNotifier(ctx context.Context, dialer *WSDialer, device *ActiveDevice, arn string,
 	ackWithin time.Duration, logger *slog.Logger) (*notifierConn, error) {
 	if logger == nil {
@@ -53,32 +51,43 @@ func dialNotifier(ctx context.Context, dialer *WSDialer, device *ActiveDevice, a
 	if err != nil {
 		return nil, fmt.Errorf("dial the notifier websocket: %w", err)
 	}
+	if err := helloNotifier(ws, ackWithin); err != nil {
+		return nil, err
+	}
+
+	logger.Debug("reverse notifier ready", "device", arn)
+	return &notifierConn{ws: ws, logger: logger}, nil
+}
+
+// helloNotifier completes the hello exchange on a dialed notifier websocket: NOTIFIER_HELLO as
+// the first frame, then one bounded read that must be NOTIFIER_READY. ERROR is the server's
+// refusal and carries its reason; any other status is a protocol violation. Every failure
+// closes the websocket, so a caller holding an error owns nothing.
+func helloNotifier(ws WSConn, ackWithin time.Duration) error {
 	if err := ws.Send(encodeControlFrame(controlStatusNotifierHello, "")); err != nil {
 		ws.Close()
-		return nil, fmt.Errorf("send the notifier hello: %w", err)
+		return fmt.Errorf("send the notifier hello: %w", err)
 	}
 
 	frame, err := readControlFrameWithin(ws, ackWithin)
 	if err != nil {
 		ws.Close() // already closed on receiveWithin's timeout path; closing twice is inert
-		return nil, fmt.Errorf("read the notifier hello ack: %w", err)
+		return fmt.Errorf("read the notifier hello ack: %w", err)
 	}
 	switch frame.status {
 	case controlStatusNotifierReady:
+		return nil
 	case controlStatusError:
 		ws.Close()
 		if frame.payload == notifierSlotTakenReason {
-			return nil, errNotifierSlotTaken
+			return ErrNotifierSlotTaken
 		}
-		return nil, fmt.Errorf("%w: %s", errNotifierRefused, frame.payload)
+		return fmt.Errorf("%w: %s", errNotifierRefused, frame.payload)
 	default:
 		ws.Close()
-		return nil, fmt.Errorf("the notifier hello was answered with status 0x%02x, not NOTIFIER_READY",
+		return fmt.Errorf("the notifier hello was answered with status 0x%02x, not NOTIFIER_READY",
 			frame.status)
 	}
-
-	logger.Debug("reverse notifier ready", "device", arn)
-	return &notifierConn{ws: ws, logger: logger}, nil
 }
 
 // run is the notifier's single reader: it loops until one frame is fatal, closes the socket and

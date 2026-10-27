@@ -10,9 +10,10 @@ import (
 // Every path that holds the seam exclusively across a network round trip lives here. The
 // rest of the machine is in adbconn.go.
 
-// errSessionGone is the server's explicit refusal: the named session is gone. It proves
-// only that the attempt that got it did not take over; see attachSuccessorRetrying.
-var errSessionGone = errors.New("remote session is gone")
+// ErrSessionGone is the server's explicit refusal of a reconnect: the named session is unknown,
+// expired or ending. It proves only that the attempt that got it did not take over; see
+// attachSuccessorRetrying. Exported for ProbeReattach's callers.
+var ErrSessionGone = errors.New("remote session is gone")
 
 // errReattachIndeterminate means the UUID reached the server but the outcome is unknown:
 // the ack timed out, named the wrong session, or carried an unexpected status. The
@@ -83,7 +84,7 @@ func (c *adbConn) refresh(ctx context.Context, gate func() bool) error {
 			c.dropPoisonedPredecessor(poisoned)
 			return err
 		}
-		if errors.Is(err, errSessionGone) {
+		if errors.Is(err, ErrSessionGone) {
 			// Both take over the held lock and release it.
 			if c.terminalSessionGone {
 				return c.endOnSessionGoneLocked(refreshFailed, err)
@@ -124,7 +125,7 @@ func (c *adbConn) attachSuccessorRetrying(ctx context.Context, sessionUUID strin
 		}
 		// Retry only failures a second try could answer differently. A cancelled ctx needs no
 		// check: the next dial fails at once.
-		if errors.Is(err, errSessionGone) || errors.Is(err, errAdbConnClosed) {
+		if errors.Is(err, ErrSessionGone) || errors.Is(err, errAdbConnClosed) {
 			return nil, keepIndeterminateTaint(indeterminate, err)
 		}
 		if attempt < attachAttempts {
@@ -197,7 +198,7 @@ func (c *adbConn) attachSuccessor(ctx context.Context, sessionUUID string) (WSCo
 	case controlStatusError:
 		// The one determinate failure: refused outright, so nothing switched.
 		c.sockets.forget(successor)
-		return nil, fmt.Errorf("%w: %s", errSessionGone, frame.payload)
+		return nil, fmt.Errorf("%w: %s", ErrSessionGone, frame.payload)
 	default:
 		c.sockets.forget(successor)
 		return nil, fmt.Errorf("%w: unexpected control frame status 0x%02x acking a reattach",

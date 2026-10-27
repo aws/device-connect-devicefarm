@@ -215,7 +215,7 @@ func TestGivenTheServerBreaksTheExchangeWhenTheDeviceIsRemovedThenTheStepIsLogge
 	}{
 		{name: "closes before the control frame", serve: breakAfterSelect(nil), logged: "read the session control frame"},
 		{name: "refuses the session", serve: breakAfterSelect(newSessionControlFrame(controlStatusError, "no slot")),
-			logged: "no session was minted"},
+			logged: "refused the session"},
 		{name: "closes before the select's status word", serve: breakAfterSelect(newSessionControlFrame(controlStatusNew, "11111111-2222-4333-8444-555555555555")),
 			logged: "transport select"},
 	}

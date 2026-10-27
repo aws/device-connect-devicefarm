@@ -430,7 +430,7 @@ func TestGivenARefusedReattachOnADeviceStreamWhenRefreshRunsThenTheConnectionEnd
 	}()
 
 	// The fallback returns nil here, so this alone rules it out.
-	require.ErrorIs(t, conn.refresh(context.Background(), nil), errSessionGone)
+	require.ErrorIs(t, conn.refresh(context.Background(), nil), ErrSessionGone)
 
 	// Not failRefreshLocked, which would return the predecessor to service instead.
 	assert.True(t, conn.isClosed(), "the stream must end rather than restart in host mode")
