@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -276,4 +277,45 @@ func TestGivenListenerAndSessionFlagsWhenParsedOnDoctorThenTheyBindToTheStateAnd
 	// still refuses the port.
 	_, err := runRoot(t, "bridge", "status", "--port", "5555")
 	require.Error(t, err)
+}
+
+func TestGivenJSONRequestedWhenDoctorRunsThenStdoutIsExactlyOneObjectWithTheSameExitCode(t *testing.T) {
+	notADir := filepath.Join(t.TempDir(), "not-a-dir")
+	require.NoError(t, os.WriteFile(notADir, nil, 0o600))
+	tests := []struct {
+		name       string
+		runtimeDir func(t *testing.T)
+		wantErr    string
+		wantFails  int
+	}{
+		{name: "exit 0", runtimeDir: func(t *testing.T) { shortRuntimeDir(t) }},
+		{name: "exit 1", runtimeDir: func(t *testing.T) { isolateRuntimeDir(t, notADir) }, wantErr: "doctor: 1 checks failed", wantFails: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.runtimeDir(t)
+			stdout := &bytes.Buffer{}
+
+			stderr, err := runDoctor(t, stdout, "--json")
+
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.EqualError(t, err, tc.wantErr)
+			}
+			assert.Empty(t, stderr.String())
+			var decoded struct {
+				OK         bool              `json:"ok"`
+				SessionARN string            `json:"sessionArn"`
+				Checks     []json.RawMessage `json:"checks"`
+				Summary    map[string]int    `json:"summary"`
+			}
+			require.NoError(t, json.Unmarshal(stdout.Bytes(), &decoded), "stdout must be one object: %q", stdout.String())
+			assert.Equal(t, 1, strings.Count(stdout.String(), "\n"), "one line, nothing else on stdout")
+			assert.Equal(t, err == nil, decoded.OK, "ok follows the exit code")
+			assert.Empty(t, decoded.SessionARN)
+			assert.Len(t, decoded.Checks, len(doctorCheckIDs))
+			assert.Equal(t, tc.wantFails, decoded.Summary["fail"])
+		})
+	}
 }
