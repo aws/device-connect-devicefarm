@@ -82,7 +82,8 @@ func newBridgeStartCommand(state *rootState) *cobra.Command {
 	}
 	// The listener and logfile flags live here, not on the root command: `bridge
 	// start` is the only command that configures the daemon. `device add` and `device
-	// list` start one with the defaults; every other command talks to a running one.
+	// list` start one with the defaults; every other command talks to a running one, and
+	// `doctor` takes the address flags to check what the daemon would bind.
 	bindListenerFlags(cmd, &state.cfg)
 	bindReverseFlag(cmd, &state.cfg)
 	cmd.Flags().StringVar(&state.cfg.LogPath, "log", state.cfg.LogPath, "daemon logfile path (defaults to the per-user runtime directory)")

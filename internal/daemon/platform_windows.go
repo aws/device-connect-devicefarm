@@ -18,6 +18,9 @@ var detachedProcessAttributes = &syscall.SysProcAttr{
 // openNoFollow is zero: os.OpenFile has no Windows flag that refuses a symlink.
 const openNoFollow = 0
 
+// RuntimeDirEnvVar is the environment variable that sets the runtime dir's parent; os.UserCacheDir reads it.
+const RuntimeDirEnvVar = "LocalAppData"
+
 // defaultRuntimeDir is devicefarm-connect under %LocalAppData%. MkdirAll
 // ignores the mode on Windows; the dir inherits the per-user profile ACL, so no
 // owner check. An unset %LocalAppData% is an error, no fallback.

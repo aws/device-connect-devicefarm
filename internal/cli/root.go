@@ -19,7 +19,8 @@ import (
 // rootState holds the flag-bound configuration and the resolved runtime paths
 // shared across subcommands. It is populated by the persistent flags on the root
 // command and finalized in PersistentPreRunE. sessionARN is a per-command
-// argument (the device to add or remove), not part of the daemon's config.
+// argument (the device to add or remove, or the session the doctor probes), not
+// part of the daemon's config.
 type rootState struct {
 	cfg        config.ProxyConfig
 	sessionARN string
@@ -68,8 +69,8 @@ func usageError(cmd *cobra.Command, err error) error {
 
 // newRootCommandWithState assembles the cobra command tree over state: a root that
 // owns the persistent flags plus the "bridge" (start/stop/status) and "device"
-// (add/list/remove) command groups and the hidden "daemon" body. A test passes state to
-// read what the flags parsed.
+// (add/list/remove) command groups, the "doctor" leaf and the hidden "daemon" body. A test
+// passes state to read what the flags parsed.
 func newRootCommandWithState(state *rootState) *cobra.Command {
 	root := &cobra.Command{
 		Use:     config.BinaryName,
@@ -84,7 +85,8 @@ func newRootCommandWithState(state *rootState) *cobra.Command {
 			"  device list     Show the attached device. Starts the daemon when none runs.\n"+
 			"  device remove   Detach the attached device.\n"+
 			"  bridge start    Start the daemon with custom options, such as --port.\n"+
-			"  bridge stop     Stop the daemon.",
+			"  bridge stop     Stop the daemon.\n"+
+			"  doctor          Check this machine, the AWS credentials and a session.",
 			config.BinaryName, awsName, productName),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -92,7 +94,7 @@ func newRootCommandWithState(state *rootState) *cobra.Command {
 		// fixed command set, so it is hidden from help and not registered.
 		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
 		// Initialize logging and resolve runtime paths once, before any
-		// subcommand runs.
+		// subcommand runs. The doctor replaces this hook: see newDoctorCommand.
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			state.commandLineAccepted = true
 			initLogging(cmd.ErrOrStderr(), state.cfg.Debug)
@@ -117,6 +119,7 @@ func newRootCommandWithState(state *rootState) *cobra.Command {
 		newBridgeCommand(state),
 		newDeviceCommand(state),
 		newDaemonCommand(state),
+		newDoctorCommand(state),
 	)
 	return root
 }
@@ -156,9 +159,9 @@ func bindPersistentFlags(cmd *cobra.Command, cfg *config.ProxyConfig) {
 }
 
 // bindListenerFlags wires the daemon's listener flags (--port, --listen-addr) to
-// cfg. They are needed only by the two commands that stand up the daemon: `bridge
-// start` (which spawns it) and the hidden `daemon` body (which is re-execed with
-// them via config.AsDaemonArgs). Every other command finds the running daemon
+// cfg. Only `bridge start` (which spawns the daemon), the hidden `daemon` body
+// (re-execed with them via config.AsDaemonArgs) and `doctor` (which checks the
+// address those would bind) take them. Every other command finds the running daemon
 // through its per-user control socket, so the port and address are irrelevant to
 // them and are deliberately kept off their help output.
 func bindListenerFlags(cmd *cobra.Command, cfg *config.ProxyConfig) {

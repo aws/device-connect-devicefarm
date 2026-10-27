@@ -56,9 +56,9 @@ func execRoot(t *testing.T, args ...string) (*bytes.Buffer, error) {
 func TestGivenCommandTreeWhenBuiltThenHasExpectedCommandGroups(t *testing.T) {
 	root := newRootCommand()
 
-	// The top level is the two command groups plus the hidden daemon body.
+	// The top level is the two command groups, the doctor and the hidden daemon body.
 	top := childNames(root)
-	for _, want := range []string{"bridge", "device", "daemon"} {
+	for _, want := range []string{"bridge", "device", "doctor", "daemon"} {
 		assert.True(t, top[want], "missing top-level command %q", want)
 	}
 

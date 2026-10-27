@@ -210,6 +210,106 @@ attach a device, then use `adb` as usual.
 - Reverse rules are stored in the remote access session, so `bridge stop` leaves them in place. Each time you
   attach the device with reverse on, the daemon clears them. Run your `adb reverse` commands again.
 
+## Doctor
+
+```sh
+# Check this machine and this shell before 'bridge start'.
+devicefarm-connect doctor
+
+# Also check the session, the connection to the device and the remote adb server's version.
+devicefarm-connect doctor --session-arn arn:aws:devicefarm:us-west-2:123456789012:session:11111111-2222-3333-4444-5555555abcde
+```
+
+`doctor` runs readiness checks for `bridge start`, `device add`, an adb connection, a reconnect to
+the device, `adb forward` and `adb reverse`, and prints one table row per category on stdout:
+Local machine (the working directory, the daemon and the ports the bridge needs), AWS (this
+shell's credentials and the remote access session), Network (the adb connection to the device
+through Device Farm, its reconnect and adb reverse) and Dependencies (the adb installed here
+against the device's adb server). A row is `FAIL` when a check in it failed, `WARN` when one
+works with a caveat, `SKIP` when none ran, else `PASS`; the Details column names each check that
+did not pass and why. On a machine with no daemon, `devicefarm-connect doctor --port 60001` (a
+port nothing holds) prints:
+
+```
++---------------+--------+-----------------------------------------------------+
+| Category      | Status | Details                                             |
++---------------+--------+-----------------------------------------------------+
+| Local machine | PASS   | working directory, bridge daemon, listen port, adb  |
+|               |        |   forward                                           |
++---------------+--------+-----------------------------------------------------+
+| AWS           | PASS   | AWS credentials                                     |
+|               |        | remote access session not checked: pass             |
+|               |        |   --session-arn to check the session, the device    |
+|               |        |   connection and adb versions                       |
++---------------+--------+-----------------------------------------------------+
+| Network       | SKIP   | not checked: needs remote access session            |
++---------------+--------+-----------------------------------------------------+
+| Dependencies  | SKIP   | not checked: needs remote access session            |
++---------------+--------+-----------------------------------------------------+
+doctor: 2 of 4 categories passed, 2 not checked
+```
+
+A `WARN` or `FAIL` check adds a numbered item to a "What to do" list under the table: the cause,
+the exact command or setting with the check's values filled in, and what the command changes.
+With an adb server holding the listen port, `devicefarm-connect doctor --port 35477` prints this
+and exits 1:
+
+```
++---------------+--------+-----------------------------------------------------+
+| Category      | Status | Details                                             |
++---------------+--------+-----------------------------------------------------+
+| Local machine | FAIL   | listen port: 127.0.0.1:35477 is held by an adb      |
+|               |        |   server (version 41)                               |
+|               |        | also passed: working directory, bridge daemon, adb  |
+|               |        |   forward                                           |
++---------------+--------+-----------------------------------------------------+
+| AWS           | PASS   | AWS credentials                                     |
+|               |        | remote access session not checked: pass             |
+|               |        |   --session-arn to check the session, the device    |
+|               |        |   connection and adb versions                       |
++---------------+--------+-----------------------------------------------------+
+| Network       | SKIP   | not checked: needs remote access session            |
++---------------+--------+-----------------------------------------------------+
+| Dependencies  | SKIP   | not checked: needs remote access session            |
++---------------+--------+-----------------------------------------------------+
+
+What to do
+1. Local machine, listen port: an adb server holds the port the daemon would
+   bind. Stop it with 'adb -P 35477 kill-server', then run
+   'devicefarm-connect bridge start --port 35477' before any other adb command,
+   or adb restarts its server on that port. Or start the daemon on another port
+   with 'devicefarm-connect bridge start --port <n>' and point adb at it with
+   'adb -P <n>'.
+doctor: 1 of 4 categories passed, 1 failed, 2 not checked
+```
+
+Exit code 0 unless a check is `FAIL`; a `WARN` leaves it 0. The table follows the terminal width,
+or `COLUMNS` when stdout is not a terminal, between 60 and 120 columns. Flags: `--session-arn`
+(optional; without it the session, the connection to the device and the adb versions are not
+checked), `--port` and `--listen-addr` (the address the daemon would bind, same defaults as
+`bridge start`), `--verbose` (one line per check, with its id, instead of the table) and the
+global `--debug`. Run the doctor from the shell that will run `bridge start`: the daemon inherits
+that shell's environment. A running daemon is reported in the Local machine row, not changed; with
+reverse off that row is `WARN` and its fix restarts the daemon with `--allow-adb-reverse`. That
+flag lets the device open connections to this machine, so use it only with a device you trust; a
+public physical device can run software you do not control.
+
+Side effects:
+
+- creates the client's working directory if absent, as every command does, and forgets a daemon
+  that no longer runs, as the `bridge` commands do;
+- binds and frees the listen address when no daemon holds it, and one port on `127.0.0.1` for
+  `adb forward`;
+- asks whatever holds the listen address for its adb version;
+- makes one `GetRemoteAccessSession` call;
+- opens one short connection to the device per Network and Dependencies check; the session and
+  reconnect checks leave one adb session open on the device side until Device Farm ends it;
+- runs `adb version` on each adb it finds on PATH, in `ANDROID_HOME` or `ANDROID_SDK_ROOT`, or in
+  Android Studio's default SDK location; none starts an adb server.
+
+`doctor` starts no daemon and installs no forward or reverse rule. Each check has its own timeout;
+a run in which every check times out ends in under two minutes.
+
 ## Credentials and permissions
 
 The daemon makes the AWS calls, not the command you type, so the shell where you start the daemon (`bridge
@@ -229,10 +329,10 @@ Run `devicefarm-connect <command> --help` to see the flags of a command.
 |---|---|---|
 | `--debug` | every command | Debug-level logs. The default is info. |
 | `--version`, `-v` | `devicefarm-connect` alone | Prints the release version. |
-| `--port` | `bridge start` | The local TCP port for adb clients. Default `5037`, adb's own default. |
+| `--port` | `bridge start`, `doctor` | The local TCP port for adb clients. Default `5037`, adb's own default. |
 | `--log` | `bridge start` | The daemon log file. Default `devicefarm-connect.log` in the runtime directory. |
 | `--allow-adb-reverse` | `bridge start` | Turns on `adb reverse`. Off by default. |
-| `--session-arn` | `bridge start`, `device add`, `device remove` | The remote access session ARN. `device remove` without it detaches the attached device. |
+| `--session-arn` | `bridge start`, `device add`, `device remove`, `doctor` | The remote access session ARN. `device remove` without it detaches the attached device. |
 
 - The runtime directory is `$XDG_RUNTIME_DIR/devicefarm-connect`, or a per-user directory under the system
   temp directory when that variable is not set. The log, pid file and control socket live there.
@@ -240,6 +340,7 @@ Run `devicefarm-connect <command> --help` to see the flags of a command.
   listener flags, so to pick a port or turn reverse on, run `bridge start` first. Against a running daemon,
   `bridge start` attaches the device you name or prints the daemon's status, and ignores its other flags. To
   change a flag, run `bridge stop` first.
+- `doctor` takes `--port` and `--listen-addr` too: it checks the address the daemon would bind.
 - Without `--allow-adb-reverse`, `adb reverse` prints:
 
   ```
