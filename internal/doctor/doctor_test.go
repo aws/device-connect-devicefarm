@@ -183,7 +183,7 @@ const (
 	fixtureReverseOffHint     = "the daemon runs with adb reverse off, so every 'adb reverse' fails. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 40775 --allow-adb-reverse --session-arn " + fixtureSessionArn + "' to start it again with reverse on. '--allow-adb-reverse' lets the device open connections to this machine, so use it only with a device you trust; a public physical device can run software you do not control."
 	fixtureVersionSkewHint    = "the local adb is 1.0.41 and the remote adb server is 1.0.39, so the first adb command would stop that server. Install platform-tools whose adb is 1.0.39, or put such an adb first on PATH, then rerun 'devicefarm-connect doctor --session-arn " + fixtureSessionArn + " --port 37537'. Until then every adb command through the daemon ends the remote adb server."
 	fixtureCredentialsSummary = `this shell has no usable AWS credentials: failed to refresh cached credentials, no EC2 IMDS role found, operation error ec2imds: GetMetadata, access disabled to EC2 IMDS via client option, or "AWS_EC2_METADATA_DISABLED" environment variable`
-	fixtureCredentialsHint    = "the AWS config did not load or its credential chain resolved nothing, so every Device Farm call fails. Set 'AWS_PROFILE' to a profile with Device Farm access, run 'aws sso login --profile <name>' for a profile that uses SSO, or export 'AWS_ACCESS_KEY_ID' and 'AWS_SECRET_ACCESS_KEY'. On a machine that is not an AWS instance, also export 'AWS_EC2_METADATA_DISABLED=true' so an empty chain fails at once instead of waiting on the instance metadata service."
+	fixtureCredentialsHint    = "the AWS config did not load or its credential chain resolved nothing, so every Device Farm call fails. Set 'AWS_PROFILE' to a profile with Device Farm access, run 'aws sso login --profile <name>' for a profile that uses SSO, or export 'AWS_ACCESS_KEY_ID' and 'AWS_SECRET_ACCESS_KEY'. For more information, see https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-authentication.html"
 )
 
 // tableChecks is a check table shaped like the doctor command's, with canned results. A check
@@ -361,9 +361,8 @@ What to do
    resolved nothing, so every Device Farm call fails. Set 'AWS_PROFILE' to a
    profile with Device Farm access, run 'aws sso login --profile <name>' for a
    profile that uses SSO, or export 'AWS_ACCESS_KEY_ID' and
-   'AWS_SECRET_ACCESS_KEY'. On a machine that is not an AWS instance, also
-   export 'AWS_EC2_METADATA_DISABLED=true' so an empty chain fails at once
-   instead of waiting on the instance metadata service.
+   'AWS_SECRET_ACCESS_KEY'. For more information, see
+   https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-authentication.html
 doctor: 1 of 4 categories passed, 1 failed, 2 not checked
 `},
 	}
