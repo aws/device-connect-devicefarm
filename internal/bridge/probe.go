@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"regexp"
 	"time"
+
+	"github.com/aws/device-connect-devicefarm/internal/adbwire"
 )
 
 // One-shot exchanges on a fresh websocket: the diagnostic probes and the session opener they
@@ -115,6 +117,37 @@ func (dialer *WSDialer) ProbeSession(ctx context.Context, endpoint string) (stri
 	}
 	ws.Close()
 	return sessionUUID, nil
+}
+
+// ProbeAdbServerVersion asks the remote adb server for its protocol version on a session of its
+// own: an adb server closes the connection after a host service, so no probe can share it.
+func (dialer *WSDialer) ProbeAdbServerVersion(ctx context.Context, endpoint string) (int, error) {
+	ws, err := dialer.Dial(ctx, endpoint, RouteAdb)
+	if err != nil {
+		return 0, err
+	}
+	defer ws.Close()
+	defer closeOnCancel(ctx, ws)()
+	within := dialer.replyWithin(ctx)
+	if err := ws.Send([]byte(adbwire.HostVersionRequest)); err != nil {
+		return 0, fmt.Errorf("send the host:version request: %w", err)
+	}
+	if _, err := readNewSession(ws, within); err != nil {
+		return 0, err
+	}
+	leftover, err := readStatusWord(ws, within, nil)
+	if err != nil {
+		var refusal *statusFailure
+		if errors.As(err, &refusal) {
+			return 0, fmt.Errorf("the device adb server refused host:version: %s", refusal.reason)
+		}
+		return 0, fmt.Errorf("read host:version's status word: %w", err)
+	}
+	reply, err := fillTo(ws, within, leftover, adbwire.HostVersionReplyLen)
+	if err != nil {
+		return 0, fmt.Errorf("read the host:version reply: %w", err)
+	}
+	return adbwire.ParseHostVersionReply(reply)
 }
 
 // ProbeReattach dials RouteAdb with sessionUUID as the whole first frame and requires REATTACH

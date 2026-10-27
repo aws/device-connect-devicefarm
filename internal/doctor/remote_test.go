@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -307,8 +310,9 @@ func TestGivenTheDeviceRefusesTheSelectWhenTheSessionIsProbedThenTheRowFailsWith
 
 func TestGivenAPresignedEndpointNobodyAnswersWhenEachRelayRowRunsThenTheRowCarriesNoCredential(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", "http://proxy.example:3128")
+	isolateLocalAdb(t) // no adb: the version row needs no local step to fail on the probe
 	dialer := bridge.NewWSDialer(time.Second)
-	for _, id := range []string{checkRelaySession, checkReattach, checkReverse} {
+	for _, id := range []string{checkRelaySession, checkReattach, checkReverse, checkAdbVersion} {
 		t.Run(id, func(t *testing.T) {
 			inputs, state := relayInputs(testsupport.PresignedUnreachableEndpoint, dialer)
 			state.sessionUUID = "11111111-2222-4333-8444-000000000001"
@@ -320,10 +324,13 @@ func TestGivenAPresignedEndpointNobodyAnswersWhenEachRelayRowRunsThenTheRowCarri
 			for _, marker := range []string{"X-Amz-", testsupport.SignatureMarker, testsupport.SecurityTokenMarker} {
 				assert.NotContains(t, result.Summary+result.Hint, marker)
 			}
-			assert.Contains(t, result.Hint, doctorRerun(inputs), "the hint quotes the rerun for this session")
-			if id == checkReattach {
+			switch id {
+			case checkAdbVersion:
+				assert.Equal(t, versionProbeHint, result.Hint, "the version row's hint quotes no rerun and names no proxy")
+			case checkReattach:
 				assert.Equal(t, reattachHint(inputs), result.Hint)
-			} else {
+			default:
+				assert.Contains(t, result.Hint, doctorRerun(inputs), "the hint quotes the rerun for this session")
 				assert.Contains(t, result.Hint, proxyIgnoredNote, "a set proxy is named as ignored")
 			}
 		})
@@ -354,20 +361,32 @@ func TestGivenAProbedSessionWhenReattachedThenTheRowNamesTheResumedSession(t *te
 
 func TestGivenASilentRelayWhenTheRowDeadlineNearsThenTheProbeGivesUpFirstAndKeepsTheHint(t *testing.T) {
 	noProxy(t)
+	isolateLocalAdb(t) // no adb, so the version row's local step is instant
 	parked := make(chan struct{})
 	t.Cleanup(func() { close(parked) })
 	silent := testsupport.NewMockWSS(t, func(*websocket.Conn) { <-parked })
-	inputs, state := relayInputs(silent, bridge.NewWSDialer(time.Second).TrustRoots(testsupport.TestRoots()))
-	ctx, cancel := context.WithTimeout(context.Background(), probeMargin+500*time.Millisecond)
-	defer cancel()
+	rows := []struct {
+		id      string
+		hintFor func(Inputs) string
+	}{
+		{checkRelaySession, relayHint},
+		{checkAdbVersion, func(Inputs) string { return versionProbeHint }},
+	}
+	for _, row := range rows {
+		t.Run(row.id, func(t *testing.T) {
+			inputs, state := relayInputs(silent, bridge.NewWSDialer(time.Second).TrustRoots(testsupport.TestRoots()))
+			ctx, cancel := context.WithTimeout(context.Background(), probeMargin+500*time.Millisecond)
+			defer cancel()
 
-	result := checkByID(t, remoteChecks(withDefaults(inputs), state), checkRelaySession).Run(ctx)
+			result := checkByID(t, remoteChecks(withDefaults(inputs), state), row.id).Run(ctx)
 
-	assert.NoError(t, ctx.Err(), "the probe must return before the row's deadline")
-	assert.Equal(t, Fail, result.Status)
-	// The probe's own error, whichever of its read bound or its socket close fired first.
-	assert.NotContains(t, result.Summary, "timed out after", "the runner's timeout text must not replace the probe's error")
-	assert.Equal(t, relayHint(inputs), result.Hint, "the row keeps its hint")
+			assert.NoError(t, ctx.Err(), "the probe must return before the row's deadline")
+			assert.Equal(t, Fail, result.Status)
+			// The probe's own error, whichever of its read bound or its socket close fired first.
+			assert.NotContains(t, result.Summary, "timed out after", "the runner's timeout text must not replace the probe's error")
+			assert.Equal(t, row.hintFor(inputs), result.Hint, "the row keeps its hint")
+		})
+	}
 }
 
 func TestGivenARelayThatForgetsSessionsWhenReattachedThenTheRowFailsWithTheRerunHint(t *testing.T) {
@@ -434,6 +453,360 @@ func TestGivenTheReverseSlotWhenTheRowRunsThenTheRowFollowsWhoHoldsIt(t *testing
 				require.Eventually(t, func() bool { return reverse.NotifiersClosed() >= 1 }, time.Second, 10*time.Millisecond,
 					"the probe must release the slot")
 			}
+		})
+	}
+}
+
+const (
+	adbOutput39 = "Android Debug Bridge version 1.0.39\nRevision 3db08f2c6889-android\n"
+	adbOutput40 = "Android Debug Bridge version 1.0.40\n"
+	adbOutput41 = "Android Debug Bridge version 1.0.41\nVersion 35.0.2-12147458\n"
+	// Hint fragments the tests share.
+	skewConsequence  = ". Until then every adb command through the daemon ends the remote adb server."
+	noAdbConsequence = ". A local adb on another version stops the remote adb server with its first command."
+	noAdbCause       = "adb was not found on PATH or in an Android SDK ('ANDROID_HOME', 'ANDROID_SDK_ROOT' or Android Studio's " +
+		"default SDK location), so the doctor could not check that its version matches the remote adb server (1.0.41)"
+	sdkManagerFix = "Update Android SDK Platform-Tools in Android Studio's SDK Manager to a release whose adb is 1.0.41, such as " +
+		"platform-tools 37"
+)
+
+// versionMock answers host:version with reply; relay.session's state is seeded.
+func versionMock(t *testing.T, reply string) (Inputs, *runState) {
+	t.Helper()
+	sessions, _, dialer := relayMock(t, testsupport.SessionMockConfig{
+		OnMessage: func(_ *testsupport.MockSession, data []byte) []byte {
+			if string(data) == "000chost:version" {
+				return []byte(reply)
+			}
+			return data
+		},
+	})
+	return relayInputs(sessions.URL, dialer)
+}
+
+func TestGivenALocalAdbOrNoneWhenTheVersionIsCheckedThenTheRowComparesItWithTheRemoteAdbServer(t *testing.T) {
+	rerun := doctorRerun(Inputs{Config: config.Default(), SessionARN: testSessionARN})
+	tests := []struct {
+		name       string
+		adbOutput  string
+		noAdb      bool
+		hostReply  string
+		wantStatus Status
+		wantText   string
+		wantHint   string
+	}{
+		{name: "matching versions", adbOutput: adbOutput41, hostReply: "OKAY00040029",
+			wantStatus: Pass, wantText: "local adb 1.0.41 matches the remote adb server"},
+		{name: "an older local adb", adbOutput: adbOutput39, hostReply: "OKAY00040029",
+			wantStatus: Fail, wantText: "local adb 1.0.39 differs from the remote adb server (1.0.41); the first adb command would stop that server",
+			wantHint: "the local adb is 1.0.39 and the remote adb server is 1.0.41, so the first adb command would stop that server. " +
+				"Install platform-tools whose adb is 1.0.41, such as platform-tools 37, or put such an adb first on PATH, then rerun " + rerun + skewConsequence},
+		{name: "a newer local adb than a host with no known platform-tools", adbOutput: adbOutput41, hostReply: "OKAY00040027",
+			wantStatus: Fail, wantText: "local adb 1.0.41 differs from the remote adb server (1.0.39); the first adb command would stop that server",
+			wantHint: "the local adb is 1.0.41 and the remote adb server is 1.0.39, so the first adb command would stop that server. " +
+				"Install platform-tools whose adb is 1.0.39, or put such an adb first on PATH, then rerun " + rerun + skewConsequence},
+		{name: "no adb anywhere", noAdb: true, hostReply: "OKAY00040029", wantStatus: Warn,
+			wantText: "no adb found on PATH or in an Android SDK, so its version was not checked against the remote adb server (1.0.41)",
+			wantHint: noAdbCause + ". Install Android platform-tools whose adb is 1.0.41, such as platform-tools 37, then add its directory " +
+				"to PATH and rerun " + rerun + noAdbConsequence},
+		{name: "no adb anywhere and a host with no known platform-tools", noAdb: true, hostReply: "OKAY00040027", wantStatus: Warn,
+			wantText: "no adb found on PATH or in an Android SDK, so its version was not checked against the remote adb server (1.0.39)",
+			wantHint: strings.Replace(noAdbCause, "1.0.41", "1.0.39", 1) + ". Install Android platform-tools whose adb is 1.0.39, then add " +
+				"its directory to PATH and rerun " + rerun + noAdbConsequence},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.noAdb {
+				isolateLocalAdb(t)
+			} else {
+				fakeAdbOnPath(t, fakeAdbSpec{Output: tc.adbOutput})
+			}
+			inputs, state := versionMock(t, tc.hostReply)
+
+			result := runRemote(t, inputs, state, checkAdbVersion)
+
+			assert.Equal(t, Result{Status: tc.wantStatus, Summary: tc.wantText, Hint: tc.wantHint}, result)
+		})
+	}
+}
+
+func TestGivenSdkAdbsBesideThePathAdbWhenTheVersionIsCheckedThenEveryFoundAdbCounts(t *testing.T) {
+	// want's texts take %[1]s the PATH adb's path, %[2]s the SDK adb's path, %[3]s the quoted rerun.
+	const studioClause = "; Android Studio runs the SDK's adb at '%[2]s', so a mismatch there stops the remote adb server when Studio starts it"
+	const thatAdbConsequence = ". Until then every command from that adb through the daemon ends the remote adb server."
+	pathAndSdk := func(pathOutput, sdkOutput string) func(t *testing.T) (string, string) {
+		return func(t *testing.T) (string, string) {
+			return fakeAdbOnPath(t, fakeAdbSpec{Output: pathOutput}), installFakeAdb(t, sdkPlatformTools(t, "ANDROID_HOME"), fakeAdbSpec{Output: sdkOutput})
+		}
+	}
+	sdkOnly := func(variable, sdkOutput string) func(t *testing.T) (string, string) {
+		return func(t *testing.T) (string, string) {
+			isolateLocalAdb(t)
+			return "", installFakeAdb(t, sdkPlatformTools(t, variable), fakeAdbSpec{Output: sdkOutput})
+		}
+	}
+	defaultPlatformTools := func() string { return filepath.Join(defaultSDKRoot(runtime.GOOS), "platform-tools") }
+	tests := []struct {
+		name  string
+		setup func(t *testing.T) (pathAdb, sdkAdb string)
+		want  Result
+	}{
+		{name: "PATH and ANDROID_HOME agree", setup: pathAndSdk(adbOutput41, adbOutput41),
+			want: Result{Status: Pass, Summary: "local adb 1.0.41 (2 found) matches the remote adb server"}},
+		{name: "the SDK adb differs while the PATH adb matches", setup: pathAndSdk(adbOutput41, adbOutput39),
+			want: Result{Status: Fail,
+				Summary: "local adb 1.0.39 at '%[2]s' differs from the remote adb server (1.0.41); the first command from that adb would stop that server",
+				Hint: "Android Studio's adb at '%[2]s' is 1.0.39 and the remote adb server is 1.0.41, so the first command from that adb would stop " +
+					"that server. " + sdkManagerFix + ", then rerun %[3]s" + thatAdbConsequence}},
+		{name: "no PATH adb and the ANDROID_SDK_ROOT adb matches", setup: sdkOnly("ANDROID_SDK_ROOT", adbOutput41),
+			want: Result{Status: Pass, Summary: "local adb 1.0.41 matches the remote adb server"}},
+		{name: "no PATH adb and the SDK adb differs", setup: sdkOnly("ANDROID_HOME", adbOutput39),
+			want: Result{Status: Fail,
+				Summary: "local adb 1.0.39 at '%[2]s' differs from the remote adb server (1.0.41); the first command from that adb would stop that server",
+				Hint: "Android Studio's adb at '%[2]s' is 1.0.39 and the remote adb server is 1.0.41, so the first command from that adb would stop " +
+					"that server. " + sdkManagerFix + ", then rerun %[3]s" + thatAdbConsequence}},
+		{name: "the PATH adb and the SDK adb both differ", setup: pathAndSdk(adbOutput39, adbOutput40),
+			want: Result{Status: Fail,
+				Summary: "local adb 1.0.39 at '%[1]s' and local adb 1.0.40 at '%[2]s' differ from the remote adb server (1.0.41); the first command " +
+					"from any of them would stop that server",
+				Hint: "the local adb at '%[1]s' is 1.0.39, Android Studio's adb at '%[2]s' is 1.0.40 and the remote adb server is 1.0.41, so the " +
+					"first command from any of them would stop that server. " + sdkManagerFix + ", and put such an adb first on PATH, then rerun " +
+					"%[3]s. Until then every command from any of them through the daemon ends the remote adb server."}},
+		{name: "one binary reached through PATH and ANDROID_HOME counts once",
+			setup: func(t *testing.T) (string, string) {
+				isolateLocalAdb(t)
+				platformTools := sdkPlatformTools(t, "ANDROID_HOME")
+				t.Setenv("PATH", platformTools)
+				adb := installFakeAdb(t, platformTools, fakeAdbSpec{Output: adbOutput39})
+				return adb, adb
+			},
+			want: Result{Status: Fail,
+				Summary: "local adb 1.0.39 differs from the remote adb server (1.0.41); the first adb command would stop that server",
+				Hint: "the local adb is 1.0.39 and the remote adb server is 1.0.41, so the first adb command would stop that server" + studioClause +
+					". " + sdkManagerFix + ", then rerun %[3]s" + skewConsequence}},
+		{name: "a PATH symlink to the SDK adb counts once",
+			setup: func(t *testing.T) (string, string) {
+				if runtime.GOOS == "windows" {
+					t.Skip("symlinks need a privilege on Windows")
+				}
+				isolateLocalAdb(t)
+				sdkAdb := installFakeAdb(t, sdkPlatformTools(t, "ANDROID_HOME"), fakeAdbSpec{Output: adbOutput39})
+				binDir := t.TempDir()
+				require.NoError(t, os.Symlink(sdkAdb, filepath.Join(binDir, "adb")))
+				t.Setenv("PATH", binDir)
+				return filepath.Join(binDir, "adb"), sdkAdb
+			},
+			want: Result{Status: Fail,
+				Summary: "local adb 1.0.39 differs from the remote adb server (1.0.41); the first adb command would stop that server",
+				Hint: "the local adb is 1.0.39 and the remote adb server is 1.0.41, so the first adb command would stop that server" + studioClause +
+					". " + sdkManagerFix + ", then rerun %[3]s" + skewConsequence}},
+		{name: "a broken SDK adb beside a matching PATH adb",
+			setup: func(t *testing.T) (string, string) {
+				return fakeAdbOnPath(t, fakeAdbSpec{Output: adbOutput41}), installFakeAdb(t, sdkPlatformTools(t, "ANDROID_HOME"), fakeAdbSpec{ExitCode: 3})
+			},
+			want: Result{Status: Warn, Summary: "'%[2]s version' failed: exit status 3",
+				Hint: strings.NewReplacer("%[1]s", "'%[2]s version'", "%[2]s", "%[3]s", "%[3]d", "41").Replace(adbFailedHint)}},
+		{name: "the default SDK location when neither variable is set",
+			setup: func(t *testing.T) (string, string) {
+				isolateLocalAdb(t)
+				return "", installFakeAdb(t, defaultPlatformTools(), fakeAdbSpec{Output: adbOutput41})
+			},
+			want: Result{Status: Pass, Summary: "local adb 1.0.41 matches the remote adb server"}},
+		{name: "a PATH adb reached only through the current directory beside a matching SDK adb",
+			setup: func(t *testing.T) (string, string) {
+				isolateLocalAdb(t)
+				sdkAdb := installFakeAdb(t, sdkPlatformTools(t, "ANDROID_HOME"), fakeAdbSpec{Output: adbOutput41})
+				dir := t.TempDir()
+				hiddenAdb := installFakeAdb(t, dir, fakeAdbSpec{Output: adbOutput39})
+				t.Chdir(dir)
+				t.Setenv("PATH", ".")
+				return hiddenAdb, sdkAdb
+			},
+			want: Result{Status: Warn,
+				Summary: "local adb 1.0.41 matches the remote adb server, but an adb at '%[1]s' reached only through the current directory or a " +
+					"relative PATH entry was not checked",
+				Hint: "an adb exists at '%[1]s', reached only through the current directory or a relative PATH entry, so it was not run and its " +
+					"version is unknown. Add that directory to PATH by its absolute path if you meant that adb, then rerun %[3]s" + noAdbConsequence}},
+		{name: "the adb reached only through the current directory is the SDK adb that ran",
+			setup: func(t *testing.T) (string, string) {
+				isolateLocalAdb(t)
+				platformTools := sdkPlatformTools(t, "ANDROID_HOME")
+				adb := installFakeAdb(t, platformTools, fakeAdbSpec{Output: adbOutput41})
+				t.Chdir(platformTools)
+				t.Setenv("PATH", ".")
+				return adb, adb
+			},
+			want: Result{Status: Pass, Summary: "local adb 1.0.41 matches the remote adb server"}},
+		{name: "ANDROID_HOME hides the default SDK location",
+			setup: func(t *testing.T) (string, string) {
+				pathAdb := fakeAdbOnPath(t, fakeAdbSpec{Output: adbOutput41})
+				installFakeAdb(t, defaultPlatformTools(), fakeAdbSpec{Output: adbOutput39})
+				return pathAdb, sdkPlatformTools(t, "ANDROID_HOME") // an SDK with no platform-tools
+			},
+			want: Result{Status: Pass, Summary: "local adb 1.0.41 matches the remote adb server"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pathAdb, sdkAdb := tc.setup(t)
+			inputs, state := versionMock(t, "OKAY00040029")
+
+			result := runRemote(t, inputs, state, checkAdbVersion)
+
+			fill := func(text string) string {
+				if !strings.Contains(text, "%") {
+					return text
+				}
+				return fmt.Sprintf(text, pathAdb, sdkAdb, doctorRerun(inputs))
+			}
+			assert.Equal(t, Result{Status: tc.want.Status, Summary: fill(tc.want.Summary), Hint: fill(tc.want.Hint)}, result)
+		})
+	}
+}
+
+func TestGivenHangingAdbsOnPathAndInTheSdkWhenTheVersionIsCheckedThenOneBoundCoversBoth(t *testing.T) {
+	pathAdb := fakeAdbOnPath(t, fakeAdbSpec{Output: adbOutput41, HangFor: time.Minute})
+	sdkAdb := installFakeAdb(t, sdkPlatformTools(t, "ANDROID_HOME"), fakeAdbSpec{Output: adbOutput41, HangFor: time.Minute})
+	inputs, state := versionMock(t, "OKAY00040029")
+	started := time.Now()
+
+	result := runRemote(t, inputs, state, checkAdbVersion)
+
+	assert.Less(t, time.Since(started), adbVersionTimeout+pipeDrainDelay+2*time.Second, "both adbs run under the one bound")
+	assert.Equal(t, Result{Status: Warn,
+		Summary: "'" + pathAdb + " version' did not finish in 5s; '" + sdkAdb + " version' did not finish in 5s",
+		Hint:    fmt.Sprintf(adbFailedHint, "'"+pathAdb+" version'", doctorRerun(inputs), 41)}, result)
+}
+
+func TestGivenTheSdkVariablesWhenCandidatesAreListedThenTheOsDefaultFillsInOnlyWhenBothAreUnset(t *testing.T) {
+	home, local, sdkHome, sdkRoot := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	tests := []struct {
+		name string
+		goos string
+		env  map[string]string
+		want []string
+	}{
+		{name: "Linux default", goos: "linux", want: []string{filepath.Join(home, "Android", "Sdk", "platform-tools", "adb")}},
+		{name: "macOS default", goos: "darwin", want: []string{filepath.Join(home, "Library", "Android", "sdk", "platform-tools", "adb")}},
+		{name: "Windows default", goos: "windows", want: []string{filepath.Join(local, "Android", "Sdk", "platform-tools", "adb.exe")}},
+		{name: "Windows without LOCALAPPDATA", goos: "windows", env: map[string]string{"LOCALAPPDATA": ""}, want: nil},
+		{name: "Linux without a home", goos: "linux", env: map[string]string{"HOME": "", "USERPROFILE": ""}, want: nil},
+		{name: "ANDROID_HOME alone", goos: "linux", env: map[string]string{"ANDROID_HOME": sdkHome},
+			want: []string{filepath.Join(sdkHome, "platform-tools", "adb")}},
+		{name: "both variables, in order", goos: "windows", env: map[string]string{"ANDROID_HOME": sdkHome, "ANDROID_SDK_ROOT": sdkRoot},
+			want: []string{filepath.Join(sdkHome, "platform-tools", "adb.exe"), filepath.Join(sdkRoot, "platform-tools", "adb.exe")}},
+		{name: "a relative root is skipped and hides the default", goos: "linux", env: map[string]string{"ANDROID_SDK_ROOT": "sdk"}, want: nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// HOME serves Linux and macOS, USERPROFILE a Windows host's os.UserHomeDir.
+			for variable, value := range map[string]string{"HOME": home, "USERPROFILE": home, "LOCALAPPDATA": local, "ANDROID_HOME": "", "ANDROID_SDK_ROOT": ""} {
+				t.Setenv(variable, value)
+			}
+			for variable, value := range tc.env {
+				t.Setenv(variable, value)
+			}
+
+			assert.Equal(t, tc.want, sdkAdbCandidates(tc.goos))
+		})
+	}
+}
+
+func TestGivenAnAdbInARelativePathEntryWhenTheVersionIsCheckedThenTheRowWarnsWithoutRunningIt(t *testing.T) {
+	isolateLocalAdb(t)
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "ran")
+	adb := installFakeAdb(t, dir, fakeAdbSpec{Output: adbOutput39, Marker: marker})
+	t.Chdir(dir)
+	t.Setenv("PATH", ".")
+	inputs, state := versionMock(t, "OKAY00040029")
+
+	result := runRemote(t, inputs, state, checkAdbVersion)
+
+	assert.Equal(t, Result{Status: Warn,
+		Summary: "no adb found on PATH or in an Android SDK, so its version was not checked against the remote adb server (1.0.41)",
+		Hint: noAdbCause + "; an adb exists at '" + adb + "', reached only through the current directory or a relative PATH entry, so it was " +
+			"not run. Add that directory to PATH by its absolute path if you meant that adb, or install Android platform-tools whose adb is " +
+			"1.0.41, such as platform-tools 37, then add its directory to PATH and rerun " + doctorRerun(inputs) + noAdbConsequence}, result)
+	assert.NoFileExists(t, marker, "a binary found through the current dir must not run")
+}
+
+func TestGivenARemoteAdbServerThatRefusesHostVersionWhenTheVersionIsCheckedThenTheRowFailsWithTheSupportHint(t *testing.T) {
+	isolateLocalAdb(t) // no adb: the verdict is the probe's alone
+	inputs, state := versionMock(t, "FAIL000edevice offline")
+
+	result := runRemote(t, inputs, state, checkAdbVersion)
+
+	assert.Equal(t, Result{Status: Fail,
+		Summary: "the remote adb server did not answer its version request: the device adb server refused host:version: device offline",
+		Hint:    versionProbeHint}, result)
+}
+
+func TestGivenAnAdbThatLeavesAChildHoldingItsPipesWhenTheVersionIsCheckedThenItsOutputStillCountsInTime(t *testing.T) {
+	// The child inherits stdout and outlives adb; only the pipe-drain bound ends the wait.
+	fakeAdbOnPath(t, fakeAdbSpec{Output: adbOutput41, Child: true})
+	inputs, state := versionMock(t, "OKAY00040029")
+	started := time.Now()
+
+	result := runRemote(t, inputs, state, checkAdbVersion)
+
+	assert.Less(t, time.Since(started), pipeDrainDelay+2*time.Second, "the drain bound, not the child, ends the wait")
+	assert.Equal(t, Result{Status: Pass, Summary: "local adb 1.0.41 matches the remote adb server"}, result)
+}
+
+func TestGivenABrokenAdbOnPathWhenTheVersionIsCheckedThenTheRowWarnsNamingIt(t *testing.T) {
+	tests := []struct {
+		name        string
+		spec        fakeAdbSpec
+		wantSummary string // the fake's path fills the %s
+		wantHint    string
+	}{
+		{name: "adb exits non-zero", spec: fakeAdbSpec{ExitCode: 3}, wantSummary: "'%s version' failed: exit status 3", wantHint: adbFailedHint},
+		{name: "adb prints no version line", spec: fakeAdbSpec{Output: "hello\n"},
+			wantSummary: `'%s version' printed no 'version 1.0.N' line: "hello"`, wantHint: adbNoVersionHint},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			adb := fakeAdbOnPath(t, tc.spec)
+			inputs, state := versionMock(t, "OKAY00040029")
+
+			result := runRemote(t, inputs, state, checkAdbVersion)
+
+			assert.Equal(t, Result{Status: Warn, Summary: fmt.Sprintf(tc.wantSummary, adb),
+				Hint: fmt.Sprintf(tc.wantHint, "'"+adb+" version'", doctorRerun(inputs), 41)}, result)
+		})
+	}
+}
+
+func TestGivenAnSdkAdbThatCannotStartWhenTheVersionIsCheckedThenTheRowWarnsWithTheLaunchError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the launch error texts are Unix's")
+	}
+	tests := []struct {
+		name      string
+		sdkRoot   func(t *testing.T) string
+		mode      os.FileMode
+		wantError string
+	}{
+		{name: "no execute permission", sdkRoot: func(t *testing.T) string { return t.TempDir() }, mode: 0o644, wantError: "permission denied"},
+		{name: "an empty file in a directory named with a newline", sdkRoot: func(t *testing.T) string { return filepath.Join(t.TempDir(), "sdk\nroot") },
+			mode: 0o755, wantError: "exec format error"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeAdbOnPath(t, fakeAdbSpec{Output: adbOutput41})
+			platformTools := filepath.Join(tc.sdkRoot(t), "platform-tools")
+			require.NoError(t, os.MkdirAll(platformTools, 0o755))
+			t.Setenv("ANDROID_HOME", filepath.Dir(platformTools))
+			sdkAdb := filepath.Join(platformTools, "adb")
+			require.NoError(t, os.WriteFile(sdkAdb, nil, tc.mode))
+			inputs, state := versionMock(t, "OKAY00040029")
+
+			result := runRemote(t, inputs, state, checkAdbVersion)
+
+			shown := safeValue(sdkAdb)
+			assert.Equal(t, Result{Status: Warn, Summary: fmt.Sprintf("'%[1]s version' failed: fork/exec %[1]s: %[2]s", shown, tc.wantError),
+				Hint: fmt.Sprintf(adbFailedHint, "'"+shown+" version'", doctorRerun(inputs), 41)}, result)
+			assert.NotContains(t, result.Summary+result.Hint, "\n", "a newline in the path is shown escaped")
 		})
 	}
 }

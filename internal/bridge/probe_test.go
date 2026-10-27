@@ -44,6 +44,63 @@ var eachProbe = []struct {
 	{"notifier", func(ctx context.Context, dialer *WSDialer, endpoint string) error {
 		return dialer.ProbeNotifier(ctx, endpoint)
 	}, [][]byte{testsupport.FrameEmptyArm("notifierReady")}},
+	{"adb server version", func(ctx context.Context, dialer *WSDialer, endpoint string) error {
+		_, err := dialer.ProbeAdbServerVersion(ctx, endpoint)
+		return err
+	}, [][]byte{testsupport.FrameNewSession(testSessionUUID), []byte("OKAY00040029")}},
+}
+
+// versionReplyMock answers host:version with reply on a fresh session; any other request echoes.
+func versionReplyMock(t *testing.T, reply string) *testsupport.SessionMockWSS {
+	t.Helper()
+	return testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{
+		OnMessage: func(_ *testsupport.MockSession, data []byte) []byte {
+			if string(data) == "000chost:version" {
+				return []byte(reply)
+			}
+			return data
+		},
+	})
+}
+
+func TestGivenAnAdbServerAnsweringHostVersionWhenProbedThenTheDecimalVersionIsReturned(t *testing.T) {
+	mock := versionReplyMock(t, "OKAY00040029")
+
+	version, err := newTestDialer(testWait).ProbeAdbServerVersion(boundedContext(t), mock.URL)
+
+	require.NoError(t, err)
+	assert.Equal(t, 41, version, "0029 is adb 1.0.41")
+	require.Len(t, mock.Sessions(), 1, "the probe mints its own session")
+	assert.Equal(t, "000chost:version", string(soleSessionInbound(mock)))
+}
+
+func TestGivenABadHostVersionAnswerWhenProbedThenTheErrorNamesIt(t *testing.T) {
+	cases := []struct {
+		name      string
+		endpoint  string
+		wantError string
+	}{
+		{"a refused session", probeReplyServer(t, testsupport.FrameError("no pool slot")),
+			"the remote access service refused the session: no pool slot"},
+		{"a refused host service", versionReplyMock(t, "FAIL000edevice offline").URL,
+			"the device adb server refused host:version: device offline"},
+		{"a length that is not 0004", versionReplyMock(t, "OKAY00080029abcd").URL,
+			`host:version reply has length "0008", not 0004`},
+		{"digits that are not hex", versionReplyMock(t, "OKAY0004zz29").URL,
+			`host:version reply carries "zz29", not four hex digits`},
+		{"no status word after the control frame", probeReplyServer(t, controlFrameNew()),
+			"read host:version's status word: " + errReceiveTimeout.Error()},
+		{"no reply after OKAY", probeReplyServer(t, controlFrameNew(), []byte("OKAY")),
+			"read the host:version reply: " + errReceiveTimeout.Error()},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			// No context deadline: the dial timeout alone bounds the reads, so one timer ends them.
+			_, err := newTestDialer(silentProbeTimeout).ProbeAdbServerVersion(context.Background(), testCase.endpoint)
+
+			assert.ErrorContains(t, err, testCase.wantError)
+		})
+	}
 }
 
 func TestGivenAServerThatAcksWhenEachProbeSucceedsThenTheSocketCloses(t *testing.T) {

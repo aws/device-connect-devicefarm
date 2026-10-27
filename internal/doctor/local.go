@@ -131,13 +131,6 @@ func listenConfigHint(listenAddr string) string {
 		"binds exactly that address, so point adb at the same port."
 }
 
-// hostVersionRequest asks an adb server for its protocol version, framed as adbwire.EncodeRequest
-// frames it; a test pins the two. The reply is OKAY, the length 0004 and four hex digits.
-const hostVersionRequest = "000chost:version"
-
-// versionReplyHeader starts an adb server's host:version reply; four hex digits follow.
-const versionReplyHeader = "OKAY0004"
-
 // adbServerHint stops the adb server on the probed port and starts the daemon there before adb
 // can restart its server. -P targets that port, not adb's default.
 func adbServerHint(port int) string {
@@ -380,15 +373,16 @@ func probeOccupant(address string) (version int, connected bool, adbServer bool)
 	if err = conn.SetDeadline(time.Now().Add(occupantReplyTimeout)); err != nil {
 		return 0, true, false
 	}
-	reply := make([]byte, len(versionReplyHeader)+4)
-	if _, err = conn.Write([]byte(hostVersionRequest)); err == nil {
+	const okay = "OKAY"
+	reply := make([]byte, len(okay)+adbwire.HostVersionReplyLen)
+	if _, err = conn.Write([]byte(adbwire.HostVersionRequest)); err == nil {
 		_, err = io.ReadFull(conn, reply)
 	}
-	if err != nil || string(reply[:len(versionReplyHeader)]) != versionReplyHeader {
+	if err != nil || string(reply[:len(okay)]) != okay {
 		return 0, true, false
 	}
-	parsed, err := strconv.ParseUint(string(reply[len(versionReplyHeader):]), 16, 16)
-	return int(parsed), true, err == nil
+	parsed, err := adbwire.ParseHostVersionReply(reply[len(okay):])
+	return parsed, true, err == nil
 }
 
 // closingOpener stands in for the device-stream opener: it closes every accepted connection.
