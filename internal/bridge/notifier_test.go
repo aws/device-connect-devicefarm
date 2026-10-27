@@ -135,7 +135,7 @@ func TestGivenABadHelloAnswerWhenTheNotifierIsDialedThenItFailsAndClosesTheSocke
 		wantIs error
 	}{
 		{"a refusal", [][]byte{encodeControlFrame(controlStatusError, "notifier already registered")},
-			"notifier already registered", errNotifierSlotTaken},
+			"notifier already registered", ErrNotifierSlotTaken},
 		{"a status that is not NOTIFIER_READY", [][]byte{encodeControlFrame(controlStatusPong, "")},
 			"status 0x14", nil},
 		{"no answer at all", nil, errReceiveTimeout.Error(), errReceiveTimeout},

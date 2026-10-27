@@ -73,30 +73,15 @@ func (rules *reverseRules) allowsCustomerPort(port int) bool {
 	return false
 }
 
-// killReverseRules sends the daemon's select, then `reverse:killforward-all`, on one fresh session
-// and reads the server's verdict. ctx closes the socket when it ends, which unblocks any read.
+// killReverseRules sends `reverse:killforward-all` on one fresh selected session and reads the
+// server's verdict. ctx closes the socket when it ends, which unblocks any read.
 func killReverseRules(ctx context.Context, dialer *WSDialer, endpoint string) error {
-	ws, err := dialer.Dial(ctx, endpoint, RouteAdb)
+	ws, _, leftover, err := dialer.openSelectedSession(ctx, endpoint, reverseClearTimeout)
 	if err != nil {
 		return err
 	}
 	defer ws.Close()
 	defer closeOnCancel(ctx, ws)()
-	if err := ws.Send(deviceTransportRequest); err != nil {
-		return fmt.Errorf("send the transport select: %w", err)
-	}
-	// The session control frame comes first, then the select's status word.
-	frame, err := readControlFrameWithin(ws, reverseClearTimeout)
-	if err != nil {
-		return fmt.Errorf("read the session control frame: %w", err)
-	}
-	if frame.status != controlStatusNew {
-		return fmt.Errorf("no session was minted: control status 0x%02x %s", frame.status, frame.payload)
-	}
-	leftover, err := readStatusWord(ws, reverseClearTimeout, nil)
-	if err != nil {
-		return fmt.Errorf("transport select: %w", err)
-	}
 	if err := ws.Send(reverseKillAllRequest); err != nil {
 		return fmt.Errorf("send killforward-all: %w", err)
 	}

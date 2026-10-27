@@ -46,17 +46,20 @@ func (conn *scriptedConn) SetDeadline(time.Time) error      { return nil }
 func (conn *scriptedConn) SetReadDeadline(time.Time) error  { return nil }
 func (conn *scriptedConn) SetWriteDeadline(time.Time) error { return nil }
 
-// switchReplyMock answers the daemon's canonical select with reply and echoes the rest.
+// answerSelectWith answers the daemon's canonical select with reply and echoes the rest.
+func answerSelectWith(reply string) func(*testsupport.MockSession, []byte) []byte {
+	return func(_ *testsupport.MockSession, data []byte) []byte {
+		if bytes.Equal(data, []byte(canonicalSelect)) {
+			return []byte(reply)
+		}
+		return data
+	}
+}
+
+// switchReplyMock is a session mock that answers the daemon's canonical select with reply.
 func switchReplyMock(t *testing.T, reply string) *testsupport.SessionMockWSS {
 	t.Helper()
-	return testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{
-		OnMessage: func(_ *testsupport.MockSession, data []byte) []byte {
-			if bytes.Equal(data, []byte(canonicalSelect)) {
-				return []byte(reply)
-			}
-			return data
-		},
-	})
+	return testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{OnMessage: answerSelectWith(reply)})
 }
 
 // soleSessionInbound returns the bytes the one live session received, or nil while there
