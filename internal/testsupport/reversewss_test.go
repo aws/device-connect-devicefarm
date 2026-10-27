@@ -260,3 +260,16 @@ func TestGivenAUUIDAsTheFirstFrameWhenSentOnTheReverseRouteThenTheSessionIsRefus
 
 	assertRefused(t, mock, ws, "unknown or expired session")
 }
+
+func TestGivenAHeldSlotWhenAHelloArrivesThenItIsRefusedUntilTheHoldIsReleased(t *testing.T) {
+	mock := NewReverseMockWSS(t)
+	release := mock.HoldNotifierSlot()
+	refused := dialReverse(t, mock)
+	require.NoError(t, websocket.Message.Send(refused, FrameEmptyArm(controlStatusNotifierHello)))
+	assertRefused(t, mock, refused, "notifier already registered")
+
+	release()
+	dialReadyNotifier(t, mock)
+
+	assert.Equal(t, 1, mock.NotifiersAccepted(), "the released slot takes the next hello")
+}

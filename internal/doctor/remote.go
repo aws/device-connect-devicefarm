@@ -4,19 +4,31 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
+	"github.com/aws/device-connect-devicefarm/internal/bridge"
 	"github.com/aws/device-connect-devicefarm/internal/config"
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/session"
 )
 
 const (
-	checkCredentials = "aws.credentials"
-	checkSession     = "session.resolve"
-	// remoteTimeout bounds one AWS call. Above the SDK's instance metadata timeout, so an empty
-	// chain fails with its hint, not the runner's timeout text.
+	checkCredentials  = "aws.credentials"
+	checkSession      = "session.resolve"
+	checkRelaySession = "relay.session"
+	checkReattach     = "relay.reattach"
+	checkReverse      = "relay.reverse"
+	// remoteTimeout bounds one AWS call or one websocket probe. Above the SDK's instance
+	// metadata timeout, so an empty chain fails with its hint, not the runner's timeout text.
 	remoteTimeout = 10 * time.Second
+	// reattachTimeout gives the reattach probe more room than a fresh session: the server has to
+	// find the session before it answers.
+	reattachTimeout = 15 * time.Second
+	// probeMargin is how long before the row's deadline a relay probe gives up, so a silent
+	// relay yields the probe's error and the row's hint, not the runner's timeout text.
+	probeMargin = time.Second
 )
 
 const (
@@ -31,6 +43,12 @@ const (
 	expiredCause  = "these credentials have expired, so every Device Farm call fails."
 	expiringCause = "these credentials expire soon, so a daemon started from this shell would lose the device a few minutes " +
 		"after they expire."
+	proxyIgnoredNote = "'HTTPS_PROXY' is set, but the connection to the device does not use it, so no adb traffic gets " +
+		"through when this machine reaches the internet only through that proxy."
+	reverseOnSummary   = "the running daemon has adb reverse on for this session"
+	reversePassSummary = "adb reverse is available on this session"
+	// reverseHeldSummary replaces bridge.ErrNotifierSlotTaken's text, which names the mechanism.
+	reverseHeldSummary = "another client, or an earlier run of this client, still uses adb reverse on this session"
 )
 
 // refreshCredentialsHint: the cause, then the login or the fresh keys and the daemon start that
@@ -124,13 +142,19 @@ func sessionNetworkHint(inputs Inputs) string {
 // sessionArnSkipSummary is the session row's SKIP text when no ARN was passed.
 const sessionArnSkipSummary = "pass --session-arn to check the session, the device connection and adb versions"
 
-// remoteChecks are the rows that reach AWS, in run order.
+// remoteChecks are the rows that leave this machine, in run order.
 func remoteChecks(inputs Inputs, state *runState) []Check {
 	return []Check{
 		{ID: checkCredentials, Title: "AWS credentials", Category: CategoryAWS, Timeout: remoteTimeout,
 			Run: func(ctx context.Context) Result { return checkCredentialsResolve(ctx, inputs, state) }},
 		{ID: checkSession, Title: "remote access session", Category: CategoryAWS, Needs: []string{checkCredentials}, Timeout: remoteTimeout,
 			Run: func(ctx context.Context) Result { return checkSessionRunning(ctx, inputs, state) }},
+		{ID: checkRelaySession, Title: "adb session to the device", Category: CategoryNetwork, Needs: []string{checkSession}, Timeout: remoteTimeout,
+			Run: func(ctx context.Context) Result { return checkRelaySessionOpens(ctx, inputs, state) }},
+		{ID: checkReattach, Title: "adb session reconnect", Category: CategoryNetwork, Needs: []string{checkRelaySession}, Timeout: reattachTimeout,
+			Run: func(ctx context.Context) Result { return checkReattachAcked(ctx, inputs, state) }},
+		{ID: checkReverse, Title: "adb reverse", Category: CategoryNetwork, Needs: []string{checkSession, checkDaemon}, Timeout: remoteTimeout,
+			Run: func(ctx context.Context) Result { return checkReverseNotifier(ctx, inputs, state) }},
 	}
 }
 
@@ -205,4 +229,85 @@ func sessionHint(err error, inputs Inputs) string {
 		return requestRejectedHint(inputs)
 	}
 	return sessionNetworkHint(inputs)
+}
+
+// checkRelaySessionOpens opens one adb session over the relay and selects the device transport,
+// the first exchange of every proxied connection.
+func checkRelaySessionOpens(ctx context.Context, inputs Inputs, state *runState) Result {
+	probeCtx, cancel := withProbeBudget(ctx)
+	defer cancel()
+	sessionUUID, err := inputs.Dialer.ProbeSession(probeCtx, state.endpoint)
+	if err != nil {
+		return Result{Status: Fail, Summary: "could not open an adb session to the device: " + err.Error(), Hint: relayHint(inputs)}
+	}
+	state.sessionUUID = sessionUUID
+	return Result{Status: Pass, Summary: fmt.Sprintf("adb session %s opened to the device", sessionUUID)}
+}
+
+// checkReattachAcked dials again with the probed UUID; the server must resume the session, as
+// every websocket swap needs.
+func checkReattachAcked(ctx context.Context, inputs Inputs, state *runState) Result {
+	probeCtx, cancel := withProbeBudget(ctx)
+	defer cancel()
+	if err := inputs.Dialer.ProbeReattach(probeCtx, state.endpoint, state.sessionUUID); err != nil {
+		return Result{Status: Fail, Summary: fmt.Sprintf("could not reconnect to adb session %s: %v", state.sessionUUID, err),
+			Hint: reattachHint(inputs)}
+	}
+	return Result{Status: Pass, Summary: "reconnected to adb session " + state.sessionUUID}
+}
+
+// checkReverseNotifier registers a reverse notifier and releases it. The server allows one
+// notifier per device and refuses a second hello, so a probe cannot tell the running daemon's
+// slot from another client's. With the running daemon on this session with reverse on, the row
+// passes on that setting and runs no probe.
+func checkReverseNotifier(ctx context.Context, inputs Inputs, state *runState) Result {
+	daemon, _ := state.daemon()
+	if daemon.OK && daemon.ReverseEnabled && strings.TrimSpace(daemon.ARN) == strings.TrimSpace(inputs.SessionARN) {
+		return Result{Status: Pass, Summary: reverseOnSummary}
+	}
+	probeCtx, cancel := withProbeBudget(ctx)
+	defer cancel()
+	err := inputs.Dialer.ProbeNotifier(probeCtx, state.endpoint)
+	switch {
+	case errors.Is(err, bridge.ErrNotifierSlotTaken):
+		return Result{Status: Fail, Summary: reverseHeldSummary, Hint: slotHeldHint(inputs)}
+	case err != nil:
+		return Result{Status: Fail, Summary: "adb reverse is not available on this session: " + err.Error(), Hint: relayHint(inputs)}
+	}
+	return Result{Status: Pass, Summary: reversePassSummary}
+}
+
+// withProbeBudget ends a probe probeMargin before the row's deadline. The probes bound each
+// read by the context deadline, so without the margin a silent relay and the runner's clock
+// would expire together and the row would lose its hint.
+func withProbeBudget(ctx context.Context) (context.Context, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return context.WithCancel(ctx)
+	}
+	return context.WithDeadline(ctx, deadline.Add(-probeMargin))
+}
+
+// relayHint is the one hint for a failed relay probe; the summary names the failure. With a
+// proxy set, it adds that the websocket connection ignores it.
+func relayHint(inputs Inputs) string {
+	hint := fmt.Sprintf("Device Farm or the device did not complete the adb connection, so an adb connection through the daemon "+
+		"would fail the same way. Rerun %s once; a second failure means the network path to Device Farm or the device itself "+
+		"is at fault, so check the session in the Device Farm console.", doctorRerun(inputs))
+	if os.Getenv("HTTPS_PROXY") != "" || os.Getenv("https_proxy") != "" {
+		hint += " " + proxyIgnoredNote
+	}
+	return hint
+}
+
+func reattachHint(inputs Inputs) string {
+	return fmt.Sprintf("Device Farm did not resume the adb session on a new connection, so a live adb connection would drop "+
+		"when the daemon reconnects. Rerun %s once. A second failure means Device Farm does not keep adb sessions across "+
+		"reconnects.", doctorRerun(inputs))
+}
+
+func slotHeldHint(inputs Inputs) string {
+	return fmt.Sprintf("another client still uses adb reverse on this session, so Device Farm would refuse 'adb reverse' through "+
+		"the daemon. Stop that client with '%s' on the machine where it runs, or wait for Device Farm to release it, then rerun "+
+		"%s. Device Farm lets one client at a time use adb reverse on a device.", bridgeStopCommand, doctorRerun(inputs))
 }

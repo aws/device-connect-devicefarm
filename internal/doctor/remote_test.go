@@ -11,7 +11,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/net/websocket"
 
+	"github.com/aws/device-connect-devicefarm/internal/bridge"
 	"github.com/aws/device-connect-devicefarm/internal/config"
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/session"
@@ -250,6 +252,188 @@ func TestGivenAnArnWithControlCharactersWhenAHintIsBuiltThenTheHintStaysOnOneLin
 			assert.NotContains(t, hint, "\n", "a row is one line")
 			assert.NotContains(t, hint, "\x1b", "no terminal control codes")
 			assert.Contains(t, hint, testSessionARN+`\n[PASS] forged: injected row\x1b[0m`, "the ARN is shown escaped, not dropped")
+		})
+	}
+}
+
+// noProxy clears the proxy variables relayHint reads, so the host's own setting cannot leak in.
+func noProxy(t *testing.T) {
+	t.Helper()
+	t.Setenv("HTTPS_PROXY", "")
+	t.Setenv("https_proxy", "")
+}
+
+// relayMock serves both routes under cfg, with a dialer that trusts its CA.
+func relayMock(t *testing.T, cfg testsupport.SessionMockConfig) (*testsupport.SessionMockWSS, *testsupport.ReverseMockWSS, *bridge.WSDialer) {
+	t.Helper()
+	noProxy(t)
+	sessions, reverse := testsupport.NewServerMockWSS(t, cfg)
+	return sessions, reverse, bridge.NewWSDialer(time.Second).TrustRoots(testsupport.TestRoots())
+}
+
+// answeringAdb makes the session side answer every adb request with reply.
+func answeringAdb(reply string) testsupport.SessionMockConfig {
+	return testsupport.SessionMockConfig{OnMessage: func(*testsupport.MockSession, []byte) []byte { return []byte(reply) }}
+}
+
+// relayInputs seeds the run state as if session.resolve passed.
+func relayInputs(endpoint string, dialer *bridge.WSDialer) (Inputs, *runState) {
+	return Inputs{Config: config.Default(), SessionARN: testSessionARN, Dialer: dialer}, &runState{endpoint: endpoint}
+}
+
+func TestGivenARelayThatAcceptsTheSelectWhenTheSessionIsProbedThenTheRowNamesTheMintedSession(t *testing.T) {
+	sessions, _, dialer := relayMock(t, answeringAdb("OKAY"))
+	inputs, state := relayInputs(sessions.URL, dialer)
+
+	result := runRemote(t, inputs, state, checkRelaySession)
+
+	require.Equal(t, Pass, result.Status, result.Summary)
+	require.Len(t, sessions.Sessions(), 1)
+	assert.Equal(t, sessions.Sessions()[0].UUID, state.sessionUUID, "the minted session is kept for the reattach row")
+	assert.Equal(t, fmt.Sprintf("adb session %s opened to the device", state.sessionUUID), result.Summary)
+}
+
+func TestGivenTheDeviceRefusesTheSelectWhenTheSessionIsProbedThenTheRowFailsWithTheRelayHint(t *testing.T) {
+	sessions, _, dialer := relayMock(t, answeringAdb("FAIL000edevice offline"))
+	inputs, state := relayInputs(sessions.URL, dialer)
+
+	result := runRemote(t, inputs, state, checkRelaySession)
+
+	assert.Equal(t, Result{Status: Fail,
+		Summary: "could not open an adb session to the device: the device adb server refused the transport select: device offline",
+		Hint:    relayHint(inputs)}, result)
+	assert.Empty(t, state.sessionUUID)
+}
+
+func TestGivenAPresignedEndpointNobodyAnswersWhenEachRelayRowRunsThenTheRowCarriesNoCredential(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "http://proxy.example:3128")
+	dialer := bridge.NewWSDialer(time.Second)
+	for _, id := range []string{checkRelaySession, checkReattach, checkReverse} {
+		t.Run(id, func(t *testing.T) {
+			inputs, state := relayInputs(testsupport.PresignedUnreachableEndpoint, dialer)
+			state.sessionUUID = "11111111-2222-4333-8444-000000000001"
+
+			result := runRemote(t, inputs, state, id)
+
+			assert.Equal(t, Fail, result.Status)
+			assert.Contains(t, result.Summary, testsupport.ScrubbedDialText)
+			for _, marker := range []string{"X-Amz-", testsupport.SignatureMarker, testsupport.SecurityTokenMarker} {
+				assert.NotContains(t, result.Summary+result.Hint, marker)
+			}
+			assert.Contains(t, result.Hint, doctorRerun(inputs), "the hint quotes the rerun for this session")
+			if id == checkReattach {
+				assert.Equal(t, reattachHint(inputs), result.Hint)
+			} else {
+				assert.Contains(t, result.Hint, proxyIgnoredNote, "a set proxy is named as ignored")
+			}
+		})
+	}
+}
+
+func TestGivenNoProxyWhenTheRelayDialFailsThenTheHintCarriesNoProxyNote(t *testing.T) {
+	noProxy(t)
+	inputs, state := relayInputs(testsupport.PresignedUnreachableEndpoint, bridge.NewWSDialer(time.Second))
+
+	result := runRemote(t, inputs, state, checkRelaySession)
+
+	assert.Equal(t, Fail, result.Status)
+	assert.Equal(t, relayHint(inputs), result.Hint)
+	assert.NotContains(t, result.Hint, proxyIgnoredNote)
+}
+
+func TestGivenAProbedSessionWhenReattachedThenTheRowNamesTheResumedSession(t *testing.T) {
+	sessions, _, dialer := relayMock(t, answeringAdb("OKAY"))
+	inputs, state := relayInputs(sessions.URL, dialer)
+	require.Equal(t, Pass, runRemote(t, inputs, state, checkRelaySession).Status)
+
+	result := runRemote(t, inputs, state, checkReattach)
+
+	assert.Equal(t, Result{Status: Pass, Summary: "reconnected to adb session " + state.sessionUUID}, result)
+	assert.Equal(t, 1, sessions.Reattaches())
+}
+
+func TestGivenASilentRelayWhenTheRowDeadlineNearsThenTheProbeGivesUpFirstAndKeepsTheHint(t *testing.T) {
+	noProxy(t)
+	parked := make(chan struct{})
+	t.Cleanup(func() { close(parked) })
+	silent := testsupport.NewMockWSS(t, func(*websocket.Conn) { <-parked })
+	inputs, state := relayInputs(silent, bridge.NewWSDialer(time.Second).TrustRoots(testsupport.TestRoots()))
+	ctx, cancel := context.WithTimeout(context.Background(), probeMargin+500*time.Millisecond)
+	defer cancel()
+
+	result := checkByID(t, remoteChecks(withDefaults(inputs), state), checkRelaySession).Run(ctx)
+
+	assert.NoError(t, ctx.Err(), "the probe must return before the row's deadline")
+	assert.Equal(t, Fail, result.Status)
+	// The probe's own error, whichever of its read bound or its socket close fired first.
+	assert.NotContains(t, result.Summary, "timed out after", "the runner's timeout text must not replace the probe's error")
+	assert.Equal(t, relayHint(inputs), result.Hint, "the row keeps its hint")
+}
+
+func TestGivenARelayThatForgetsSessionsWhenReattachedThenTheRowFailsWithTheRerunHint(t *testing.T) {
+	sessions, _, dialer := relayMock(t, testsupport.SessionMockConfig{RejectReattach: true})
+	inputs, state := relayInputs(sessions.URL, dialer)
+	state.sessionUUID = "11111111-2222-4333-8444-000000000001"
+
+	result := runRemote(t, inputs, state, checkReattach)
+
+	assert.Equal(t, Fail, result.Status)
+	assert.Contains(t, result.Summary, "gone")
+	assert.Equal(t, reattachHint(inputs), result.Hint)
+}
+
+func TestGivenTheReverseSlotWhenTheRowRunsThenTheRowFollowsWhoHoldsIt(t *testing.T) {
+	const attachedARN = testSessionARN
+	tests := []struct {
+		name        string
+		daemon      control.Response
+		rival       bool
+		wantStatus  Status
+		wantText    string
+		wantHint    func(inputs Inputs) string
+		wantNoProbe bool
+	}{
+		{name: "free slot, no daemon", wantStatus: Pass, wantText: reversePassSummary},
+		{name: "free slot, daemon on another session with reverse on",
+			daemon: control.Response{OK: true, ARN: "arn:other", ReverseEnabled: true}, wantStatus: Pass, wantText: reversePassSummary},
+		{name: "free slot, daemon on this session with reverse off",
+			daemon: control.Response{OK: true, ARN: attachedARN}, wantStatus: Pass, wantText: reversePassSummary},
+		{name: "daemon on this session with reverse on, ARN with stray space",
+			daemon: control.Response{OK: true, ARN: " " + attachedARN, ReverseEnabled: true}, wantStatus: Pass, wantText: reverseOnSummary,
+			wantNoProbe: true},
+		{name: "slot held elsewhere", rival: true, wantStatus: Fail, wantText: reverseHeldSummary, wantHint: slotHeldHint},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sessions, reverse, dialer := relayMock(t, answeringAdb("OKAY"))
+			if tc.rival {
+				t.Cleanup(reverse.HoldNotifierSlot())
+			}
+			inputs, state := relayInputs(sessions.URL, dialer)
+			state.daemonStatus = tc.daemon
+
+			result := runRemote(t, inputs, state, checkReverse)
+
+			assert.Equal(t, tc.wantStatus, result.Status, result.Summary)
+			if tc.wantHint == nil {
+				assert.Empty(t, result.Hint)
+			} else {
+				assert.Equal(t, tc.wantHint(inputs), result.Hint)
+				assert.Contains(t, result.Hint, "'"+bridgeStopCommand+"'", "the hint quotes the stop for the other daemon")
+				assert.Contains(t, result.Hint, doctorRerun(inputs))
+			}
+			if tc.wantStatus == Fail {
+				assert.Contains(t, result.Summary, tc.wantText)
+			} else {
+				assert.Equal(t, tc.wantText, result.Summary)
+			}
+			switch {
+			case tc.wantNoProbe:
+				assert.Zero(t, reverse.NotifiersAccepted(), "no probe beside a reverse-on daemon")
+			case tc.wantStatus == Pass:
+				require.Eventually(t, func() bool { return reverse.NotifiersClosed() >= 1 }, time.Second, 10*time.Millisecond,
+					"the probe must release the slot")
+			}
 		})
 	}
 }
