@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -21,24 +20,9 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-)
 
-// hermeticAWSEnv pins the AWS environment so a test that builds a real client
-// loads config identically on any host. Placeholder credentials stand in for a
-// missing ~/.aws setup. AWS_PROFILE is cleared because a set profile switches the
-// SDK to a strict shared-config loader that fails when the named profile is
-// absent, so a developer or CI host that exports one would otherwise break these
-// tests for reasons unrelated to what they assert. Legacy defaults mode keeps the
-// load from consulting IMDS.
-func hermeticAWSEnv(t *testing.T) {
-	t.Helper()
-	t.Setenv("AWS_ACCESS_KEY_ID", "test")
-	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
-	t.Setenv("AWS_PROFILE", "")
-	t.Setenv("AWS_CONFIG_FILE", filepath.Join(t.TempDir(), "no-config"))
-	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "no-credentials"))
-	t.Setenv("AWS_DEFAULTS_MODE", "legacy")
-}
+	"github.com/aws/device-connect-devicefarm/internal/testsupport"
+)
 
 // closedEndpoint returns the URL of a local port that has been bound and released,
 // so a connection to it is refused immediately. It lets a test drive the real
@@ -320,7 +304,7 @@ func TestGivenPinnedEnvWhenClientBuiltThenRegionAndRetryConfigured(t *testing.T)
 	// resolve lazily). The generated *devicefarm.Client's Options expose what the
 	// constructor promises: the single supported region and the small adaptive
 	// retry budget.
-	hermeticAWSEnv(t)
+	testsupport.HermeticAWSEnv(t)
 
 	client, err := NewRemoteAccessClient(context.Background(), nil)
 
@@ -358,7 +342,7 @@ func TestGivenValidARNWhenSessionFetchedThenCallsThroughToTheAPI(t *testing.T) {
 	// port (via AWS_ENDPOINT_URL_DEVICE_FARM) makes that call fail with a connection
 	// error deterministically, so the happy-path wiring runs without reaching real
 	// AWS. A short context bounds the SDK's adaptive retry so the test cannot hang.
-	hermeticAWSEnv(t)
+	testsupport.HermeticAWSEnv(t)
 	t.Setenv("AWS_ENDPOINT_URL_DEVICE_FARM", closedEndpoint(t))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

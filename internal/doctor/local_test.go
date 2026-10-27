@@ -24,6 +24,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/daemon"
 	"github.com/aws/device-connect-devicefarm/internal/forward"
+	"github.com/aws/device-connect-devicefarm/internal/session"
 )
 
 // shortRuntimeDir points XDG_RUNTIME_DIR at a short temp dir and returns the paths.
@@ -538,10 +539,13 @@ func TestGivenTheClosingOpenerWhenAConnectionArrivesThenItIsClosedAtOnce(t *test
 	listener.Close()
 }
 
-func TestGivenAFreshMachineWhenTheTableRunsThenEveryLocalRowPasses(t *testing.T) {
+func TestGivenAFreshMachineWhenTheTableRunsThenEveryRowPasses(t *testing.T) {
 	shortRuntimeDir(t)
 	inputs := localInputs(t)
 	inputs.Logger = nil
+	inputs.Credentials = func(context.Context) (session.CredentialSummary, error) {
+		return session.CredentialSummary{Source: "StaticCredentials"}, nil
+	}
 
 	report := Run(context.Background(), Checks(inputs))
 
@@ -550,5 +554,5 @@ func TestGivenAFreshMachineWhenTheTableRunsThenEveryLocalRowPasses(t *testing.T)
 		ids = append(ids, row.ID)
 		assert.Equal(t, Pass, row.Status, "%s: %s", row.ID, row.Summary)
 	}
-	assert.Equal(t, []string{checkRuntimeDir, checkDaemon, checkListenPort, checkForwardTable}, ids)
+	assert.Equal(t, []string{checkRuntimeDir, checkDaemon, checkListenPort, checkForwardTable, checkCredentials}, ids)
 }
