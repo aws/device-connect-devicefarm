@@ -217,6 +217,8 @@ type runState struct {
 	daemonPID    int
 	// endpoint of the resolved session. It is a credential; no row prints it.
 	endpoint string
+	// sessionUUID: opened by relay.session, resumed by relay.reattach.
+	sessionUUID string
 }
 
 // setDaemon records the running daemon's reply and pid.

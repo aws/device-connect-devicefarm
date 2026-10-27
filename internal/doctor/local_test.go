@@ -555,7 +555,8 @@ func TestGivenAFreshMachineAndNoSessionArnWhenTheTableRunsThenNothingFails(t *te
 		ids = append(ids, row.ID)
 		statuses = append(statuses, row.Status)
 	}
-	assert.Equal(t, []string{checkRuntimeDir, checkDaemon, checkListenPort, checkForwardTable, checkCredentials, checkSession}, ids)
-	assert.Equal(t, []Status{Pass, Pass, Pass, Pass, Pass, Skip}, statuses, "%v", report.Rows)
+	assert.Equal(t, []string{checkRuntimeDir, checkDaemon, checkListenPort, checkForwardTable, checkCredentials, checkSession,
+		checkRelaySession, checkReattach, checkReverse}, ids)
+	assert.Equal(t, []Status{Pass, Pass, Pass, Pass, Pass, Skip, Skip, Skip, Skip}, statuses, "%v", report.Rows)
 	assert.Equal(t, 0, report.Failed())
 }
