@@ -215,6 +215,8 @@ type runState struct {
 	// daemonStatus is the running daemon's status reply; OK is false when none answered.
 	daemonStatus control.Response
 	daemonPID    int
+	// endpoint of the resolved session. It is a credential; no row prints it.
+	endpoint string
 }
 
 // setDaemon records the running daemon's reply and pid.

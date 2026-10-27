@@ -19,6 +19,16 @@ type CredentialSummary struct {
 // SDK's own text quotes the helper's whole output, keys included.
 var errCredentialProcessOutput = errors.New("the credential_process helper failed or returned unusable output")
 
+// scrubCredentialProcess swaps a credential_process failure for errCredentialProcessOutput.
+// Every path that resolves credentials calls it before its error leaves the package.
+func scrubCredentialProcess(err error) error {
+	var processErr *processcreds.ProviderError
+	if errors.As(err, &processErr) {
+		return errCredentialProcessOutput
+	}
+	return err
+}
+
 // ResolveCredentials walks the default credential chain once, as the Device Farm client does
 // on its first call. An empty chain is an error.
 func ResolveCredentials(ctx context.Context) (CredentialSummary, error) {
@@ -28,11 +38,7 @@ func ResolveCredentials(ctx context.Context) (CredentialSummary, error) {
 	}
 	credentials, err := cfg.Credentials.Retrieve(ctx)
 	if err != nil {
-		var processErr *processcreds.ProviderError
-		if errors.As(err, &processErr) {
-			err = errCredentialProcessOutput
-		}
-		return CredentialSummary{}, err
+		return CredentialSummary{}, scrubCredentialProcess(err)
 	}
 	return CredentialSummary{Source: credentials.Source, CanExpire: credentials.CanExpire, Expires: credentials.Expires}, nil
 }
