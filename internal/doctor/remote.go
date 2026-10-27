@@ -5,7 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/device-connect-devicefarm/internal/bridge"
@@ -20,6 +26,7 @@ const (
 	checkRelaySession = "relay.session"
 	checkReattach     = "relay.reattach"
 	checkReverse      = "relay.reverse"
+	checkAdbVersion   = "relay.adb-version"
 	// remoteTimeout bounds one AWS call or one websocket probe. Above the SDK's instance
 	// metadata timeout, so an empty chain fails with its hint, not the runner's timeout text.
 	remoteTimeout = 10 * time.Second
@@ -29,7 +36,17 @@ const (
 	// probeMargin is how long before the row's deadline a relay probe gives up, so a silent
 	// relay yields the probe's error and the row's hint, not the runner's timeout text.
 	probeMargin = time.Second
+	// adbVersionTimeout bounds the local `adb version`, which starts no server.
+	adbVersionTimeout = 5 * time.Second
+	// pipeDrainDelay bounds the wait for `adb version`'s pipes once it exited or was killed.
+	pipeDrainDelay = time.Second
 )
+
+// adbVersionPattern finds the protocol version in `adb version` output.
+var adbVersionPattern = regexp.MustCompile(`version 1\.0\.(\d{1,5})\b`)
+
+// errNoAdbVersionLine: adb ran but printed no version the pattern reads.
+var errNoAdbVersionLine = errors.New("printed no 'version 1.0.N' line")
 
 const (
 	ssoLoginCommand = "aws sso login --profile <name>"
@@ -49,6 +66,22 @@ const (
 	reversePassSummary = "adb reverse is available on this session"
 	// reverseHeldSummary replaces bridge.ErrNotifierSlotTaken's text, which names the mechanism.
 	reverseHeldSummary = "another client, or an earlier run of this client, still uses adb reverse on this session"
+	// adbHostVersionTail ends the broken-adb WARN hints.
+	adbHostVersionTail = " The remote adb server is 1.0.%[3]d, and a local adb on another version stops that server with its " +
+		"first command."
+	// Broken-adb WARN format args: quoted `<adb> version` command, quoted doctor rerun, remote adb server's version.
+	adbFailedHint = "the local %[1]s failed or did not finish, so that adb's version is unknown. Run %[1]s by hand and fix what it " +
+		"reports, then rerun %[2]s." + adbHostVersionTail
+	adbNoVersionHint = "the local %[1]s printed no 'version 1.0.N' line, so that adb's version is unknown. Run %[1]s by hand " +
+		"and check that it is the platform-tools adb, then rerun %[2]s." + adbHostVersionTail
+	// versionProbeFailLead puts user words before the probe error, the cause AWS Support needs.
+	versionProbeFailLead = "the remote adb server did not answer its version request: "
+	versionProbeHint     = "there is an error communicating with the remote adb server, so an adb connection through the daemon " +
+		"would fail the same way. Try again later, or contact AWS Support for assistance."
+	// noAdbSummary takes the remote adb server's version.
+	noAdbSummary = "no adb found on PATH or in an Android SDK, so its version was not checked against the remote adb server (1.0.%d)"
+	// sdkLocations: the SDK places searched, as the no-adb hint names them.
+	sdkLocations = "'ANDROID_HOME', 'ANDROID_SDK_ROOT' or Android Studio's default SDK location"
 )
 
 // refreshCredentialsHint: the cause, then the login or the fresh keys and the daemon start that
@@ -155,6 +188,9 @@ func remoteChecks(inputs Inputs, state *runState) []Check {
 			Run: func(ctx context.Context) Result { return checkReattachAcked(ctx, inputs, state) }},
 		{ID: checkReverse, Title: "adb reverse", Category: CategoryNetwork, Needs: []string{checkSession, checkDaemon}, Timeout: remoteTimeout,
 			Run: func(ctx context.Context) Result { return checkReverseNotifier(ctx, inputs, state) }},
+		{ID: checkAdbVersion, Title: "adb versions", Category: CategoryDependencies, Needs: []string{checkRelaySession},
+			Timeout: adbVersionTimeout + pipeDrainDelay + remoteTimeout,
+			Run:     func(ctx context.Context) Result { return checkAdbVersionSkew(ctx, inputs, state) }},
 	}
 }
 
@@ -310,4 +346,330 @@ func slotHeldHint(inputs Inputs) string {
 	return fmt.Sprintf("another client still uses adb reverse on this session, so Device Farm would refuse 'adb reverse' through "+
 		"the daemon. Stop that client with '%s' on the machine where it runs, or wait for Device Farm to release it, then rerun "+
 		"%s. Device Farm lets one client at a time use adb reverse on a device.", bridgeStopCommand, doctorRerun(inputs))
+}
+
+// checkAdbVersionSkew compares every local adb's protocol version with the remote adb server's.
+// A local adb on another version sends host:kill on its first command, which the relay passes
+// on, and the remote server exits. The local step runs first under its own bound; the probe
+// takes what is left of the row's budget.
+func checkAdbVersionSkew(ctx context.Context, inputs Inputs, state *runState) Result {
+	adbs, hiddenAdb := inspectLocalAdbs(ctx, runtime.GOOS)
+	probeCtx, cancel := withProbeBudget(ctx)
+	defer cancel()
+	hostVersion, err := inputs.Dialer.ProbeAdbServerVersion(probeCtx, state.endpoint)
+	if err != nil {
+		return Result{Status: Fail, Summary: versionProbeFailLead + err.Error(), Hint: versionProbeHint}
+	}
+	return adbVersionVerdict(adbs, hiddenAdb, hostVersion, inputs)
+}
+
+// adbVersionVerdict: FAIL when any adb differs from the remote adb server, else WARN when none
+// was found, one is broken or one was found but not run, else PASS. A lone PATH adb is "local
+// adb"; others are named by path.
+func adbVersionVerdict(adbs []localAdb, hiddenAdb string, hostVersion int, inputs Inputs) Result {
+	if len(adbs) == 0 {
+		return Result{Status: Warn, Summary: fmt.Sprintf(noAdbSummary, hostVersion), Hint: noAdbHint(hiddenAdb, hostVersion, inputs)}
+	}
+	var mismatched, broken []localAdb
+	for _, adb := range adbs {
+		switch {
+		case adb.err != nil:
+			broken = append(broken, adb)
+		case adb.version != hostVersion:
+			mismatched = append(mismatched, adb)
+		}
+	}
+	named := len(adbs) > 1 || !adbs[0].onPath
+	switch {
+	case len(mismatched) > 0:
+		return Result{Status: Fail, Summary: skewSummary(mismatched, named, hostVersion), Hint: skewHint(mismatched, named, hostVersion, inputs)}
+	case len(broken) > 0:
+		problems := make([]string, len(broken))
+		for index, adb := range broken {
+			problems[index] = adb.err.Error()
+		}
+		return Result{Status: Warn, Summary: strings.Join(problems, "; "), Hint: brokenAdbHint(broken[0], hostVersion, inputs)}
+	case hiddenAdb != "":
+		return Result{Status: Warn, Summary: fmt.Sprintf("%s, but an adb at '%s' reached only through the current directory or a relative "+
+			"PATH entry was not checked", matchSummary(adbs, hostVersion), safeValue(hiddenAdb)), Hint: hiddenAdbHint(hiddenAdb, inputs)}
+	}
+	return Result{Status: Pass, Summary: matchSummary(adbs, hostVersion)}
+}
+
+// matchSummary: the matching version, with the count when several adbs were found.
+func matchSummary(adbs []localAdb, hostVersion int) string {
+	if len(adbs) > 1 {
+		return fmt.Sprintf("local adb 1.0.%d (%d found) matches the remote adb server", hostVersion, len(adbs))
+	}
+	return fmt.Sprintf("local adb 1.0.%d matches the remote adb server", hostVersion)
+}
+
+// hiddenAdbHint, for an adb the lookup found but did not run beside adbs it did: the PATH fix,
+// the consequence.
+func hiddenAdbHint(hiddenAdb string, inputs Inputs) string {
+	return fmt.Sprintf("an adb exists at '%s', reached only through the current directory or a relative PATH entry, so it was not run "+
+		"and its version is unknown. Add that directory to PATH by its absolute path if you meant that adb, then rerun %s. A local adb "+
+		"on another version stops the remote adb server with its first command.", safeValue(hiddenAdb), doctorRerun(inputs))
+}
+
+// platformToolsExample: a leading-comma clause naming a platform-tools release whose adb speaks
+// hostVersion; "" when none is known. Updated by hand when platform-tools moves adb's protocol version.
+func platformToolsExample(hostVersion int) string {
+	if hostVersion == 41 {
+		return ", such as platform-tools 37"
+	}
+	return ""
+}
+
+// skewSummary names each mismatched adb, then what would stop the remote adb server.
+func skewSummary(mismatched []localAdb, named bool, hostVersion int) string {
+	labels := make([]string, len(mismatched))
+	for index, adb := range mismatched {
+		labels[index] = fmt.Sprintf("local adb 1.0.%d%s", adb.version, adb.at(named))
+	}
+	verb := "differs"
+	if len(mismatched) > 1 {
+		verb = "differ"
+	}
+	return fmt.Sprintf("%s %s from the remote adb server (1.0.%d); the first %s would stop that server",
+		joinAnd(labels), verb, hostVersion, fatalCommand(mismatched, named))
+}
+
+// fatalCommand is what would stop the remote adb server: any adb command for a lone PATH adb,
+// else a command from the named adb or adbs.
+func fatalCommand(mismatched []localAdb, named bool) string {
+	switch {
+	case !named:
+		return "adb command"
+	case len(mismatched) > 1:
+		return "command from any of them"
+	}
+	return "command from that adb"
+}
+
+// skewHint: each version, an Android Studio clause when a lone PATH adb is also the SDK's, the
+// platform-tools fix where the mismatched adbs live, the consequence until then.
+func skewHint(mismatched []localAdb, named bool, hostVersion int, inputs Inputs) string {
+	labels := make([]string, 0, len(mismatched)+1)
+	sdkPath, pathOnly := "", false
+	for _, adb := range mismatched {
+		labels = append(labels, adb.hintLabel(named))
+		if adb.sdkPath == "" {
+			pathOnly = true
+		} else if sdkPath == "" {
+			sdkPath = adb.sdkPath
+		}
+	}
+	labels = append(labels, fmt.Sprintf("the remote adb server is 1.0.%d", hostVersion))
+	cause := fmt.Sprintf("%s, so the first %s would stop that server", joinAnd(labels), fatalCommand(mismatched, named))
+	fix := fmt.Sprintf("Install platform-tools whose adb is 1.0.%d%s, or put such an adb first on PATH", hostVersion,
+		platformToolsExample(hostVersion))
+	if sdkPath != "" {
+		if !named {
+			cause += fmt.Sprintf("; Android Studio runs the SDK's adb at '%s', so a mismatch there stops the remote adb server when "+
+				"Studio starts it", safeValue(sdkPath))
+		}
+		alsoPath := ""
+		if pathOnly {
+			alsoPath = ", and put such an adb first on PATH"
+		}
+		fix = fmt.Sprintf("Update Android SDK Platform-Tools in Android Studio's SDK Manager to a release whose adb is 1.0.%d%s%s",
+			hostVersion, platformToolsExample(hostVersion), alsoPath)
+	}
+	return fmt.Sprintf("%s. %s, then rerun %s. Until then every %s through the daemon ends the remote adb server.",
+		cause, fix, doctorRerun(inputs), fatalCommand(mismatched, named))
+}
+
+// brokenAdbHint: the failed command, its by-hand run, the rerun, the remote adb server's version.
+func brokenAdbHint(adb localAdb, hostVersion int, inputs Inputs) string {
+	format := adbFailedHint
+	if errors.Is(adb.err, errNoAdbVersionLine) {
+		format = adbNoVersionHint
+	}
+	return fmt.Sprintf(format, adb.versionCommand(), doctorRerun(inputs), hostVersion)
+}
+
+// noAdbHint: the cause (and any adb found only through a relative entry), the PATH or install fix,
+// the consequence.
+func noAdbHint(hiddenAdb string, hostVersion int, inputs Inputs) string {
+	hidden, action := "", "Install"
+	if hiddenAdb != "" {
+		hidden = fmt.Sprintf("; an adb exists at '%s', reached only through the current directory or a relative PATH entry, so it "+
+			"was not run", safeValue(hiddenAdb))
+		action = "Add that directory to PATH by its absolute path if you meant that adb, or install"
+	}
+	return fmt.Sprintf("adb was not found on PATH or in an Android SDK (%s), so the doctor could not check that its version "+
+		"matches the remote adb server (1.0.%d)%s. %s Android platform-tools whose adb is 1.0.%d%s, then add its directory to "+
+		"PATH and rerun %s. A local adb on another version stops the remote adb server with its first command.", sdkLocations,
+		hostVersion, hidden, action, hostVersion, platformToolsExample(hostVersion), doctorRerun(inputs))
+}
+
+// joinAnd lists items as "a", "a and b" or "a, b and c".
+func joinAnd(items []string) string {
+	if len(items) <= 1 {
+		return strings.Join(items, "")
+	}
+	return strings.Join(items[:len(items)-1], ", ") + " and " + items[len(items)-1]
+}
+
+// localAdb is one adb binary on this machine: how the lookup reached it, then its protocol
+// version or why none was read.
+type localAdb struct {
+	path    string // the first path that reached it
+	onPath  bool   // PATH reached it
+	sdkPath string // the SDK path that reached it, if any: the adb Android Studio runs
+	version int
+	err     error
+}
+
+// at renders " at '<path>'", or "" when not named.
+func (adb localAdb) at(named bool) string {
+	if !named {
+		return ""
+	}
+	return fmt.Sprintf(" at '%s'", safeValue(adb.path))
+}
+
+// hintLabel names the adb and its version for a hint: a lone PATH adb is "the local adb", an SDK
+// adb is Android Studio's, any other is named by path.
+func (adb localAdb) hintLabel(named bool) string {
+	switch {
+	case !named:
+		return fmt.Sprintf("the local adb is 1.0.%d", adb.version)
+	case adb.sdkPath != "":
+		return fmt.Sprintf("Android Studio's adb at '%s' is 1.0.%d", safeValue(adb.sdkPath), adb.version)
+	}
+	return fmt.Sprintf("the local adb at '%s' is 1.0.%d", safeValue(adb.path), adb.version)
+}
+
+// versionCommand quotes the `adb version` run on this adb.
+func (adb localAdb) versionCommand() string {
+	return fmt.Sprintf("'%s version'", safeValue(adb.path))
+}
+
+// inspectLocalAdbs runs `adb version` on every found adb in parallel: all share one bound.
+func inspectLocalAdbs(ctx context.Context, goos string) ([]localAdb, string) {
+	adbs, hiddenAdb := findLocalAdbs(goos)
+	var pending sync.WaitGroup
+	for index := range adbs {
+		pending.Go(func() { adbs[index].version, adbs[index].err = localAdbVersion(ctx, adbs[index]) })
+	}
+	pending.Wait()
+	return adbs, hiddenAdb
+}
+
+// findLocalAdbs lists local adbs, one entry per binary: the PATH adb, then sdkAdbCandidates.
+// hiddenAdb is an adb reached only through the current directory or a relative PATH entry: never
+// run, its absolute path kept for the hint.
+func findLocalAdbs(goos string) (adbs []localAdb, hiddenAdb string) {
+	indexByBinary := map[string]int{}
+	add := func(path string, fromSDK bool) {
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() {
+			return
+		}
+		binary, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return
+		}
+		index, seen := indexByBinary[binary]
+		if !seen {
+			index = len(adbs)
+			indexByBinary[binary] = index
+			adbs = append(adbs, localAdb{path: path, onPath: !fromSDK})
+		}
+		if fromSDK && adbs[index].sdkPath == "" {
+			adbs[index].sdkPath = path
+		}
+	}
+	pathAdb, err := exec.LookPath("adb")
+	switch {
+	case errors.Is(err, exec.ErrDot):
+		hiddenAdb = pathAdb
+		if absolute, absErr := filepath.Abs(pathAdb); absErr == nil {
+			hiddenAdb = absolute
+		}
+	case err == nil:
+		add(pathAdb, false)
+	}
+	for _, candidate := range sdkAdbCandidates(goos) {
+		add(candidate, true)
+	}
+	if binary, err := filepath.EvalSymlinks(hiddenAdb); err == nil {
+		if _, ran := indexByBinary[binary]; ran {
+			hiddenAdb = "" // an SDK path reached the same binary, so it ran after all
+		}
+	}
+	return adbs, hiddenAdb
+}
+
+// sdkAdbCandidates: platform-tools/adb under ANDROID_HOME and ANDROID_SDK_ROOT, or with neither
+// set under Android Studio's default SDK for this OS. A relative root is skipped: it would name
+// an adb by the current directory. Candidates need not exist; findLocalAdbs stats them.
+func sdkAdbCandidates(goos string) []string {
+	roots := []string{os.Getenv("ANDROID_HOME"), os.Getenv("ANDROID_SDK_ROOT")}
+	if roots[0] == "" && roots[1] == "" {
+		roots = []string{defaultSDKRoot(goos)}
+	}
+	binary := "adb"
+	if goos == "windows" {
+		binary = "adb.exe"
+	}
+	var candidates []string
+	for _, root := range roots {
+		if filepath.IsAbs(root) {
+			candidates = append(candidates, filepath.Join(root, "platform-tools", binary))
+		}
+	}
+	return candidates
+}
+
+// defaultSDKRoot is Android Studio's default SDK path; "" when the base directory is unknown.
+func defaultSDKRoot(goos string) string {
+	if goos == "windows" {
+		if local := os.Getenv("LOCALAPPDATA"); local != "" {
+			return filepath.Join(local, "Android", "Sdk")
+		}
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	if goos == "darwin" {
+		return filepath.Join(home, "Library", "Android", "sdk")
+	}
+	return filepath.Join(home, "Android", "Sdk")
+}
+
+// localAdbVersion runs `adb version` on adb under its own bound and reads the protocol version.
+func localAdbVersion(ctx context.Context, adb localAdb) (int, error) {
+	versionCtx, cancel := context.WithTimeout(ctx, adbVersionTimeout)
+	defer cancel()
+	command := exec.CommandContext(versionCtx, adb.path, "version")
+	command.WaitDelay = pipeDrainDelay // a child adb left holding the pipes must not hold the row
+	output, err := command.Output()
+	switch {
+	case errors.Is(err, exec.ErrWaitDelay):
+		// adb exited and a child kept its pipes; the output is whole, whatever the clock says.
+	case versionCtx.Err() != nil:
+		return 0, fmt.Errorf("%s did not finish in %s", adb.versionCommand(), adbVersionTimeout)
+	case err != nil:
+		return 0, fmt.Errorf("%s failed: %s", adb.versionCommand(), safeValue(err.Error())) // the launch error repeats the path
+	}
+	match := adbVersionPattern.FindSubmatch(output)
+	if match == nil {
+		return 0, noVersionLine(adb, output)
+	}
+	version, err := strconv.Atoi(string(match[1]))
+	if err != nil {
+		return 0, noVersionLine(adb, output)
+	}
+	return version, nil
+}
+
+// noVersionLine: adb printed nothing the version pattern reads; its first line is quoted.
+func noVersionLine(adb localAdb, output []byte) error {
+	summaryLine, _, _ := strings.Cut(string(output), "\n")
+	return fmt.Errorf("%s %w: %q", adb.versionCommand(), errNoAdbVersionLine, summaryLine)
 }
