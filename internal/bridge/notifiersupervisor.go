@@ -153,7 +153,7 @@ func (supervisor *notifierSupervisor) serveOne(ctx context.Context) (time.Durati
 	notifier, err := dialNotifier(ctx, supervisor.cfg.dialer, supervisor.device, supervisor.arn,
 		supervisor.cfg.dialer.dialTimeout, supervisor.cfg.logger)
 	if err != nil {
-		if errors.Is(err, errNotifierSlotTaken) {
+		if errors.Is(err, ErrNotifierSlotTaken) {
 			supervisor.markSlotHeld(true)
 		}
 		return 0, err
