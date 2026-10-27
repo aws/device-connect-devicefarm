@@ -19,6 +19,9 @@ var detachedProcessAttributes = &syscall.SysProcAttr{Setsid: true}
 // openNoFollow makes the log open refuse a symlink.
 const openNoFollow = syscall.O_NOFOLLOW
 
+// RuntimeDirEnvVar is the environment variable that sets the runtime dir's parent.
+const RuntimeDirEnvVar = "XDG_RUNTIME_DIR"
+
 // defaultRuntimeDir is devicefarm-connect under $XDG_RUNTIME_DIR, else
 // devicefarm-connect-<uid> under the OS temp dir. $XDG_RUNTIME_DIR is already
 // per user. The temp dir is shared, so the uid goes in the name: without it the
@@ -27,7 +30,7 @@ const openNoFollow = syscall.O_NOFOLLOW
 func defaultRuntimeDir() (string, error) {
 	uid := os.Getuid()
 	var runtimeDir string
-	if base := os.Getenv("XDG_RUNTIME_DIR"); base != "" {
+	if base := os.Getenv(RuntimeDirEnvVar); base != "" {
 		runtimeDir = filepath.Join(base, config.BinaryName)
 	} else {
 		runtimeDir = filepath.Join(os.TempDir(), fmt.Sprintf("%s-%d", config.BinaryName, uid))
@@ -55,7 +58,7 @@ func ensureRuntimeDir(dir string, uid int) error {
 	if owner != uid {
 		return failure.WithFix(
 			fmt.Errorf("runtime dir %q is owned by uid %d, not %d", dir, owner, uid),
-			"set XDG_RUNTIME_DIR to a private directory",
+			"set "+RuntimeDirEnvVar+" to a private directory",
 		)
 	}
 	return nil

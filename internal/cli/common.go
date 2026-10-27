@@ -40,8 +40,8 @@ const bridgeAutoStartNote = "If the bridge daemon is not running, this command s
 var sessionArnDescription = fmt.Sprintf("%s %s remote access session ARN", awsName, productName)
 
 // addSessionArnFlag binds the --session-arn flag to the shared rootState on cmd.
-// The three commands that take a session ARN (bridge start, device add, device
-// remove) register it identically apart from the help text, so it lives here.
+// Every command that takes a session ARN registers it identically apart from the
+// help text, so it lives here.
 func addSessionArnFlag(cmd *cobra.Command, state *rootState, help string) {
 	cmd.Flags().StringVar(&state.sessionARN, "session-arn", "", help)
 }
