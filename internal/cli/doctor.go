@@ -22,6 +22,7 @@ const defaultReportWidth = 80
 // any row prints; it still accepts the command line and sets up logging. state.paths stays unset.
 func newDoctorCommand(state *rootState) *cobra.Command {
 	verbose := false
+	jsonReport := false
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check this machine, the AWS credentials and a session before 'bridge start'",
@@ -38,11 +39,12 @@ A row is FAIL when a check in it failed, WARN when one works with a caveat, SKIP
 when none ran, else PASS. The Details column names each check that did not pass
 and why. A "What to do" list under the table gives the fix for each WARN or
 FAIL, with the command to run. The table fits the terminal width, or COLUMNS
-when stdout is not a terminal. --verbose prints one line per check instead.
-Exit code 0 unless a check is FAIL. Without --session-arn the session, the
-connection to the device and the adb versions are not checked. Run the doctor
-from the shell that will run 'bridge start': the daemon inherits that shell's
-environment. A running daemon is reported, not changed.
+when stdout is not a terminal. --verbose prints one line per check instead;
+--json prints one compact JSON object. Exit code 0 unless a check is FAIL.
+Without --session-arn the session, the connection to the device and the adb
+versions are not checked. Run the doctor from the shell that will run
+'bridge start': the daemon inherits that shell's environment. A running daemon
+is reported, not changed.
 
 Side effects:
   creates the client's working directory if absent; forgets a daemon that no
@@ -70,9 +72,12 @@ timeout; a run in which every check times out ends in under two minutes.`, awsNa
 			defer stop()
 			report := doctor.Run(ctx, doctor.Checks(doctor.Inputs{Config: state.cfg, SessionARN: state.sessionARN}))
 			var writeErr error
-			if verbose {
+			switch {
+			case jsonReport:
+				writeErr = doctor.WriteJSON(cmd.OutOrStdout(), report, state.sessionARN)
+			case verbose:
 				writeErr = doctor.WriteText(cmd.OutOrStdout(), report)
-			} else {
+			default:
 				writeErr = doctor.WriteTable(cmd.OutOrStdout(), report, reportWidth(cmd.OutOrStdout()))
 			}
 			if writeErr != nil {
@@ -88,6 +93,7 @@ timeout; a run in which every check times out ends in under two minutes.`, awsNa
 	bindListenerFlags(cmd, &state.cfg)
 	addSessionArnFlag(cmd, state, sessionArnDescription+" (optional; also checks the session, the connection to the device and the adb versions)")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "print one line per check, with its id, instead of the table")
+	cmd.Flags().BoolVar(&jsonReport, "json", false, "print one JSON object instead of the table; same exit code")
 	return cmd
 }
 

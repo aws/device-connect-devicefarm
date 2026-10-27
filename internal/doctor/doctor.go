@@ -1,10 +1,12 @@
 // Package doctor runs readiness checks: one table, run in order, each check under its own
 // timeout, skipped when a check it needs did not pass. Report: a table with one row per
-// category and a What to do list, or one text row per check; each ends with a count line.
+// category and a What to do list, one text row per check, or one JSON object; the first two end
+// with a count line.
 package doctor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"slices"
@@ -93,19 +95,35 @@ type Report struct {
 	Elapsed time.Duration
 }
 
-// Failed counts FAIL rows.
-func (report Report) Failed() int {
-	return report.count(Fail)
+// Summary counts the rows by status.
+type Summary struct {
+	Pass int `json:"pass"`
+	Warn int `json:"warn"`
+	Fail int `json:"fail"`
+	Skip int `json:"skip"`
 }
 
-func (report Report) count(status Status) int {
-	total := 0
+// Summary counts the rows by status.
+func (report Report) Summary() Summary {
+	var summary Summary
 	for _, row := range report.Rows {
-		if row.Status == status {
-			total++
+		switch row.Status {
+		case Pass:
+			summary.Pass++
+		case Warn:
+			summary.Warn++
+		case Fail:
+			summary.Fail++
+		case Skip:
+			summary.Skip++
 		}
 	}
-	return total
+	return summary
+}
+
+// Failed counts FAIL rows.
+func (report Report) Failed() int {
+	return report.Summary().Fail
 }
 
 // Run runs checks in order. A check whose need is not PASS or WARN is skipped; its summary
@@ -184,8 +202,9 @@ func WriteText(writer io.Writer, report Report) error {
 		}
 		text.WriteByte('\n')
 	}
+	summary := report.Summary()
 	fmt.Fprintf(&text, "doctor: %d passed, %d warnings, %d failed, %d skipped\n",
-		report.count(Pass), report.count(Warn), report.count(Fail), report.count(Skip))
+		summary.Pass, summary.Warn, summary.Fail, summary.Skip)
 	_, err := io.WriteString(writer, text.String())
 	return err
 }
@@ -529,4 +548,50 @@ func cutRunes(token string, count int) (head, tail string) {
 		offset += size
 	}
 	return token[:offset], token[offset:]
+}
+
+// jsonReport is the --json shape.
+type jsonReport struct {
+	OK         bool        `json:"ok"`
+	SessionARN string      `json:"sessionArn"`
+	Checks     []jsonCheck `json:"checks"`
+	Summary    Summary     `json:"summary"`
+}
+
+// jsonCheck is one row. Hint is absent when the row has none: every PASS, and a FAIL from a
+// timeout or a cancel.
+type jsonCheck struct {
+	ID        string   `json:"id"`
+	Title     string   `json:"title"`
+	Category  Category `json:"category"`
+	Status    Status   `json:"status"`
+	Summary   string   `json:"summary"`
+	Hint      string   `json:"hint,omitempty"`
+	Needs     []string `json:"needs"`
+	ElapsedMs int64    `json:"elapsedMs"`
+}
+
+// WriteJSON writes the report as one compact JSON line. ok is Failed() == 0.
+func WriteJSON(writer io.Writer, report Report, sessionARN string) error {
+	out := jsonReport{
+		OK:         report.Failed() == 0,
+		SessionARN: sessionARN,
+		Checks:     make([]jsonCheck, 0, len(report.Rows)),
+		Summary:    report.Summary(),
+	}
+	for _, row := range report.Rows {
+		out.Checks = append(out.Checks, jsonCheck{ID: row.ID, Title: row.Title, Category: row.Category, Status: row.Status,
+			Summary: row.Summary, Hint: row.Hint, Needs: nonNil(row.Needs), ElapsedMs: row.Elapsed.Milliseconds()})
+	}
+	encoder := json.NewEncoder(writer)
+	encoder.SetEscapeHTML(false) // not HTML: keep && in hints literal
+	return encoder.Encode(out)
+}
+
+// nonNil makes a nil list encode as [], not null.
+func nonNil(items []string) []string {
+	if items == nil {
+		return []string{}
+	}
+	return items
 }
