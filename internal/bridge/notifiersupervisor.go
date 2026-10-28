@@ -55,6 +55,10 @@ type notifierSupervisor struct {
 	// notifier until the server times it out. The seam refuses the reverse family while set. run's
 	// goroutine alone writes it.
 	slotHeld atomic.Bool
+	// slotMarked closes at the first slot-held mark and stays closed: a wake, not the state. It
+	// wakes each reverse request held at the shut gate, which then re-reads slotHeld. run's
+	// goroutine alone closes it, through markSlotHeld.
+	slotMarked chan struct{}
 	// serverRulesCleared is closed once the attach clear (clearServerRulesOnce) settles, whatever its
 	// result, or when run exits without one: reverse off, NotifierKeepAlive or NotifierBackoffInitial
 	// unset, the attachment ended. The accept seam holds reverse requests until it is closed. run's
@@ -68,16 +72,21 @@ type notifierSupervisor struct {
 func newNotifierSupervisor(device *ActiveDevice, cfg *featureConfig, arn string, table *forward.ForwardRulesTable,
 	rules *reverseRules, budget *streamBudget) *notifierSupervisor {
 	return &notifierSupervisor{device: device, cfg: cfg, arn: arn, table: table, rules: rules, budget: budget,
-		serverRulesCleared: make(chan struct{})}
+		slotMarked: make(chan struct{}), serverRulesCleared: make(chan struct{})}
 }
 
 // openGate releases every held reverse request and every later one. Idempotent on run's
 // goroutine, its only caller.
 func (supervisor *notifierSupervisor) openGate() {
+	closeIfOpen(supervisor.serverRulesCleared)
+}
+
+// closeIfOpen closes signal unless it is closed already. One closing goroutine only.
+func closeIfOpen(signal chan struct{}) {
 	select {
-	case <-supervisor.serverRulesCleared:
+	case <-signal:
 	default:
-		close(supervisor.serverRulesCleared)
+		close(signal)
 	}
 }
 
@@ -92,13 +101,15 @@ func (supervisor *notifierSupervisor) notifierSlotHeld() bool {
 	return supervisor.slotHeld.Load()
 }
 
-// markSlotHeld sets slotHeld; a change logs one Warn, a repeat logs nothing (run logs each
-// notifier end at Warn).
+// markSlotHeld sets slotHeld, and a mark closes slotMarked; a change logs one Warn, a repeat logs
+// nothing (run logs each notifier end at Warn).
 func (supervisor *notifierSupervisor) markSlotHeld(held bool) {
 	if supervisor.slotHeld.Swap(held) == held {
 		return
 	}
 	if held {
+		// After the Swap, so a woken request reads the mark.
+		closeIfOpen(supervisor.slotMarked)
 		supervisor.cfg.logger.Warn("another notifier holds reverse on this device, another client's or this client's dropped one until the server times it out; adb reverse is refused here meanwhile",
 			"device", supervisor.arn)
 		return

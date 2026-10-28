@@ -84,7 +84,7 @@ func (recorder *recordingAnswer) awaitKill(t *testing.T) {
 }
 
 // gatedProxy is a proxy on an attachment at serverMocks whose reverse requests meet a shut gate:
-// the server holds the attach clear, or a rival holds the notifier slot.
+// the server holds the attach clear, a rival holds the notifier slot, or every notifier dial fails.
 type gatedProxy struct {
 	address  string
 	recorder *recordingAnswer
@@ -101,14 +101,14 @@ func startGatedProxy(t *testing.T, logger *slog.Logger) *gatedProxy {
 }
 
 // startSlotHeldProxy runs a proxy on an attachment whose notifier slot a rival holds, and waits
-// for the mark. The server answers at once. It returns the rival so a test can close it.
+// for the mark. Once the rival leaves, the server holds the attach clear's kill until the test
+// releases it. It returns the rival so a test can close it.
 func startSlotHeldProxy(t *testing.T) (*gatedProxy, *notifierConn) {
 	t.Helper()
 	recorder := newRecordingAnswer(t)
-	recorder.release()
 	sessions, reverse := serverMocks(t, recorder.answer)
 	rival := rivalNotifier(t, reverse)
-	clearing := attachDeviceAt(t, sessions, reverse, fastBackoff, noopLogger())
+	clearing := attachDeviceAt(t, sessions, reverse, reverse.URL, fastBackoff, noopLogger())
 	address, _ := runProxy(t, clearing.device, testPolicy())
 	waitFor(t, clearing.notifier(t).notifierSlotHeld, "the attachment's hello was never refused with the slot taken")
 	return &gatedProxy{address: address, recorder: recorder, clearingDevice: clearing}, rival
@@ -263,6 +263,7 @@ func TestGivenAnotherClientHoldsTheNotifierSlotWhenAForwardRequestArrivesThenItI
 
 func TestGivenAHeldSlotWhenTheOtherClientLeavesThenAReverseRequestIsRelayedAgain(t *testing.T) {
 	held, rival := startSlotHeldProxy(t)
+	held.recorder.release()
 	require.NoError(t, rival.Close())
 	held.awaitReady(t)
 
@@ -286,8 +287,9 @@ func TestGivenAnOpenGateWhenAnotherClientHoldsTheSlotThenAReverseRequestIsRefuse
 	assert.Equal(t, reverseSlotHeldFail, client.replies.String())
 }
 
-func TestGivenAShutGateWhenAnotherClientTakesTheSlotDuringTheHoldThenTheBoundRefusesWithTheSlotHeldFail(t *testing.T) {
-	// The mark lands after the check at entry and well before the bound, under -race too.
+func TestGivenAShutGateWhenTheHoldSeesTheMarkOnlyAtItsBoundThenTheBoundRefusesWithTheSlotHeldFail(t *testing.T) {
+	// Store sets the mark without the wake, as when the bound and the wake fire together. The mark
+	// lands after the entry check, well before the bound, under -race too.
 	const markAt = 20 * time.Millisecond
 	const bound = 400 * time.Millisecond
 	forwarding := unrunFeatures(context.Background())
@@ -301,6 +303,40 @@ func TestGivenAShutGateWhenAnotherClientTakesTheSlotDuringTheHoldThenTheBoundRef
 	assert.False(t, proceed)
 	assert.GreaterOrEqual(t, time.Since(started), bound, "only the bound path answers after the bound; an entry refusal would prove nothing")
 	assert.Equal(t, reverseSlotHeldFail, client.replies.String(), "the held slot outranks the not-ready text at the bound")
+}
+
+func TestGivenAReverseRequestHeldBeforeAnyHelloWhenTheHelloIsRefusedForAHeldSlotThenTheSlotHeldFailArrivesWellBeforeTheBound(t *testing.T) {
+	recorder := newRecordingAnswer(t)
+	sessions, reverse := serverMocks(t, recorder.answer)
+	rivalNotifier(t, reverse)
+	// Port 1 is closed: no dial reaches a hello, so the gate stays shut and the slot unmarked.
+	clearing := attachDeviceAt(t, sessions, reverse, "wss://127.0.0.1:1", fastBackoff, noopLogger())
+	address, _ := runProxy(t, clearing.device, testPolicy())
+	gated := &gatedProxy{address: address, recorder: recorder, clearingDevice: clearing}
+	client := gated.sendBehindSelect(t, reverseInstall(1))
+	gated.assertHeld(t, reverseInstall(1))
+	reached := time.Now()
+
+	require.True(t, clearing.device.UpdateEndpoint(testDeviceARN, reverse.URL, "test-device"))
+
+	assert.Equal(t, reverseSlotHeldFail, string(readN(t, client, len(reverseSlotHeldFail))))
+	assert.Less(t, time.Since(reached), reverseClearTimeout/2, "the refused hello must end the hold, not its bound")
+}
+
+func TestGivenAHeldSlotWhenTheOtherClientLeavesThenAReverseRequestSentDuringTheAttachClearWaitsForItsVerdict(t *testing.T) {
+	held, rival := startSlotHeldProxy(t)
+	require.NoError(t, rival.Close())
+	// READY cleared the mark but slotMarked stays closed; the server holds the attach clear's kill.
+	held.recorder.awaitKill(t)
+
+	client := held.sendBehindSelect(t, reverseInstall(1))
+	held.assertHeld(t, reverseInstall(1))
+	held.recorder.release()
+
+	assert.Equal(t, "OKAYOKAY", string(readN(t, client, 8)), "the install is relayed once the clear settles")
+	requests := held.recorder.recorded()
+	assert.Greater(t, slices.Index(requests, string(framed(reverseInstall(1)))), slices.Index(requests, killAnswered),
+		"the install must reach the server after the kill's verdict: %q", requests)
 }
 
 func TestGivenADetachedAttachmentWhenTheSlotReadsHeldThenAReverseRequestEndsWithNoReply(t *testing.T) {
