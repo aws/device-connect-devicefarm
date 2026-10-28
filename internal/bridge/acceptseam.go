@@ -297,33 +297,40 @@ const msgReverseSlotHeld = "adb reverse on this device is held by another adb cl
 // reverse rules settles, so the clear cannot wipe an install sent first. It keys on the prefix
 // alone, as refuseReverseFamily does, so `list-forward` waits too and lists the cleared rules. It
 // runs after the reverse-off refusal and before the budget and the rule screen, so a held request
-// spends no slot and counts no rule. Slot held elsewhere: refuse at once, gate open or not, and
-// again at the bound. Past bound: local FAIL, no dial; a relay would race a clear still to come. A
-// gate opened by the attachment's end, or a connection canceled while held, gets no reply. proceed
-// false means the connection is done.
+// spends no slot and counts no rule. Slot held elsewhere: refuse at once, on entry or when the mark
+// lands, gate open or not. Past bound: local FAIL, no dial; a relay would race a clear still to
+// come. A gate opened by the attachment's end, or a connection canceled while held, gets no reply.
+// proceed false means the connection is done.
 func awaitServerRulesCleared(ctx context.Context, tcpConn net.Conn, clientOpening opening,
 	forwarding *attachmentFeatures, bound time.Duration, logger *slog.Logger) (proceed bool) {
 	if forwarding == nil || !strings.HasPrefix(clientOpening.unwrappedService(), reverseServicePrefix) {
 		return true
 	}
-	if refuseWhileSlotHeld(tcpConn, clientOpening, forwarding, logger) {
-		return false
-	}
 	boundTimer := time.NewTimer(bound)
 	defer boundTimer.Stop()
-	select {
-	case <-forwarding.notifier.serverRulesCleared:
-		// A detach opens the gate before it cancels the connections: that is no verdict.
-		return forwarding.ctx.Err() == nil
-	case <-boundTimer.C:
+	slotMarked := forwarding.notifier.slotMarked
+	for {
 		if refuseWhileSlotHeld(tcpConn, clientOpening, forwarding, logger) {
 			return false
 		}
-		logger.Debug("refused a reverse request: the attach clear has not settled", "service", clientOpening.service)
-		refuseOpening(tcpConn, msgReverseNotReady, "could not refuse a reverse request", logger)
-		return false
-	case <-ctx.Done():
-		return false
+		select {
+		case <-forwarding.notifier.serverRulesCleared:
+			// The gate opens on a detach too: that is no verdict.
+			return forwarding.ctx.Err() == nil
+		case <-slotMarked:
+			// One wake. No mark at the re-check: READY cleared it and its clear opens the gate next,
+			// or the attachment ended.
+			slotMarked = nil
+		case <-boundTimer.C:
+			if refuseWhileSlotHeld(tcpConn, clientOpening, forwarding, logger) {
+				return false
+			}
+			logger.Debug("refused a reverse request: the attach clear has not settled", "service", clientOpening.service)
+			refuseOpening(tcpConn, msgReverseNotReady, "could not refuse a reverse request", logger)
+			return false
+		case <-ctx.Done():
+			return false
+		}
 	}
 }
 
