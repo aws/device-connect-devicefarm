@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -1231,6 +1232,22 @@ func TestGivenNonBenignErrorDuringRefreshWhenAwaitingSuccessorThenNotTreatedAsCl
 
 	assert.False(t, conn.awaitSuccessor(websocket.ErrFrameTooLarge),
 		"a protocol fault is never a clean cut")
+}
+
+func TestGivenPeerResetDuringRefreshWhenAwaitingSuccessorThenNotTreatedAsCleanCut(t *testing.T) {
+	mock := testsupport.NewSessionEchoWSS(t)
+	conn := newTestAdbConn(t, mock.URL, fastPolicy())
+	handshake(t, conn)
+
+	conn.seam.Lock()
+	conn.phase = phaseDraining
+	conn.nextReady = make(chan struct{})
+	conn.refreshFailed = make(chan struct{})
+	conn.seam.Unlock()
+
+	resetRead := &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", errPeerReset)}
+	assert.False(t, conn.awaitSuccessor(resetRead),
+		"a reset may have cut the old websocket short, so the swap must not go ahead")
 }
 
 func TestGivenOversizedInboundMessageWhenReceivedThenTheFaultSurfacesWithoutAResume(t *testing.T) {
