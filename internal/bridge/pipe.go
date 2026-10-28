@@ -83,7 +83,7 @@ func pipeConn(ctx context.Context, tcp net.Conn, ws WSConn, aux func(done <-chan
 	// Otherwise surface the first genuine fault. The %w wrap above preserves
 	// errors.Is, so the classification still works.
 	for _, err := range []error{inboundErr, outboundErr} {
-		if !isBenignCloseError(err) {
+		if !isBenignPipeEnd(err) {
 			return err
 		}
 	}
@@ -149,4 +149,12 @@ func isBenignCloseError(err error) bool {
 		errors.Is(err, net.ErrClosed) ||
 		errors.Is(err, context.Canceled) ||
 		errors.Is(err, context.DeadlineExceeded)
+}
+
+// isBenignPipeEnd reports whether err is a clean end of the whole pipe: an expected
+// close, or a peer reset (errPeerReset, one errno per OS), which an adb client that
+// aborts can send. The reset stays out of isBenignCloseError: awaitSuccessor uses that
+// as the expected-cut test of a refresh, and a reset there may have cut bytes short.
+func isBenignPipeEnd(err error) bool {
+	return isBenignCloseError(err) || errors.Is(err, errPeerReset)
 }
