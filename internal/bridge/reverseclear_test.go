@@ -29,19 +29,19 @@ func attachClearingDevice(t *testing.T, answer func(*testsupport.MockSession, []
 	backoff time.Duration, logger *slog.Logger) *clearingDevice {
 	t.Helper()
 	sessions, reverse := serverMocks(t, answer)
-	return attachDeviceAt(t, sessions, reverse, backoff, logger)
+	return attachDeviceAt(t, sessions, reverse, reverse.URL, backoff, logger)
 }
 
-// attachDeviceAt is attachClearingDevice at mocks the test already holds.
+// attachDeviceAt is attachClearingDevice at mocks the test already holds, the device at endpoint.
 func attachDeviceAt(t *testing.T, sessions *testsupport.SessionMockWSS, reverse *testsupport.ReverseMockWSS,
-	backoff time.Duration, logger *slog.Logger) *clearingDevice {
+	endpoint string, backoff time.Duration, logger *slog.Logger) *clearingDevice {
 	t.Helper()
 	params := notifierParams(parkedKeepAlive, backoff)
 	params.MaxForwardRules = testMaxForwardRules
 	params.MaxReverseRules = testMaxReverseRules
 	device := NewActiveDevice(testFeatures(newTestDialer(testWait), testPolicy(), params, logger))
 	t.Cleanup(func() { device.Clear() })
-	require.True(t, device.Set(DeviceInfo{ARN: testDeviceARN, Endpoint: reverse.URL, Label: "test-device"}))
+	require.True(t, device.Set(DeviceInfo{ARN: testDeviceARN, Endpoint: endpoint, Label: "test-device"}))
 	return &clearingDevice{device: device, sessions: sessions, reverse: reverse}
 }
 

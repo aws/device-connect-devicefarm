@@ -148,11 +148,11 @@ func (s *AdbProxyServer) Run(ctx context.Context) error {
 // request is answered from the local table and never dials at all; host:version, the device
 // lists and the device trackers are answered from cached server replies; while reverse is off, a
 // reverse-family request gets a local FAIL and never dials either. With reverse on, a
-// reverse-family request gets a local FAIL at once while the server's notifier slot is held
-// elsewhere; else it waits until the attachment's clear of the server's reverse rules settles,
-// or gets a local FAIL at the bound. Every other request takes one of the attachment's
-// device-stream slots before the dial. No free slot, no dial. A reverse install past the
-// attachment's rule limit is refused after that, still with no dial.
+// reverse-family request waits until the attachment's clear of the server's reverse rules
+// settles, or gets a local FAIL at the bound. While the server's notifier slot is held elsewhere,
+// it gets a local FAIL at once, on arrival or mid-wait. Every other request takes one of the
+// attachment's device-stream slots before the dial. No free slot, no dial. A reverse install past
+// the attachment's rule limit is refused after that, still with no dial.
 func (s *AdbProxyServer) handleConn(ctx context.Context, tcp net.Conn) {
 	connLogger := s.logger.With("client", tcp.RemoteAddr().String())
 	defer tcp.Close()
