@@ -1210,7 +1210,7 @@ func senderMarker(sender int) byte {
 }
 
 func TestGivenBenignErrorOutsideRefreshWhenAwaitingSuccessorThenNotTreatedAsCleanCut(t *testing.T) {
-	// The phase is the ONLY clean-cut signal, because x/net discards close codes.
+	// A cut can come with no close frame, so the phase is the ONLY clean-cut signal.
 	mock := testsupport.NewSessionEchoWSS(t)
 	conn := newTestAdbConn(t, mock.URL, fastPolicy())
 	handshake(t, conn)
@@ -1694,4 +1694,135 @@ func TestGivenABlockedSendWhenQuietForIsReadThenTheConnectionCountsAsActive(t *t
 	assert.True(t, markedInFlight, "the mark must be stamped while the write still counts")
 	clock.advance(5 * time.Second)
 	assert.Equal(t, 5*time.Second, activity.quietFor(), "the finished write must stop counting")
+}
+
+// waitUntilLocked waits until tryLock fails, which means another goroutine holds the lock. It
+// releases each lock it gets while it waits.
+func waitUntilLocked(t *testing.T, tryLock func() bool, unlock func(), msg string) {
+	t.Helper()
+	waitFor(t, func() bool {
+		if tryLock() {
+			unlock()
+			return false
+		}
+		return true
+	}, msg)
+}
+
+// receiveInBackground runs one conn.Receive on its own goroutine and hands back its outcome.
+func receiveInBackground(conn *adbConn) <-chan receivedMessage {
+	results := make(chan receivedMessage, 1)
+	go func() {
+		message, err := conn.Receive()
+		results <- receivedMessage{message: message, err: err}
+	}()
+	return results
+}
+
+func TestGivenAServerCloseWhenReadingThenOnlyTheSessionEndedCodeSkipsTheResume(t *testing.T) {
+	tests := []struct {
+		name        string
+		closeCode   int
+		endsSession bool
+		wantResumed bool
+		wantDials   int
+	}{
+		{name: "the server ended the session", closeCode: testsupport.SessionEndedCloseCode, endsSession: true, wantDials: 1},
+		{name: "the relay lost its leg to the server", closeCode: testsupport.InternalErrorCloseCode, wantResumed: true, wantDials: 2},
+		{
+			name:      "a server without the session-ended code ended the session",
+			closeCode: testsupport.InternalErrorCloseCode, endsSession: true, wantDials: 2,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			mock := testsupport.NewSessionEchoWSS(t)
+			conn := newTestAdbConn(t, mock.URL, fastPolicy())
+			handshake(t, conn)
+			require.Len(t, mock.Sessions(), 1)
+			session := mock.Sessions()[0]
+			results := receiveInBackground(conn)
+
+			if testCase.endsSession {
+				mock.EndSession(session, testCase.closeCode)
+			} else {
+				session.DropAttached(testCase.closeCode)
+			}
+
+			if testCase.wantResumed {
+				// The reader holds the seam from the reattach to the swap, so a Send from here on
+				// waits for the resumed websocket.
+				waitFor(t, func() bool { return mock.Reattaches() == 1 }, "the session was never resumed")
+				request := []byte("000chost:devices")
+				require.NoError(t, conn.Send(request))
+				result := await(t, results, "the echo on the resumed session")
+				require.NoError(t, result.err)
+				assert.Equal(t, request, result.message)
+			} else {
+				result := await(t, results, "the read to end")
+				assert.ErrorIs(t, result.err, io.EOF, "the read must end as a clean close")
+			}
+			assert.Equal(t, testCase.wantDials, mock.ConnectionsAccepted(), "websockets dialed, the first included")
+		})
+	}
+}
+
+func TestGivenASessionEndedCloseWhenReadThenOnlyAWholeUnmaskedOneSkipsTheResume(t *testing.T) {
+	sessionEnded := closeFrame(testsupport.SessionEndedCloseCode, "session closing")
+	tests := []struct {
+		name        string
+		closing     []byte
+		wantResumes int
+	}{
+		{name: "a whole close", closing: sessionEnded},
+		{name: "a close cut short after its code", closing: sessionEnded[:5], wantResumes: 1},
+		{name: "a masked close", closing: maskedFrame(websocket.CloseFrame, sessionEnded[2:]), wantResumes: 1},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			// The scripted server opens a session, then closes. The resume dials the mock, which
+			// does not know the session and refuses it.
+			mock := testsupport.NewSessionEchoWSS(t)
+			device := NewActiveDevice()
+			require.True(t, device.Set(DeviceInfo{ARN: testDeviceARN, Endpoint: mock.URL, Label: "test-device"}))
+			opening := binaryFrame(newSessionControlFrame(controlStatusNew, testSessionUUID))
+			scripted := &wsConn{conn: dialScriptedServer(t, [][]byte{opening, testCase.closing}, maxInboundMessageBytes), writeDeadline: sendDeadline}
+			conn := newAdbConn(newTestDialer(testTimeout), device, testDeviceARN, RouteAdb, scripted, fastPolicy(),
+				newActivityTracker(nil, nil), noopLogger())
+			t.Cleanup(func() { conn.Close() })
+
+			_, err := conn.Receive()
+
+			require.Error(t, err)
+			assert.Equal(t, testCase.wantResumes, mock.ConnectionsAccepted(), "resume dials")
+		})
+	}
+}
+
+func TestGivenARefreshInFlightWhenTheServerEndsTheSessionThenTheReadEndsWithoutWaitingForIt(t *testing.T) {
+	// The refresh holds the seam until its dial times out. A reader that waited for it would end
+	// late, then dial a fresh session for a finished stream.
+	mock := testsupport.NewSessionEchoWSS(t)
+	conn := newTestAdbConn(t, mock.URL, fastPolicy())
+	handshake(t, conn)
+	conn.seam.RLock()
+	first := conn.readFrom.(*wsConn)
+	conn.seam.RUnlock()
+	results := receiveInBackground(conn)
+	// Parked inside the socket read, as the pump is, not at the seam the refresh will hold.
+	waitUntilLocked(t, first.receiveMutex.TryLock, first.receiveMutex.Unlock, "the reader never parked in Receive")
+	redirect(t, conn, "wss://"+blackHoleListener(t))
+	refreshContext, cancelRefresh := context.WithCancel(context.Background())
+	t.Cleanup(cancelRefresh)
+	refreshed := make(chan error, 1)
+	go func() { refreshed <- conn.refresh(refreshContext, nil) }()
+	waitUntilLocked(t, conn.seam.TryRLock, conn.seam.RUnlock, "the refresh never took the seam")
+
+	mock.EndSession(mock.Sessions()[0], testsupport.SessionEndedCloseCode)
+
+	result := await(t, results, "the read to end")
+	assert.ErrorIs(t, result.err, io.EOF, "the read must end as a clean close")
+	assert.Empty(t, refreshed, "the read must end while the refresh still holds the seam")
 }

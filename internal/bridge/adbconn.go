@@ -10,10 +10,20 @@ import (
 	"golang.org/x/net/websocket"
 )
 
+// sessionEndedCloseCode is the server's close once a session can no longer be resumed, for
+// example when the device side of the adb stream closes. A superseded websocket gets 1000.
+const sessionEndedCloseCode = 4000
+
+// isSessionEnded reports whether err is the server's close of an ended session.
+func isSessionEnded(err error) bool {
+	var closeError *wsCloseError
+	return errors.As(err, &closeError) && closeError.code == sessionEndedCloseCode
+}
+
 // refreshPhase is the state of one proxied connection's websocket-refresh machine.
 //
-// x/net discards the close code, so the phase is the only signal that an inbound EOF is an
-// expected clean cut rather than a failure.
+// A cut can come with no close frame, so the phase, not a close code, is the only signal that an
+// inbound EOF is an expected clean cut rather than a failure.
 type refreshPhase int
 
 const (
@@ -176,6 +186,7 @@ func (c *adbConn) Receive() ([]byte, error) {
 		c.seam.RLock()
 		source := c.readFrom
 		phase := c.phase
+		sessionUUID := c.uuid
 		c.seam.RUnlock()
 
 		if phase == phaseClosed || source == nil {
@@ -188,6 +199,13 @@ func (c *adbConn) Receive() ([]byte, error) {
 			// A codec fault, not a dead socket: a resume would skip the over-cap
 			// payload and desynchronize the adb stream.
 			if errors.Is(err, websocket.ErrFrameTooLarge) {
+				return nil, err
+			}
+			// Any phase: no successor or resume can reach an ended session. Close latches the
+			// teardown so the refresher dials nothing; it never waits on the seam a refresh holds.
+			if isSessionEnded(err) {
+				c.logger.Debug("the server ended the adb session", "session", sessionUUID, "error", err)
+				c.Close()
 				return nil, err
 			}
 			// An expected clean cut: wait for the successor and read it instead.
