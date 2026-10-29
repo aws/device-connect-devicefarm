@@ -38,7 +38,8 @@ const spliceDirections = 2
 // until that timer clears the stale registration); a redeemed connector's session ends with its
 // websocket, so every reattach is refused as gone; a token is matched as bytes, not checked as a
 // uuid or tied to a live notifier; nothing caps concurrent connectors; and x/net's 1000 close
-// code where the server sends 1011, which the daemon cannot tell apart anyway.
+// code where the server sends 1011 (the daemon treats both alike). The exception: a connector
+// whose splice ends gets SessionEndedCloseCode, as from the server when its device end closes.
 //
 // Counters span the mock's whole life, redials included. Assert them with Eventually or with
 // a floor, never as an exact count reached at an exact moment: a predecessor frees the
@@ -278,13 +279,14 @@ func (mock *ReverseMockWSS) serveConnector(ws *websocket.Conn, token string) {
 		return
 	}
 	// Binary frames, and message boundaries carry no meaning: the daemon reframes from the byte
-	// stream. Whichever direction ends first ends both, so the device end going away reaches the
-	// daemon as a drop that carries no ERROR frame.
+	// stream. Whichever direction ends first ends both and the session, so the daemon reads the
+	// session-ended close, sent before the deferred Close's own, and no ERROR frame.
 	ws.PayloadType = websocket.BinaryFrame
 	done := make(chan struct{}, spliceDirections)
 	go func() { io.Copy(parked, ws); done <- struct{}{} }()
 	go func() { io.Copy(ws, parked); done <- struct{}{} }()
 	<-done
+	ws.WriteClose(SessionEndedCloseCode)
 }
 
 // redeem takes the connection a token names, or returns the reason it was refused.

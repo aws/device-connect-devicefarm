@@ -120,8 +120,8 @@ func pumpOutbound(tcp net.Conn, ws WSConn) error {
 	}
 }
 
-// pumpInbound copies inbound websocket messages to the local TCP stream. x/net stashes
-// (does not drain) an oversized frame, so ErrFrameTooLarge is fatal: stop the pump.
+// pumpInbound copies inbound websocket messages to the local TCP stream. Receive skips an
+// oversized message, which breaks the adb byte stream, so ErrFrameTooLarge is fatal: stop the pump.
 //
 // It is adbConn's single reader.
 func pumpInbound(ws WSConn, tcp net.Conn) error {
@@ -137,10 +137,10 @@ func pumpInbound(ws WSConn, tcp net.Conn) error {
 }
 
 // isBenignCloseError reports whether err represents an expected, clean end of
-// the pipe rather than a fault worth surfacing. x/net surfaces a peer close as
-// io.EOF (it discards the numeric close code), and tearing down one half makes
-// the other half's in-flight Read/Write fail with net.ErrClosed; both are
-// normal. websocket.ErrFrameTooLarge is deliberately NOT benign.
+// the pipe rather than a fault worth surfacing. A peer close is io.EOF (a
+// *wsCloseError matches it). Tearing down one half fails the other half's in-flight
+// Read/Write with net.ErrClosed. Both are normal. websocket.ErrFrameTooLarge is
+// deliberately NOT benign.
 func isBenignCloseError(err error) bool {
 	if err == nil {
 		return true

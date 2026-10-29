@@ -301,18 +301,20 @@ func TestGivenAnAlreadyRedeemedTokenWhenAConnectorRedeemsItAgainThenItIsRefused(
 	target.requireNoDial(t)
 }
 
-func TestGivenAnOpenConnectorWhenTheWebsocketDropsThenTheLocalTargetConnectionEnds(t *testing.T) {
+func TestGivenAnOpenConnectorWhenItsDeviceEndClosesThenTheConnectorEndsWithoutAReattach(t *testing.T) {
 	mock := serverReverseMock(t)
 	deviceConn := mock.Connect(testReverseToken)
 	target := startLocalTarget(t)
 	ended := openConnectorTo(t, mock, target.port, testPolicy())
 	targetConn := target.awaitAccepted(t)
 
-	// The device end going away closes the connector's websocket, as a pool eviction does.
+	// Closing the device end ends the connector's session. The server closes the websocket with
+	// the session-ended code.
 	require.NoError(t, deviceConn.Close())
 
 	_ = await(t, ended, "the connector to end")
 	assertClosed(t, targetConn, "the local target must see the splice close")
+	assert.NotContains(t, mock.Refusals(), "unknown or expired session", "an ended session must not be resumed")
 }
 
 func TestGivenARefusedReattachOnAConnectorWhenRefreshRunsThenTheConnectionEndsInsteadOfMintingAFreshSession(t *testing.T) {

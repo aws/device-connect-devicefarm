@@ -1,6 +1,8 @@
 package testsupport
 
 import (
+	"encoding/binary"
+	"io"
 	"testing"
 	"time"
 
@@ -202,4 +204,61 @@ func TestGivenDialsOnTwoRoutesWhenServedThenRoutesDialedListsThemInOrder(t *test
 	}
 
 	assert.Equal(t, []string{"adb", "adbreverse"}, mock.RoutesDialed())
+}
+
+// readCloseCode reads frames until the peer's close and returns its status code.
+func readCloseCode(t *testing.T, ws *websocket.Conn) int {
+	t.Helper()
+	for {
+		frame, err := ws.NewFrameReader()
+		require.NoError(t, err)
+		payload, err := io.ReadAll(frame)
+		require.NoError(t, err)
+		if frame.PayloadType() == websocket.CloseFrame {
+			require.GreaterOrEqual(t, len(payload), 2, "the close must carry a status code")
+			return int(binary.BigEndian.Uint16(payload))
+		}
+	}
+}
+
+func TestGivenAServerCloseWhenTheSessionIsReattachedThenOnlyAnEndedSessionIsRefused(t *testing.T) {
+	tests := []struct {
+		name          string
+		closeAttached func(mock *SessionMockWSS, session *MockSession)
+		wantCloseCode int
+		wantAckStatus byte
+	}{
+		{
+			name:          "the server ended the session",
+			closeAttached: func(mock *SessionMockWSS, session *MockSession) { mock.EndSession(session, SessionEndedCloseCode) },
+			wantCloseCode: SessionEndedCloseCode,
+			wantAckStatus: controlStatusError,
+		},
+		{
+			name:          "the relay lost its leg to the server",
+			closeAttached: func(_ *SessionMockWSS, session *MockSession) { session.DropAttached(InternalErrorCloseCode) },
+			wantCloseCode: InternalErrorCloseCode,
+			wantAckStatus: controlStatusReattach,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			mock := NewSessionEchoWSS(t)
+			ws := dialTestWSS(t, mock.URL)
+			ws.PayloadType = websocket.BinaryFrame
+			require.NoError(t, websocket.Message.Send(ws, []byte("000chost:version")))
+			uuid := assertControlFrame(t, firstFrame(t, ws), controlStatusNew)
+			firstFrame(t, ws) // the echo
+			require.Len(t, mock.Sessions(), 1)
+
+			testCase.closeAttached(mock, mock.Sessions()[0])
+
+			assert.Equal(t, testCase.wantCloseCode, readCloseCode(t, ws))
+			reattach := dialTestWSS(t, mock.URL)
+			reattach.PayloadType = websocket.BinaryFrame
+			require.NoError(t, websocket.Message.Send(reattach, []byte(uuid)))
+			assertControlFrame(t, firstFrame(t, reattach), testCase.wantAckStatus)
+		})
+	}
 }

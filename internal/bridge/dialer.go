@@ -4,10 +4,13 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
+	"sync"
 	"time"
 
 	"golang.org/x/net/websocket"
@@ -78,9 +81,61 @@ type WSConn interface {
 	// Send writes data as a single binary websocket message.
 	Send(data []byte) error
 	// Receive returns the next inbound message, or websocket.ErrFrameTooLarge if
-	// it exceeds the per-message cap.
+	// it exceeds the per-message cap. A whole, unmasked close frame with a status code is a
+	// *wsCloseError; any other close is io.EOF.
 	Receive() ([]byte, error)
 	Close() error
+}
+
+// maxCloseFramePayload is the websocket protocol's cap on a control frame's payload.
+const maxCloseFramePayload = 125
+
+// closeCodeLength is the size of the big-endian status code that opens a close frame's payload.
+const closeCodeLength = 2
+
+// A frame header's second byte holds the mask bit and the 7-bit payload length.
+const (
+	headerLengthByte = 1
+	headerMaskBit    = 0x80
+	// headerShortLength masks the 7-bit length; 126 and 127 announce an extended one.
+	headerShortLength = 0x7f
+)
+
+// wsCloseError is a peer's close frame with a status code. It matches io.EOF under errors.Is, as
+// x/net reports every close, so callers that stop on io.EOF stop on it too.
+type wsCloseError struct {
+	code   int
+	reason string
+}
+
+func (closeError *wsCloseError) Error() string {
+	return fmt.Sprintf("websocket closed by the peer: code %d, reason %q", closeError.code, closeError.reason)
+}
+
+func (closeError *wsCloseError) Is(target error) bool {
+	return target == io.EOF
+}
+
+// readCloseFrame reads the payload of the close frame that header opens. Only a whole, unmasked
+// payload that starts with a status code is a *wsCloseError. Any other close is a plain io.EOF,
+// as x/net reports every close: a code-less one has no code, a code cut short is unknown, and a
+// server never masks or exceeds the control frame cap, so a code in either is not the server's.
+func readCloseFrame(header []byte, frame io.Reader) error {
+	if len(header) <= headerLengthByte || header[headerLengthByte]&headerMaskBit != 0 {
+		return io.EOF
+	}
+	payloadLength := int(header[headerLengthByte] & headerShortLength)
+	if payloadLength < closeCodeLength || payloadLength > maxCloseFramePayload {
+		return io.EOF
+	}
+	payload := make([]byte, payloadLength)
+	if _, err := io.ReadFull(frame, payload); err != nil {
+		return io.EOF
+	}
+	return &wsCloseError{
+		code:   int(binary.BigEndian.Uint16(payload)),
+		reason: string(payload[closeCodeLength:]),
+	}
 }
 
 // wsConn wraps an x/net *websocket.Conn. Send emits a BinaryFrame (the Message codec
@@ -89,6 +144,10 @@ type WSConn interface {
 type wsConn struct {
 	conn          *websocket.Conn
 	writeDeadline time.Duration
+	// receiveMutex serializes Receive, in place of the x/net read lock that Receive bypasses.
+	receiveMutex sync.Mutex
+	// oversized is the frame Receive refused for its size; the next Receive drains it first.
+	oversized io.Reader
 }
 
 // Send arms the deadline per write, not once at dial time.
@@ -99,10 +158,55 @@ func (c *wsConn) Send(data []byte) error {
 	return websocket.Message.Send(c.conn, data)
 }
 
+// Receive is x/net's Message.Receive into a []byte, except at a close frame: x/net returns a
+// bare io.EOF and drops the code, and Receive reads the payload HandleFrame leaves unread (see
+// readCloseFrame).
 func (c *wsConn) Receive() ([]byte, error) {
-	var message []byte
-	err := websocket.Message.Receive(c.conn, &message)
-	return message, err
+	c.receiveMutex.Lock()
+	defer c.receiveMutex.Unlock()
+	if c.oversized != nil {
+		if _, err := io.Copy(io.Discard, c.oversized); err != nil {
+			return nil, err
+		}
+		c.oversized = nil
+	}
+	maxPayloadBytes := c.conn.MaxPayloadBytes
+	if maxPayloadBytes == 0 {
+		maxPayloadBytes = websocket.DefaultMaxPayloadBytes
+	}
+	for {
+		frame, err := c.conn.NewFrameReader()
+		if err != nil {
+			return nil, err
+		}
+		// HandleFrame discards the header, so read it first. Len counts header plus payload, and
+		// the cap is on the payload. Len is an int, so the check is exact only on 64-bit. A close
+		// frame's header carries its mask bit and payload length.
+		var header []byte
+		if headerReader := frame.HeaderReader(); headerReader != nil {
+			header, _ = io.ReadAll(headerReader)
+		}
+		handled, err := c.conn.HandleFrame(frame)
+		if err != nil {
+			if frame.PayloadType() == websocket.CloseFrame {
+				return nil, readCloseFrame(header, frame)
+			}
+			return nil, err
+		}
+		// A ping, answered, or a pong.
+		if handled == nil {
+			continue
+		}
+		if int64(handled.Len()-len(header)) > int64(maxPayloadBytes) {
+			c.oversized = handled
+			return nil, websocket.ErrFrameTooLarge
+		}
+		message, err := io.ReadAll(handled)
+		if err != nil {
+			return nil, err
+		}
+		return message, nil
+	}
 }
 
 func (c *wsConn) Close() error {
