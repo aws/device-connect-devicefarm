@@ -235,7 +235,7 @@ func newTestDevice(t *testing.T, arn, endpoint string) *ActiveDevice {
 // always asks for testDeviceARN, so a caller can bind a different one.
 func openStream(t *testing.T, device *ActiveDevice, target adbwire.AdbSpec, within time.Duration) (*adbConn, []byte, error) {
 	t.Helper()
-	conn, leftover, err := openDeviceStream(context.Background(), newTestDialer(within), device, testDeviceARN,
+	conn, leftover, err := openDeviceStream(context.Background(), newTestDialer(within), device, testDeviceARN, nil,
 		target, fastPolicy(), within, newActivityTracker(nil, nil), noopLogger())
 	if conn != nil {
 		t.Cleanup(func() { conn.Close() })

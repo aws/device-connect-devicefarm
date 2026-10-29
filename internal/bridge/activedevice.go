@@ -72,13 +72,14 @@ type featureConfig struct {
 }
 
 // attachmentFeatures is one attachment's live features. ctx ends when the attachment
-// ends, so every stream the table starts and the notifier itself are severed by the
-// same detach that closes the listeners.
+// ends, so every stream the table starts, the notifier and the warm socket are severed
+// by the same detach that closes the listeners.
 type attachmentFeatures struct {
 	table    *forward.ForwardRulesTable
 	notifier *notifierSupervisor
-	budget   *streamBudget   // the attachment's device-stream slots; see streamBudget
-	refusals refusalThrottle // for local connections the budget turns away
+	warm     *warmSocketKeeper // one parked adb websocket for the next dial; see warmSocketKeeper
+	budget   *streamBudget     // the attachment's device-stream slots; see streamBudget
+	refusals refusalThrottle   // for local connections the budget turns away
 	// reverseRules mirrors the server's reverse rules; see reverseRules
 	reverseRules *reverseRules
 	// reverseEnabled off: the seam refuses the reverse family; see refuseReverseFamily
@@ -99,6 +100,15 @@ func (features *attachmentFeatures) close() {
 	features.table.Close()
 }
 
+// warmSockets returns the attachment's keeper, or nil without features. adbSocket is
+// nil-safe.
+func (features *attachmentFeatures) warmSockets() *warmSocketKeeper {
+	if features == nil {
+		return nil
+	}
+	return features.warm
+}
+
 // ActiveDeviceOption configures an ActiveDevice at construction.
 type ActiveDeviceOption func(*ActiveDevice)
 
@@ -114,10 +124,11 @@ func WithClock(now func() time.Time) ActiveDeviceOption {
 
 // WithAttachmentFeatures turns on the features an attachment carries beside the adb
 // stream: a fresh forward table per device whose accepted connections become device
-// streams of their own, and, with reverse on, a reverse notifier held open for the
-// whole attachment. Both dial with dialer, and every detach closes the table's listeners,
-// severs its streams and closes the notifier. A caller with no dialer to give leaves both
-// off rather than dead.
+// streams of their own, one warm adb websocket parked for the next dial, and, with
+// reverse on, a reverse notifier held open for the whole attachment. All dial with dialer,
+// and every detach closes the table's listeners, severs its streams and closes the
+// notifier and the warm socket. A caller with no dialer to give leaves them off rather
+// than dead.
 func WithAttachmentFeatures(dialer *WSDialer, policy WSRefreshPolicy,
 	params AttachmentParams, logger *slog.Logger) ActiveDeviceOption {
 	if dialer == nil {
@@ -161,8 +172,9 @@ func (a *ActiveDevice) Set(info DeviceInfo) bool {
 // streams belong to.
 // Caller holds device.mu and has already assigned device.info, so this must not bind, dial, wait,
 // or call any ActiveDevice method: the opener and forward.NewForwardRulesTable only store their
-// arguments, the table binds nothing until a rule is installed, and the notifier's own
-// goroutine does the dialing, parked on device.mu inside EndpointFor until Set returns.
+// arguments, the table binds nothing until a rule is installed, and the notifier's and the warm
+// socket keeper's own goroutines do the dialing, parked on device.mu inside EndpointFor until Set
+// returns.
 // Overwriting device.features is safe because Set refuses while a device is present and only
 // clearLocked drops it.
 func (device *ActiveDevice) buildFeaturesLocked() {
@@ -175,10 +187,13 @@ func (device *ActiveDevice) buildFeaturesLocked() {
 	features := &attachmentFeatures{ctx: ctx, cancel: cancel, budget: budget,
 		reverseRules:   newReverseRules(config.params.MaxReverseRules),
 		reverseEnabled: config.params.ReverseEnabled}
-	opener := &deviceStreamOpener{device: device, cfg: config, arn: device.info.ARN, ctx: ctx, budget: budget}
+	features.warm = newWarmSocketKeeper(device, config, device.info.ARN)
+	opener := &deviceStreamOpener{device: device, cfg: config, arn: device.info.ARN, ctx: ctx, budget: budget,
+		warm: features.warm}
 	features.table = forward.NewForwardRulesTable(opener, config.params.MaxForwardRules, config.logger)
 	features.notifier = newNotifierSupervisor(device, config, device.info.ARN, features.table, features.reverseRules, budget)
 	go features.notifier.run(features.ctx)
+	go features.warm.run(features.ctx)
 	device.features = features
 }
 

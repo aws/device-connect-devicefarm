@@ -110,13 +110,14 @@ var deviceTransportRequest, _ = adbwire.EncodeRequest(deviceTransportService)
 // pipe starts. On any failure the connection is closed and nothing is returned, so the
 // caller closes the app socket with zero bytes written, as a real adb host does.
 //
-// ctx bounds the dial only; each prologue read is bounded by statusTimeout. target is the
-// forward rule's device spec. activity is one tracker per stream, never shared: a write
-// blocked on one stream would otherwise hold every sharer's refresher off its quiet window.
-// It must not be nil, because every mark dereferences it. errAdbConnClosed also covers a
-// detach before the dial: the caller closes the app socket as it does for a refusal.
+// ctx bounds the dial only; each prologue read is bounded by statusTimeout. warm is the
+// attachment's keeper; nil dials. target is the forward rule's device spec. activity is one
+// tracker per stream, never shared: a write blocked on one stream would otherwise hold every
+// sharer's refresher off its quiet window. It must not be nil, because every mark
+// dereferences it. errAdbConnClosed also covers a detach before the dial: the caller closes
+// the app socket as it does for a refusal.
 func openDeviceStream(ctx context.Context, dialer *WSDialer, device *ActiveDevice, arn string,
-	target adbwire.AdbSpec, policy WSRefreshPolicy, statusTimeout time.Duration,
+	warm *warmSocketKeeper, target adbwire.AdbSpec, policy WSRefreshPolicy, statusTimeout time.Duration,
 	activity *activityTracker, logger *slog.Logger) (*adbConn, []byte, error) {
 	// target.String(), not a hardcoded "tcp:" prefix: the request the remote adb server
 	// must see is the spec the customer named, whatever its kind. The error arm is a guard,
@@ -133,7 +134,7 @@ func openDeviceStream(ctx context.Context, dialer *WSDialer, device *ActiveDevic
 		return nil, nil, fmt.Errorf("%w: the device detached before the stream opened", errAdbConnClosed)
 	}
 
-	ws, err := dialer.Dial(ctx, endpoint, RouteAdb)
+	ws, err := warm.adbSocket(ctx, dialer, endpoint)
 	if err != nil {
 		return nil, nil, fmt.Errorf("dial device stream websocket: %w", err)
 	}

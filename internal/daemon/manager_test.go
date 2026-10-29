@@ -744,6 +744,59 @@ func TestGivenARunningDaemonWhenADeviceIsAddedThenANotifierOpensAndFollowsTheAtt
 	assert.Empty(t, mock.Refusals(), "the daemon's hello must satisfy the server")
 }
 
+// answerSelect plays the server for a relayed command: OKAY to the daemon's select, echo the rest.
+func answerSelect(_ *testsupport.MockSession, data []byte) []byte {
+	if string(data) == "0012host:transport-any" {
+		return []byte("OKAY")
+	}
+	return data
+}
+
+func TestGivenAnAttachedDeviceWhenAnAdbCommandArrivesThenItRidesTheWebsocketParkedAhead(t *testing.T) {
+	// Full wiring: attach parks a websocket, the first command takes it, the slot refills.
+	mock := testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{OnMessage: answerSelect})
+	cfg := config.Default()
+	cfg.ListenPort = freePort(t)
+	mgr := newTestManagerWithClient(t, cfg, newFakeClient(mock.URL, "Pixel 10 (OS 17)"))
+
+	done, cancel := startForeground(t, mgr)
+	client := control.NewDaemonClient(mgr.paths.ControlSocket)
+	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: "arn:1"})
+	require.NoError(t, err)
+	require.True(t, addResp.OK, "add over the live control socket must succeed: %s", addResp.Error)
+	require.Eventually(t, func() bool { return mock.ConnectionsAccepted() == 1 }, testTimeout,
+		testPollInterval, "attaching a device must park one adb websocket ahead of any command")
+	require.Zero(t, mock.SessionsOpened(), "a parked websocket sends nothing, so no session exists yet")
+
+	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.ListenPort)))
+	require.NoError(t, err)
+	defer conn.Close()
+	require.NoError(t, conn.SetDeadline(time.Now().Add(testTimeout)))
+	service := "000chost:version"
+	_, err = fmt.Fprintf(conn, "000ehost:tport:any%s", service)
+	require.NoError(t, err)
+	selectReply := make([]byte, 12)
+	_, err = io.ReadFull(conn, selectReply)
+	require.NoError(t, err, "the daemon answers the select")
+	echoed := make([]byte, len(service))
+	_, err = io.ReadFull(conn, echoed)
+	require.NoError(t, err, "the relayed command comes back through the parked websocket")
+	assert.Equal(t, service, string(echoed))
+	assert.Equal(t, 1, mock.SessionsOpened(), "the command's first frame minted its session on the parked websocket")
+	require.Eventually(t, func() bool { return mock.ConnectionsAccepted() == 2 }, testTimeout,
+		testPollInterval, "the slot must refill behind the take")
+
+	cancel()
+
+	select {
+	case runErr := <-done:
+		require.NoError(t, runErr)
+	case <-time.After(testTimeout):
+		t.Fatal("RunForeground did not return after context cancellation")
+	}
+	assert.Equal(t, 1, mock.SessionsOpened(), "the replacement websocket sent nothing")
+}
+
 // reverseOffFail is the framed FAIL a reverse request reads from a daemon that did not opt in.
 const reverseOffFail = "FAIL0047adb reverse is off for this client; restart it with --allow-adb-reverse"
 
@@ -798,8 +851,8 @@ func TestGivenReverseOffWhenTheDaemonAttachesThenNoNotifierOpensAndOnlyReverseIs
 
 func TestGivenAPlaintextInteractiveEndpointWhenTheDaemonAttachesThenNoDialReachesTheEndpoint(t *testing.T) {
 	// The resolver, not the dialer, picks the scheme, so the refusal must hold at the daemon's
-	// dial sites. The notifier makes the first dial; an hour of backoff makes it the only one,
-	// so the refusal logs exactly once.
+	// dial sites. The notifier and the warm socket keeper dial once each: an hour of backoff
+	// holds the notifier, and the keeper redials only on a take or a rotation.
 	counterAddress, accepted := testsupport.NewAcceptCounter(t)
 	cfg := config.Default()
 	cfg.ListenPort = freePort(t)
@@ -815,8 +868,8 @@ func TestGivenAPlaintextInteractiveEndpointWhenTheDaemonAttachesThenNoDialReache
 	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: "arn:1"})
 	require.NoError(t, err)
 	require.True(t, addResp.OK, "the attach itself resolves and binds; the dial is what refuses: %s", addResp.Error)
-	require.Eventually(t, func() bool { return strings.Contains(logs.String(), "refused scheme") },
-		testTimeout, testPollInterval, "the notifier dial must report the refused scheme")
+	require.Eventually(t, func() bool { return strings.Count(logs.String(), "refused scheme") == 2 },
+		testTimeout, testPollInterval, "the notifier and warm socket dials must each report the refused scheme")
 
 	statusResp, err := client.Send(control.Request{Op: control.OpStatus})
 	require.NoError(t, err)
@@ -830,7 +883,7 @@ func TestGivenAPlaintextInteractiveEndpointWhenTheDaemonAttachesThenNoDialReache
 	case <-time.After(testTimeout):
 		t.Fatal("RunForeground did not return after context cancellation")
 	}
-	assert.Equal(t, 1, strings.Count(logs.String(), "refused scheme"), "one dial, one report")
+	assert.Equal(t, 2, strings.Count(logs.String(), "refused scheme"), "two dials, two reports")
 	assert.Zero(t, accepted(), "nothing may reach a plaintext endpoint")
 }
 
