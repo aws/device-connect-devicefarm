@@ -30,6 +30,17 @@ const (
 	sessionUUIDLen = 36
 )
 
+// Websocket close codes the server and the relay send, duplicated from the wire contract like
+// the control frame constants.
+const (
+	// SessionEndedCloseCode closes a session's current websocket once the server ends the
+	// session; nothing can resume it.
+	SessionEndedCloseCode = 4000
+	// InternalErrorCloseCode is the relay's close when its leg to the server fails. A server
+	// that does not send SessionEndedCloseCode ends sessions with it too.
+	InternalErrorCloseCode = 1011
+)
+
 // Reconnect signal: a first client frame that is exactly a canonical UUIDv4.
 var uuidV4Pattern = regexp.MustCompile(
 	`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
@@ -424,6 +435,38 @@ func (m *SessionMockWSS) drop(uuid string) {
 	m.mu.Lock()
 	delete(m.sessions, uuid)
 	m.mu.Unlock()
+}
+
+// EndSession ends session as the server does once the device side of its adb stream closes:
+// the attached websocket is closed with closeCode, and every later reattach is refused. A grace
+// timer already armed finds the session closed and does nothing.
+func (m *SessionMockWSS) EndSession(session *MockSession, closeCode int) {
+	session.mu.Lock()
+	attached := session.attached
+	session.attached = nil
+	session.closed = true
+	session.mu.Unlock()
+	m.drop(session.UUID)
+	closeWithCode(attached, closeCode)
+}
+
+// DropAttached closes the attached websocket with closeCode and keeps the session, as a relay
+// whose leg to the server failed does: a reattach still resumes it.
+func (s *MockSession) DropAttached(closeCode int) {
+	s.mu.Lock()
+	attached := s.attached
+	s.mu.Unlock()
+	closeWithCode(attached, closeCode)
+}
+
+// closeWithCode sends a close frame carrying closeCode, then closes ws. x/net's Close sends a
+// second close frame; a client stops reading at the first. Nil is a no-op.
+func closeWithCode(ws *websocket.Conn, closeCode int) {
+	if ws == nil {
+		return
+	}
+	ws.WriteClose(closeCode)
+	ws.Close()
 }
 
 // takeOver makes ws the attached websocket and closes the predecessor under the
