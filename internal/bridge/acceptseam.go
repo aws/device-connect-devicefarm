@@ -28,7 +28,7 @@ const syntheticTransportID = 1
 // for a failed adb forward: a real client writes select and service back to back, so it
 // never fires for one. It ends a local process that connects and sends a partial request,
 // a select with no service, or nothing: there is no request to answer, only wait or close.
-// Source: the server's first-message timeout, which bounds the same silence on a websocket.
+// Chosen, not derived.
 const openingRequestTimeout = 30 * time.Second
 
 // errSelectRefused means the client named a device the attachment does not hold and
@@ -427,7 +427,9 @@ func cancelOrFault(ctx context.Context, fault error) error {
 }
 
 // sendOpening plays the daemon's own `host:transport-any` switch when the seam answered the
-// client's select, then sends pending. One return for cancelOrFault to judge.
+// client's select, then sends pending. With no switch it reads the control frame within one
+// round trip: a parked websocket can die unseen.
+// One return for cancelOrFault to judge.
 func sendOpening(tcpConn net.Conn, session *adbConn, pending []byte, selected bool) error {
 	// The device's reply is one round trip, which is what ReattachTimeout budgets.
 	within := session.policy.ReattachTimeout
@@ -459,6 +461,11 @@ func sendOpening(tcpConn net.Conn, session *adbConn, pending []byte, selected bo
 			return fmt.Errorf("send the client's request: %w", err)
 		}
 		pending = pending[end:]
+	}
+	if !selected {
+		if err := session.awaitHandshake(within); err != nil {
+			return fmt.Errorf("open the session: %w", err)
+		}
 	}
 	return nil
 }

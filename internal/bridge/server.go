@@ -213,7 +213,8 @@ func (s *AdbProxyServer) handleConn(ctx context.Context, tcp net.Conn) {
 	}
 	defer countedRequest.release()
 
-	ws, err := s.dialer.Dial(connCtx, info.Endpoint, RouteAdb)
+	// The attachment's parked websocket when one is live, else a dial of its own.
+	ws, err := forwarding.warmSockets().adbSocket(connCtx, s.dialer, info.Endpoint)
 	if err != nil {
 		connLogger.Error("failed to dial remote websocket; closing client", "error", err)
 		return
