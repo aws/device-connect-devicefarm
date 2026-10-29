@@ -147,8 +147,8 @@ func parseReverseOpen(payload string) (token string, port int, err error) {
 	return token, port, nil
 }
 
-// receivedMessage is one Receive's raw outcome, handed from receiveWithin's goroutine to
-// whichever select case observes it.
+// receivedMessage is one Receive's raw outcome, handed from a reader goroutine to the code
+// that waits for it.
 type receivedMessage struct {
 	message []byte
 	err     error

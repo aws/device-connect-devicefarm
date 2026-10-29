@@ -18,7 +18,8 @@ type deviceStreamOpener struct {
 	cfg    *featureConfig
 	arn    string
 	ctx    context.Context
-	budget *streamBudget // the attachment's; see streamBudget
+	budget *streamBudget     // the attachment's; see streamBudget
+	warm   *warmSocketKeeper // the attachment's; see warmSocketKeeper
 
 	refusals refusalThrottle
 }
@@ -55,8 +56,8 @@ func (opener *deviceStreamOpener) OpenStream(conn net.Conn, target adbwire.AdbSp
 	defer untrack()
 
 	activity := newActivityTracker(nil, opener.device.MarkActivity)
-	stream, leftover, err := openDeviceStream(streamCtx, opener.cfg.dialer, opener.device, opener.arn, target,
-		opener.cfg.policy, opener.cfg.params.DeviceStreamStatusTimeout, activity, logger)
+	stream, leftover, err := openDeviceStream(streamCtx, opener.cfg.dialer, opener.device, opener.arn, opener.warm,
+		target, opener.cfg.policy, opener.cfg.params.DeviceStreamStatusTimeout, activity, logger)
 	if err != nil {
 		// Zero bytes written either way, so the application sees a refused port rather
 		// than a peer that hung up mid-conversation.
