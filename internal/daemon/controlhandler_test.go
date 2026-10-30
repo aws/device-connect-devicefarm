@@ -3,13 +3,16 @@ package daemon
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/suite"
 
 	"github.com/aws/device-connect-devicefarm/internal/bridge"
 	"github.com/aws/device-connect-devicefarm/internal/config"
 	"github.com/aws/device-connect-devicefarm/internal/control"
+	"github.com/aws/device-connect-devicefarm/internal/testsupport"
 )
 
 // addReq builds an OpAdd request for a session ARN. The label is no longer carried
@@ -18,25 +21,28 @@ func addReq(arn string) control.Request {
 	return control.Request{Op: control.OpAdd, ARN: arn}
 }
 
-// controlHandlerSuite exercises the daemon's control handler. SetupTest builds the
-// shared fixture every test needs - a fake remote-access client, a DaemonManager
-// wired to it, an empty device, and a handler over that device with a no-op
-// shutdown - so each test asserts behavior instead of repeating construction. A
-// test that needs a special client (a resolve that fails, or one that binds a
-// device mid-resolve) rebuilds the handler from a bespoke client.
+// controlHandlerSuite exercises the daemon's control handler. SetupTest builds the shared
+// fixture: a mock endpoint that answers the add's serial fetch, a fake remote-access client
+// resolving to it, a DaemonManager on that client, an empty device, a dialer, and a handler
+// over them with a no-op shutdown. A test that needs a special client (a failing resolve, or
+// one that binds a device mid-resolve) rebuilds the handler from it.
 type controlHandlerSuite struct {
 	suite.Suite
+	mock    *testsupport.SessionMockWSS
 	client  *fakeRemoteAccessClient
 	mgr     *DaemonManager
 	device  *bridge.ActiveDevice
+	dialer  *bridge.WSDialer
 	handler control.Handler
 }
 
 func (s *controlHandlerSuite) SetupTest() {
-	s.client = newFakeClient(testEndpoint, "Pixel 10 (OS 17)")
+	s.mock = testsupport.NewSessionMockWSS(s.T(), testsupport.SessionMockConfig{OnMessage: answerAttach})
+	s.client = newFakeClient(s.mock.URL, "Pixel 10 (OS 17)")
 	s.mgr = newTestManagerWithClient(s.T(), config.Default(), s.client)
 	s.device = bridge.NewActiveDevice()
-	s.handler = s.mgr.controlHandler(context.Background(), s.device, func() {})
+	s.dialer = s.mgr.newDialer()
+	s.handler = s.mgr.controlHandler(context.Background(), s.device, s.dialer, func() {})
 }
 
 func TestControlHandlerSuite(t *testing.T) {
@@ -52,7 +58,73 @@ func (s *controlHandlerSuite) TestNoDeviceAttachedAddResolvesAttachesAndReportsL
 	current, present := s.device.Current()
 	s.Require().True(present)
 	s.Equal("arn:1", current.ARN)
-	s.Equal(testEndpoint, current.Endpoint, "the resolved endpoint must be stored verbatim")
+	s.Equal(s.mock.URL, current.Endpoint, "the resolved endpoint must be stored verbatim")
+	s.Equal(attachSerial, current.Serial, "the add must bind the device with the serial it fetched")
+	s.Equal([]string{hostDevicesRequest}, sessionInbounds(s.mock), "the fetch sends host:devices alone")
+}
+
+func (s *controlHandlerSuite) TestSerialFetchDialFailsAddRejectedAndNothingAttached() {
+	// The session resolves, but nothing listens at its endpoint.
+	s.client.set(testEndpoint, nil)
+
+	resp := s.handler(addReq("arn:1"))
+
+	s.False(resp.OK, "a failed serial fetch must fail the add")
+	s.Contains(resp.Error, "fetch the device serial")
+	_, present := s.device.Current()
+	s.False(present, "nothing must be attached when the serial fetch fails")
+}
+
+func (s *controlHandlerSuite) TestSerialFetchFailsAtAPresignedEndpointAddErrorAndLogCarryNoCredential() {
+	// The fetch's error reaches the CLI and the daemon log; neither may carry the URL's query.
+	s.client.set(testsupport.PresignedUnreachableEndpoint, nil)
+	logs := &lockedBuffer{}
+	s.mgr.logger = slog.New(slog.NewTextHandler(logs, nil))
+
+	resp := s.handler(addReq("arn:1"))
+
+	s.False(resp.OK)
+	for _, sink := range []string{resp.Error, logs.String()} {
+		s.Contains(sink, testsupport.ScrubbedDialText, "the dial must be named")
+		s.NotContains(sink, testsupport.SignatureMarker)
+		s.NotContains(sink, testsupport.SecurityTokenMarker)
+		s.NotContains(sink, "X-Amz-")
+	}
+}
+
+func (s *controlHandlerSuite) TestSerialFetchHangsAddFailsAtTheResolveTimeoutAndNothingAttached() {
+	// A server that never answers host:devices must not hold the inline control loop past
+	// resolveTimeout, which sits under the control channel's deadline.
+	silent := testsupport.NewSessionMockWSS(s.T(), testsupport.SessionMockConfig{
+		OnMessage: func(_ *testsupport.MockSession, _ []byte) []byte { return nil },
+	})
+	s.client.set(silent.URL, nil)
+	previous := resolveTimeout
+	resolveTimeout = 200 * time.Millisecond
+	s.T().Cleanup(func() { resolveTimeout = previous })
+	started := time.Now()
+
+	resp := s.handler(addReq("arn:1"))
+
+	s.False(resp.OK, "a hung fetch must fail the add")
+	s.Contains(resp.Error, "deadline exceeded")
+	s.Less(time.Since(started), 2*time.Second, "the add must end at resolveTimeout, not at the reply timeout")
+	_, present := s.device.Current()
+	s.False(present)
+}
+
+func (s *controlHandlerSuite) TestDeviceListNamesNoDeviceAddRejectedAndNothingAttached() {
+	emptyList := testsupport.NewSessionMockWSS(s.T(), testsupport.SessionMockConfig{
+		OnMessage: func(_ *testsupport.MockSession, _ []byte) []byte { return []byte("OKAY0000") },
+	})
+	s.client.set(emptyList.URL, nil)
+
+	resp := s.handler(addReq("arn:1"))
+
+	s.False(resp.OK, "a device list naming no device must fail the add")
+	s.Contains(resp.Error, "lists no device")
+	_, present := s.device.Current()
+	s.False(present, "nothing must be attached without a serial")
 }
 
 func (s *controlHandlerSuite) TestResolutionFailsAddRejectedAndNothingAttached() {
@@ -75,13 +147,13 @@ func (s *controlHandlerSuite) TestDeviceAttachedMidResolveAddRejectedAndNewerDev
 	// concurrent caller could. Model it by binding a device from inside the resolve
 	// itself, after the limit check has already passed.
 	racing := &attachDuringResolve{
-		inner: newFakeClient(testEndpoint, "Pixel 10 (OS 17)"),
+		inner: newFakeClient(s.mock.URL, "Pixel 10 (OS 17)"),
 		attach: func() {
 			s.Require().True(s.device.Set(bridge.DeviceInfo{ARN: "arn:other", Label: "Other"}))
 		},
 	}
 	mgr := newTestManagerWithClient(s.T(), config.Default(), racing)
-	handler := mgr.controlHandler(context.Background(), s.device, func() {})
+	handler := mgr.controlHandler(context.Background(), s.device, s.dialer, func() {})
 
 	resp := handler(addReq("arn:1"))
 
@@ -159,7 +231,7 @@ func (s *controlHandlerSuite) TestRemoveWithNoDeviceRejected() {
 
 func (s *controlHandlerSuite) TestShutdownInvokesCancelAndAcks() {
 	called := false
-	handler := s.mgr.controlHandler(context.Background(), s.device, func() { called = true })
+	handler := s.mgr.controlHandler(context.Background(), s.device, s.dialer, func() { called = true })
 
 	resp := handler(control.Request{Op: control.OpShutdown})
 

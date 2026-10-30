@@ -55,7 +55,7 @@ func (opener *deviceStreamOpener) OpenStream(conn net.Conn, target adbwire.AdbSp
 	}
 	defer untrack()
 
-	activity := newActivityTracker(nil, opener.device.MarkActivity)
+	activity := newActivityTracker(nil)
 	stream, leftover, err := openDeviceStream(streamCtx, opener.cfg.dialer, opener.device, opener.arn, opener.warm,
 		target, opener.cfg.policy, opener.cfg.params.DeviceStreamStatusTimeout, activity, logger)
 	if err != nil {

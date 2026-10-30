@@ -56,7 +56,7 @@ func newTestAdbConnOnRoute(t *testing.T, endpoint string, policy WSRefreshPolicy
 	ws, err := dialer.Dial(context.Background(), endpoint, route)
 	require.NoError(t, err)
 
-	conn := newAdbConn(dialer, device, testDeviceARN, route, ws, policy, newActivityTracker(nil, nil), logger)
+	conn := newAdbConn(dialer, device, testDeviceARN, route, ws, policy, newActivityTracker(nil), logger)
 	t.Cleanup(func() { conn.Close() })
 	return conn
 }
@@ -1665,11 +1665,17 @@ func TestGivenABlockedSendWhenQuietForIsReadThenTheConnectionCountsAsActive(t *t
 	// and then fires the instant the write lands.
 	socket := &blockingWSConn{entered: make(chan struct{}, 1), release: make(chan struct{})}
 	clock := newFakeClock()
-	// onMark samples the counter, so the assertion below pins the mark INSIDE the counted
+	// The clock samples the counter. While a write counts, only the mark reads the clock
+	// (quietFor returns early), so the assertion below pins the mark INSIDE the counted
 	// span. Ending the span first would leave the pre-write gap readable for an instant.
 	var activity *activityTracker
 	markedInFlight := false
-	activity = newActivityTracker(clock.now, func() { markedInFlight = activity.inFlightWrites.Load() > 0 })
+	activity = newActivityTracker(func() time.Time {
+		if activity != nil && activity.inFlightWrites.Load() > 0 {
+			markedInFlight = true
+		}
+		return clock.now()
+	})
 	conn := newAdbConn(newTestDialer(time.Second), NewActiveDevice(), testDeviceARN, RouteAdb, socket,
 		fastPolicy(), activity, noopLogger())
 
@@ -1790,7 +1796,7 @@ func TestGivenASessionEndedCloseWhenReadThenOnlyAWholeUnmaskedOneSkipsTheResume(
 			opening := binaryFrame(newSessionControlFrame(controlStatusNew, testSessionUUID))
 			scripted := &wsConn{conn: dialScriptedServer(t, [][]byte{opening, testCase.closing}, maxInboundMessageBytes), writeDeadline: sendDeadline}
 			conn := newAdbConn(newTestDialer(testTimeout), device, testDeviceARN, RouteAdb, scripted, fastPolicy(),
-				newActivityTracker(nil, nil), noopLogger())
+				newActivityTracker(nil), noopLogger())
 			t.Cleanup(func() { conn.Close() })
 
 			_, err := conn.Receive()

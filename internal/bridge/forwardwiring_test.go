@@ -27,15 +27,11 @@ func startForwardingProxy(t *testing.T) (proxyAddress string, mock *testsupport.
 	return startForwardingProxyWithSerial(t, "")
 }
 
-// startForwardingProxyWithSerial is startForwardingProxy with the serial the keep-alive probe
-// would have cached already on the device. Empty means no probe has parsed one.
+// startForwardingProxyWithSerial is startForwardingProxy with the device bound under serial.
 func startForwardingProxyWithSerial(t *testing.T, serial string) (proxyAddress string,
 	mock *testsupport.SessionMockWSS, table *forward.ForwardRulesTable) {
 	t.Helper()
-	proxyAddress, mock, device := startAttachedProxy(t, testPolicy())
-	if serial != "" {
-		require.True(t, device.SetSerial("arn:test", serial))
-	}
+	proxyAddress, mock, device := startAttachedProxyWithSerial(t, testPolicy(), serial)
 	return proxyAddress, mock, attachedFeatures(t, device).table
 }
 
@@ -155,7 +151,7 @@ func TestGivenAMalformedForwardServiceWhenReceivedThenAdbFailTextAndNoDial(t *te
 
 func TestGivenARuleInstalledOnOneConnectionWhenAnotherListsThenTheTableIsRendered(t *testing.T) {
 	// The table belongs to the attachment, not to the connection that installed the rule.
-	proxyAddress, mock, _ := startForwardingProxy(t)
+	proxyAddress, mock, _ := startForwardingProxyWithSerial(t, "R3CN30ABCDE")
 	installer := dialClient(t, proxyAddress)
 	writeAll(t, installer, []byte(installForward))
 	port := readForwardSuccessPort(t, installer)
@@ -163,7 +159,7 @@ func TestGivenARuleInstalledOnOneConnectionWhenAnotherListsThenTheTableIsRendere
 	lister := dialClient(t, proxyAddress)
 	writeAll(t, lister, []byte("0011host:list-forward"))
 
-	row := fmt.Sprintf("unknown tcp:%d tcp:9999\n", port)
+	row := fmt.Sprintf("R3CN30ABCDE tcp:%d tcp:9999\n", port)
 	want := fmt.Sprintf("OKAY%04x%s", len(row), row)
 	assert.Equal(t, want, string(readN(t, lister, len(want))), "one row per rule, three fields each")
 	assertNoWebsocketDialed(t, mock)
@@ -196,9 +192,8 @@ func TestGivenAMalformedForwardBehindAnotherDevicesSerialWhenAnsweredThenTheDevi
 	assert.Equal(t, "FAIL0018device 'other' not found", client.replies.String())
 }
 
-func TestGivenACachedSerialWhenTheTableIsListedThenTheSerialColumnNamesTheDevice(t *testing.T) {
-	// The probe's serial reaches the responder, so the column stops reading `unknown`. The
-	// lister is a second connection, as `adb forward --list` always is.
+func TestGivenABoundSerialWhenTheTableIsListedThenTheSerialColumnNamesTheDevice(t *testing.T) {
+	// The lister is a second connection, as `adb forward --list` always is.
 	proxyAddress, _, _ := startForwardingProxyWithSerial(t, "R3CN30ABCDE")
 	installer := dialClient(t, proxyAddress)
 	writeAll(t, installer, []byte(installForward))
@@ -209,12 +204,12 @@ func TestGivenACachedSerialWhenTheTableIsListedThenTheSerialColumnNamesTheDevice
 
 	row := fmt.Sprintf("R3CN30ABCDE tcp:%d tcp:9999\n", port)
 	want := fmt.Sprintf("OKAY%04x%s", len(row), row)
-	assert.Equal(t, want, string(readN(t, lister, len(want))), "the cached serial fills the column")
+	assert.Equal(t, want, string(readN(t, lister, len(want))), "the bound serial fills the column")
 }
 
-func TestGivenACachedSerialWhenAForwardNamesAnotherDeviceThenItFailsButTheOwnSerialIsServed(t *testing.T) {
-	// With a serial cached, a selector can miss. A raw client names the device in the host
-	// prefix; adb names it in the select, which the seam checks the same way.
+func TestGivenABoundSerialWhenAForwardNamesAnotherDeviceThenItFailsButTheOwnSerialIsServed(t *testing.T) {
+	// A raw client names the device in the host prefix; adb names it in the select, which the
+	// seam checks the same way.
 	proxyAddress, _, table := startForwardingProxyWithSerial(t, "R3CN30ABCDE")
 	otherSerialClient := dialClient(t, proxyAddress)
 
@@ -229,7 +224,7 @@ func TestGivenACachedSerialWhenAForwardNamesAnotherDeviceThenItFailsButTheOwnSer
 	assert.NotZero(t, readForwardSuccessPort(t, ownSerialClient), "the attached device's own serial is served")
 }
 
-func TestGivenACachedSerialWhenATransportSelectNamesAnotherDeviceThenItIsRefused(t *testing.T) {
+func TestGivenABoundSerialWhenATransportSelectNamesAnotherDeviceThenItIsRefused(t *testing.T) {
 	// The select seam takes the same serial, so `adb -s other shell` is refused here
 	// instead of being switched to the device the attachment does hold.
 	proxyAddress, mock, _ := startForwardingProxyWithSerial(t, "R3CN30ABCDE")

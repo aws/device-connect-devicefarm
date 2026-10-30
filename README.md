@@ -99,7 +99,7 @@ settings, the way adb starts its own server. To pick a port or turn reverse on, 
 `bridge start` first.
 `--session-arn` is a per-command argument of
 `bridge start`, `device add`, and `device remove`; `device remove` without it detaches the
-attached device. The dial, keep-alive, stop, and
+attached device. The dial, stop, and
 endpoint-refresh timeouts and the websocket-refresh cadence are fixed runtime
 constants and are not exposed as flags, keeping the command surface small. A flag
 on `bridge start` configures only a daemon that command starts: against a running

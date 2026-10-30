@@ -80,9 +80,16 @@ func runProxy(t *testing.T, device *ActiveDevice, policy WSRefreshPolicy) (addr 
 func startAttachedProxy(t *testing.T, policy WSRefreshPolicy) (proxyAddress string,
 	mock *testsupport.SessionMockWSS, device *ActiveDevice) {
 	t.Helper()
+	return startAttachedProxyWithSerial(t, policy, "")
+}
+
+// startAttachedProxyWithSerial is startAttachedProxy with the device bound under serial.
+func startAttachedProxyWithSerial(t *testing.T, policy WSRefreshPolicy, serial string) (proxyAddress string,
+	mock *testsupport.SessionMockWSS, device *ActiveDevice) {
+	t.Helper()
 	mock = switchReplyMock(t, "OKAY")
 	device = newForwardingDevice(t)
-	require.True(t, device.Set(DeviceInfo{ARN: "arn:test", Endpoint: mock.URL, Label: "Test Device - OS 1"}))
+	require.True(t, device.Set(DeviceInfo{ARN: "arn:test", Endpoint: mock.URL, Label: "Test Device - OS 1", Serial: serial}))
 	proxyAddress, _ = runProxy(t, device, policy)
 	return proxyAddress, mock, device
 }
@@ -473,4 +480,45 @@ func TestGivenRepeatedRefusalsWhenLoggedThenOneWarnNamesTheLimit(t *testing.T) {
 	warn := `level=WARN msg="refused a local adb connection: every device-stream slot is taken"`
 	assert.Equal(t, 1, strings.Count(logs.String(), warn), "refusals inside one interval must log once")
 	assert.Contains(t, logs.String(), "maxDeviceStreams=2", "the Warn must name the limit")
+}
+
+// The proxy server must mint no session a proxied connection did not ask for: each spends a
+// per-host slot that a refresh's transient second socket also needs. No attachment features
+// here, so no serial fetch or parked socket runs.
+
+func TestGivenAttachedDeviceWithNoProxiedConnectionWhenIdleThenTheBridgeMintsNoSession(t *testing.T) {
+	mock := testsupport.NewSessionEchoWSS(t)
+	addr, _ := startServer(t, mock.URL, testPolicy())
+
+	// A device is attached and the listener is up, but no local adb client ever connects.
+	require.NotEmpty(t, addr)
+	time.Sleep(300 * time.Millisecond)
+
+	assert.Zero(t, mock.SessionsOpened(),
+		"the bridge must not mint a session for an idle attached device")
+}
+
+func TestGivenProxiedConnectionWhenIdleThenExactlyOneSessionExistsPerConnection(t *testing.T) {
+	// A connection that goes quiet must hold exactly the one session it opened: nothing
+	// extra from the bridge, and no extra session from the refresher until it swaps.
+	mock := testsupport.NewSessionEchoWSS(t)
+	policy := testPolicy()
+	// An interval far longer than the test window, so any additional session would
+	// have to come from something other than a refresh.
+	policy.Interval = time.Hour
+	addr, _ := startServer(t, mock.URL, policy)
+
+	client, err := net.Dial("tcp", addr)
+	require.NoError(t, err)
+	defer client.Close()
+
+	payload := []byte("000chost:version")
+	writeAll(t, client, payload)
+	assert.Equal(t, payload, readN(t, client, len(payload)))
+
+	time.Sleep(300 * time.Millisecond)
+
+	assert.Equal(t, 1, mock.SessionsOpened(), "one proxied connection must mean exactly one session")
+	assert.Zero(t, mock.Reattaches(), "no refresh was due, so nothing may re-attach")
+	assert.Equal(t, []string{"adb"}, mock.RoutesDialed(), "an accepted adb client is proxied on the adb route")
 }

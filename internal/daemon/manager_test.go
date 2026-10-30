@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -563,9 +564,10 @@ func TestGivenServingDaemonWhenAddAndShutdownSentOverControlSocketThenAttachesAn
 	// control shutdown cancels the daemon context so RunForeground returns
 	// cleanly. This is the daemon-side counterpart of the CLI's fakeDaemon tests,
 	// which fake this side.
+	mock := testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{OnMessage: answerAttach})
 	cfg := config.Default()
 	cfg.ListenPort = freePort(t)
-	mgr := newTestManagerWithClient(t, cfg, newFakeClient(testEndpoint, "Pixel 10 (OS 17)"))
+	mgr := newTestManagerWithClient(t, cfg, newFakeClient(mock.URL, "Pixel 10 (OS 17)"))
 
 	// The pidfile is written only after both sockets are bound, so once it
 	// appears the control socket is safe to dial.
@@ -702,19 +704,55 @@ func (buffer *lockedBuffer) String() string {
 	return buffer.contents.String()
 }
 
-// answerReverseClear plays the server for the attach clear: OKAY to the daemon's select, both
-// OKAYs to the kill.
-func answerReverseClear(_ *testsupport.MockSession, data []byte) []byte {
-	if string(data) == "0012host:transport-any" {
+// hostDevicesRequest is the add's serial fetch, framed.
+const hostDevicesRequest = "000chost:devices"
+
+// attachSerial is the serial the mocks' one device row names.
+const attachSerial = "R3CN30ABCDE"
+
+// hostDevicesReply is the host:devices reply naming attachSerial, framed.
+var hostDevicesReply = fmt.Sprintf("OKAY%04x%s", len(attachSerial+"\tdevice\n"), attachSerial+"\tdevice\n")
+
+// answerAttach plays the server for an attach and a relayed command: one device row to the
+// serial fetch, OKAY to a select, echo for the rest.
+func answerAttach(_ *testsupport.MockSession, data []byte) []byte {
+	switch string(data) {
+	case hostDevicesRequest:
+		return []byte(hostDevicesReply)
+	case "0012host:transport-any":
 		return []byte("OKAY")
 	}
-	return []byte("OKAYOKAY")
+	return data
+}
+
+// answerReverseClear is answerAttach plus both OKAYs to the reverse clear's kill.
+func answerReverseClear(session *testsupport.MockSession, data []byte) []byte {
+	if string(data) == "0017reverse:killforward-all" {
+		return []byte("OKAYOKAY")
+	}
+	return answerAttach(session, data)
+}
+
+// sessionInbounds returns what each session the mock minted received, oldest first.
+func sessionInbounds(mock *testsupport.SessionMockWSS) []string {
+	var inbounds []string
+	for _, session := range mock.Sessions() {
+		inbounds = append(inbounds, string(session.Inbound()))
+	}
+	return inbounds
+}
+
+// sortedInbounds is sessionInbounds in byte order, for sessions that race each other.
+func sortedInbounds(mock *testsupport.SessionMockWSS) []string {
+	inbounds := sessionInbounds(mock)
+	slices.Sort(inbounds)
+	return inbounds
 }
 
 func TestGivenARunningDaemonWhenADeviceIsAddedThenANotifierOpensAndFollowsTheAttachment(t *testing.T) {
 	// The whole wiring in one test: the daemon body hands the dialer to the attachment, the
-	// attach opens a notifier on the reverse route and clears the server's reverse rules once it
-	// is ready, and the shutdown detach closes the notifier.
+	// add fetches the serial, opens a notifier on the reverse route and clears the server's
+	// reverse rules once it is ready, and the shutdown detach closes the notifier.
 	sessions, mock := testsupport.NewServerMockWSS(t, testsupport.SessionMockConfig{OnMessage: answerReverseClear})
 	cfg := config.Default()
 	cfg.ListenPort = freePort(t)
@@ -728,8 +766,11 @@ func TestGivenARunningDaemonWhenADeviceIsAddedThenANotifierOpensAndFollowsTheAtt
 	require.True(t, addResp.OK, "add over the live control socket must succeed: %s", addResp.Error)
 	require.Eventually(t, func() bool { return mock.NotifiersAccepted() == 1 }, testTimeout,
 		testPollInterval, "attaching a device must open exactly one notifier")
-	require.Eventually(t, func() bool { return sessions.SessionsOpened() == 1 }, testTimeout,
-		testPollInterval, "the ready notifier must be followed by one clear of the server's reverse rules")
+	// The clear's kill follows its select's reply, so wait for the whole of both sessions.
+	require.Eventually(t, func() bool {
+		return slices.Equal(sortedInbounds(sessions),
+			[]string{hostDevicesRequest, "0012host:transport-any0017reverse:killforward-all"})
+	}, testTimeout, testPollInterval, "the attach must fetch the serial once and clear the server's reverse rules once")
 
 	cancel()
 
@@ -744,17 +785,9 @@ func TestGivenARunningDaemonWhenADeviceIsAddedThenANotifierOpensAndFollowsTheAtt
 	assert.Empty(t, mock.Refusals(), "the daemon's hello must satisfy the server")
 }
 
-// answerSelect plays the server for a relayed command: OKAY to the daemon's select, echo the rest.
-func answerSelect(_ *testsupport.MockSession, data []byte) []byte {
-	if string(data) == "0012host:transport-any" {
-		return []byte("OKAY")
-	}
-	return data
-}
-
-func TestGivenAnAttachedDeviceWhenAnAdbCommandArrivesThenItRidesTheWebsocketParkedAhead(t *testing.T) {
-	// Full wiring: attach parks a websocket, the first command takes it, the slot refills.
-	mock := testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{OnMessage: answerSelect})
+func TestGivenAnAttachedDeviceWhenIdleThenTheSerialFetchIsItsOnlySession(t *testing.T) {
+	// After the add's fetch, an idle attachment holds only its parked websocket.
+	mock := testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{OnMessage: answerAttach})
 	cfg := config.Default()
 	cfg.ListenPort = freePort(t)
 	mgr := newTestManagerWithClient(t, cfg, newFakeClient(mock.URL, "Pixel 10 (OS 17)"))
@@ -764,9 +797,38 @@ func TestGivenAnAttachedDeviceWhenAnAdbCommandArrivesThenItRidesTheWebsocketPark
 	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: "arn:1"})
 	require.NoError(t, err)
 	require.True(t, addResp.OK, "add over the live control socket must succeed: %s", addResp.Error)
-	require.Eventually(t, func() bool { return mock.ConnectionsAccepted() == 1 }, testTimeout,
-		testPollInterval, "attaching a device must park one adb websocket ahead of any command")
-	require.Zero(t, mock.SessionsOpened(), "a parked websocket sends nothing, so no session exists yet")
+	require.Eventually(t, func() bool { return mock.SessionsOpened() == 1 && mock.ConnectionsAccepted() == 2 },
+		testTimeout, testPollInterval, "the attach must fetch the serial and park a websocket")
+
+	assert.Never(t, func() bool { return mock.SessionsOpened() > 1 || mock.ConnectionsAccepted() > 2 },
+		500*time.Millisecond, testPollInterval, "an idle attachment dials nothing more")
+	assert.Equal(t, []string{hostDevicesRequest}, sessionInbounds(mock), "the fetch sends host:devices alone")
+
+	cancel()
+
+	select {
+	case runErr := <-done:
+		require.NoError(t, runErr)
+	case <-time.After(testTimeout):
+		t.Fatal("RunForeground did not return after context cancellation")
+	}
+}
+
+func TestGivenAnAttachedDeviceWhenAnAdbCommandArrivesThenItRidesTheWebsocketParkedAhead(t *testing.T) {
+	// Full wiring: attach parks a websocket, the first command takes it, the slot refills.
+	mock := testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{OnMessage: answerAttach})
+	cfg := config.Default()
+	cfg.ListenPort = freePort(t)
+	mgr := newTestManagerWithClient(t, cfg, newFakeClient(mock.URL, "Pixel 10 (OS 17)"))
+
+	done, cancel := startForeground(t, mgr)
+	client := control.NewDaemonClient(mgr.paths.ControlSocket)
+	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: "arn:1"})
+	require.NoError(t, err)
+	require.True(t, addResp.OK, "add over the live control socket must succeed: %s", addResp.Error)
+	// The serial fetch is the one session; the other websocket is parked.
+	require.Eventually(t, func() bool { return mock.ConnectionsAccepted() == 2 && mock.SessionsOpened() == 1 },
+		testTimeout, testPollInterval, "attaching a device must park one adb websocket ahead of any command")
 
 	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.ListenPort)))
 	require.NoError(t, err)
@@ -782,8 +844,8 @@ func TestGivenAnAttachedDeviceWhenAnAdbCommandArrivesThenItRidesTheWebsocketPark
 	_, err = io.ReadFull(conn, echoed)
 	require.NoError(t, err, "the relayed command comes back through the parked websocket")
 	assert.Equal(t, service, string(echoed))
-	assert.Equal(t, 1, mock.SessionsOpened(), "the command's first frame minted its session on the parked websocket")
-	require.Eventually(t, func() bool { return mock.ConnectionsAccepted() == 2 }, testTimeout,
+	assert.Equal(t, 2, mock.SessionsOpened(), "the command's first frame minted its session on the parked websocket")
+	require.Eventually(t, func() bool { return mock.ConnectionsAccepted() == 3 }, testTimeout,
 		testPollInterval, "the slot must refill behind the take")
 
 	cancel()
@@ -794,7 +856,7 @@ func TestGivenAnAttachedDeviceWhenAnAdbCommandArrivesThenItRidesTheWebsocketPark
 	case <-time.After(testTimeout):
 		t.Fatal("RunForeground did not return after context cancellation")
 	}
-	assert.Equal(t, 1, mock.SessionsOpened(), "the replacement websocket sent nothing")
+	assert.Equal(t, 2, mock.SessionsOpened(), "the replacement websocket sent nothing")
 }
 
 // reverseOffFail is the framed FAIL a reverse request reads from a daemon that did not opt in.
@@ -821,7 +883,7 @@ func adbCommand(t *testing.T, listenPort int, service string) string {
 func TestGivenReverseOffWhenTheDaemonAttachesThenNoNotifierOpensAndOnlyReverseIsRefused(t *testing.T) {
 	// The default must reach the attachment, not just the config: the proof is a server that sees
 	// no notifier while the daemon still installs a forward rule and refuses a reverse one itself.
-	mock := testsupport.NewReverseMockWSS(t)
+	_, mock := testsupport.NewServerMockWSS(t, testsupport.SessionMockConfig{OnMessage: answerAttach})
 	cfg := config.Default()
 	cfg.ListenPort = freePort(t)
 	mgr := newTestManagerWithClient(t, cfg, newFakeClient(mock.URL, "Pixel 10 (OS 17)"))
@@ -849,31 +911,26 @@ func TestGivenReverseOffWhenTheDaemonAttachesThenNoNotifierOpensAndOnlyReverseIs
 	}
 }
 
-func TestGivenAPlaintextInteractiveEndpointWhenTheDaemonAttachesThenNoDialReachesTheEndpoint(t *testing.T) {
+func TestGivenAPlaintextInteractiveEndpointWhenAddIsSentThenTheAddFailsAndNoDialReachesTheEndpoint(t *testing.T) {
 	// The resolver, not the dialer, picks the scheme, so the refusal must hold at the daemon's
-	// dial sites. The notifier and the warm socket keeper dial once each: an hour of backoff
-	// holds the notifier, and the keeper redials only on a take or a rotation.
+	// dial sites. The add's serial fetch dials first, and its refusal fails the add before the
+	// notifier or the warm socket keeper can dial.
 	counterAddress, accepted := testsupport.NewAcceptCounter(t)
 	cfg := config.Default()
 	cfg.ListenPort = freePort(t)
 	cfg.ReverseEnabled = true
-	cfg.NotifierBackoffInitial = time.Hour
-	cfg.NotifierBackoffMax = time.Hour
 	mgr := newTestManagerWithClient(t, cfg, newFakeClient(fmt.Sprintf("ws://%s", counterAddress), "Pixel 10 (OS 17)"))
-	logs := &lockedBuffer{}
-	mgr.logger = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	done, cancel := startForeground(t, mgr)
 	client := control.NewDaemonClient(mgr.paths.ControlSocket)
 	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: "arn:1"})
 	require.NoError(t, err)
-	require.True(t, addResp.OK, "the attach itself resolves and binds; the dial is what refuses: %s", addResp.Error)
-	require.Eventually(t, func() bool { return strings.Count(logs.String(), "refused scheme") == 2 },
-		testTimeout, testPollInterval, "the notifier and warm socket dials must each report the refused scheme")
+	require.False(t, addResp.OK, "the serial fetch's refused dial must fail the add")
+	assert.Contains(t, addResp.Error, "refused scheme")
 
 	statusResp, err := client.Send(control.Request{Op: control.OpStatus})
 	require.NoError(t, err)
-	assert.Equal(t, "Pixel 10 (OS 17)", statusResp.DeviceLabel, "the daemon must stay up with the device held")
+	assert.Empty(t, statusResp.DeviceLabel, "a failed add must leave nothing attached")
 
 	cancel()
 
@@ -883,7 +940,6 @@ func TestGivenAPlaintextInteractiveEndpointWhenTheDaemonAttachesThenNoDialReache
 	case <-time.After(testTimeout):
 		t.Fatal("RunForeground did not return after context cancellation")
 	}
-	assert.Equal(t, 2, strings.Count(logs.String(), "refused scheme"), "two dials, two reports")
 	assert.Zero(t, accepted(), "nothing may reach a plaintext endpoint")
 }
 
@@ -892,9 +948,10 @@ func TestGivenARunningDaemonWhenItStopsThenTheAttachmentIsCleared(t *testing.T) 
 	// is what will close the attachment's forward listeners once the accept loop has
 	// stopped. The detach line is the only observable: the daemon's ActiveDevice is
 	// not reachable from here and the control socket is gone by then.
+	mock := testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{OnMessage: answerAttach})
 	cfg := config.Default()
 	cfg.ListenPort = freePort(t)
-	mgr := newTestManagerWithClient(t, cfg, newFakeClient(testEndpoint, "Pixel 10 (OS 17)"))
+	mgr := newTestManagerWithClient(t, cfg, newFakeClient(mock.URL, "Pixel 10 (OS 17)"))
 	logs := &lockedBuffer{}
 	mgr.logger = slog.New(slog.NewTextHandler(logs, nil))
 

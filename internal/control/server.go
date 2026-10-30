@@ -15,12 +15,11 @@ import (
 // connection. Connections are served inline (the device state is the
 // serialization point), so without a deadline a client that connects and never
 // finishes writing its request would block the accept loop and wedge every
-// subsequent control command for the life of the daemon. The OpAdd handler now
-// resolves the session ARN against AWS, so this is 10s rather than a few: the
-// resolve itself is bounded by the daemon's tighter resolveTimeout, leaving room
-// for the local read and write, and matching the client's requestTimeout. It is a
-// package var, not a const, so tests can shrink it to exercise the hung-client
-// path quickly.
+// subsequent control command for the life of the daemon. The OpAdd handler
+// resolves the session and fetches the device serial inline; both sit under the
+// daemon's tighter resolveTimeout, leaving room for the local read and write, and
+// matching the client's requestTimeout. It is a package var, not a const, so tests
+// can shrink it to exercise the hung-client path quickly.
 var connDeadline = 10 * time.Second
 
 // chmod sets the bound socket's mode. It is a package var so a test can make the

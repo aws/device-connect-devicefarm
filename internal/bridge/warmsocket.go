@@ -9,8 +9,14 @@ import (
 )
 
 // warmSocketMaxAge caps how long a socket stays parked: under the server's first-message
-// timeout, which closes a silent websocket.
+// timeout, which closes a silent websocket, and under its idle limit, so a park the server
+// closed is redialed before the session idles out.
 const warmSocketMaxAge = 4 * time.Minute
+
+// warmSocketRetryDelay is how soon the keeper redials after a failed dial; the parked socket
+// keeps the server session from going idle. Most failed dials never reach the server's pool,
+// so a quick retry risks no eviction. Source: pick.
+const warmSocketRetryDelay = 15 * time.Second
 
 // sleepTolerance is how far the wall clock may run ahead of the monotonic clock while a socket
 // is parked before the machine counts as having slept. Clock slew stays far below it.
@@ -118,14 +124,16 @@ func (socket *takenSocket) Close() error {
 }
 
 // warmSocketKeeper keeps at most one warm socket parked for one attachment, so the next
-// local connection or forwarded stream skips the dial. It dials only at rotation and after a
-// take that used or aged out the parked socket, never in a loop: a dial into a full server
-// pool is refused and can evict a live connection. After a failed dial, or a parked socket the
-// server answered or closed before any take, it parks nothing until its next rotation.
+// local connection or forwarded stream skips the dial. It dials at rotation, after a take
+// that used or aged out the parked socket, and retryDelay after a failed dial. After the server
+// answers or closes a parked socket, it waits for the next rotation: a dial into a full server
+// pool is refused and can evict a live connection, so it must not loop.
 type warmSocketKeeper struct {
 	device *ActiveDevice
 	cfg    *featureConfig
 	arn    string
+	// retryDelay is warmSocketRetryDelay; a field so tests can shorten it.
+	retryDelay time.Duration
 
 	mu     sync.Mutex
 	parked *warmSocket
@@ -134,7 +142,8 @@ type warmSocketKeeper struct {
 }
 
 func newWarmSocketKeeper(device *ActiveDevice, cfg *featureConfig, arn string) *warmSocketKeeper {
-	return &warmSocketKeeper{device: device, cfg: cfg, arn: arn, refill: make(chan struct{}, 1)}
+	return &warmSocketKeeper{device: device, cfg: cfg, arn: arn, retryDelay: warmSocketRetryDelay,
+		refill: make(chan struct{}, 1)}
 }
 
 // run parks one socket at a time until ctx ends, then closes whatever is parked. Rotation
@@ -146,6 +155,7 @@ func (keeper *warmSocketKeeper) run(ctx context.Context) {
 		keeper.cfg.logger.Info("no warm websocket is kept: the refresh interval is unset", "device", keeper.arn)
 		return
 	}
+	retrying := false
 	for {
 		// This turn's dial answers every take so far.
 		select {
@@ -153,39 +163,58 @@ func (keeper *warmSocketKeeper) run(ctx context.Context) {
 		default:
 		}
 		maxAge := min(keeper.cfg.policy.nextInterval(), warmSocketMaxAge)
-		keeper.parkOne(ctx, maxAge)
-		if !keeper.waitForTurn(ctx, maxAge) {
+		turn := maxAge
+		if err := keeper.parkOne(ctx, maxAge); err != nil {
+			turn = min(keeper.retryDelay, maxAge)
+			keeper.logDialFailure(ctx, err, retrying)
+			retrying = true
+		} else {
+			retrying = false
+		}
+		if !keeper.waitForTurn(ctx, turn) {
 			return
 		}
 		keeper.closeParked()
 	}
 }
 
-func (keeper *warmSocketKeeper) parkOne(ctx context.Context, maxAge time.Duration) {
+// parkOne dials and parks one socket, returning the dial's error.
+func (keeper *warmSocketKeeper) parkOne(ctx context.Context, maxAge time.Duration) error {
 	endpoint, ok := keeper.device.EndpointFor(keeper.arn)
 	if !ok {
-		return
+		return nil
 	}
 	ws, err := keeper.cfg.dialer.Dial(ctx, endpoint, RouteAdb)
 	if err != nil {
-		if ctx.Err() == nil {
-			keeper.cfg.logger.Debug("could not dial a warm websocket", "device", keeper.arn, "error", err)
-		}
-		return
+		return err
 	}
 	keeper.mu.Lock()
 	keeper.parked = parkSocket(ws, maxAge)
 	keeper.mu.Unlock()
+	return nil
 }
 
-// waitForTurn waits for the rotation age or a take's refill signal. False means ctx ended.
-func (keeper *warmSocketKeeper) waitForTurn(ctx context.Context, maxAge time.Duration) bool {
-	rotation := time.NewTimer(maxAge)
-	defer rotation.Stop()
+// logDialFailure warns once per run of failed dials, then logs the retries at Debug: with no
+// parked socket the remote session can idle out.
+func (keeper *warmSocketKeeper) logDialFailure(ctx context.Context, err error, retrying bool) {
+	if ctx.Err() != nil {
+		return
+	}
+	level := slog.LevelWarn
+	if retrying {
+		level = slog.LevelDebug
+	}
+	keeper.cfg.logger.Log(ctx, level, "could not dial a warm websocket; retrying", "device", keeper.arn, "error", err)
+}
+
+// waitForTurn waits for turn to pass or a take's refill signal. False means ctx ended.
+func (keeper *warmSocketKeeper) waitForTurn(ctx context.Context, turn time.Duration) bool {
+	timer := time.NewTimer(turn)
+	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		return false
-	case <-rotation.C:
+	case <-timer.C:
 		return true
 	case <-keeper.refill:
 		return true
