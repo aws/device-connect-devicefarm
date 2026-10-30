@@ -168,9 +168,9 @@ func TestGivenATportSelectWhenAnsweredThenOkayPlusEightLittleEndianBytes(t *test
 	}
 }
 
-// A legacy transport select takes the shipped bare OKAY: an id after it
+// A transport-id select takes the shipped bare OKAY: an id after it
 // desynchronizes a client that reads the next reply instead.
-func TestGivenALegacySelectWhenAnsweredThenBareOkayWithNoPayload(t *testing.T) {
+func TestGivenATransportIDSelectWhenAnsweredThenBareOkayWithNoPayload(t *testing.T) {
 	var sink oneWriteSink
 
 	require.NoError(t, WriteOkay(&sink))

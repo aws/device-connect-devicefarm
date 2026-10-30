@@ -130,24 +130,15 @@ func TestGivenTransportSelectServicesWhenParsedThenSelectorAndIDPayloadFlag(t *t
 			carriesID: true,
 			ok:        true,
 		},
-		{name: "legacy any", service: "transport-any", selector: AdbDeviceSelector{Kind: AdbSelectorAny}, ok: true},
-		{name: "legacy usb", service: "transport-usb", selector: AdbDeviceSelector{Kind: AdbSelectorUSB}, ok: true},
-		{name: "legacy local", service: "transport-local", selector: AdbDeviceSelector{Kind: AdbSelectorLocal}, ok: true},
 		{
-			name:     "legacy serial",
-			service:  "transport:R3CN30XXXX",
-			selector: AdbDeviceSelector{Kind: AdbSelectorSerial, Serial: "R3CN30XXXX"},
-			ok:       true,
-		},
-		{
-			name:     "legacy transport id",
+			name:     "transport id",
 			service:  "transport-id:7",
 			selector: AdbDeviceSelector{Kind: AdbSelectorTransportID, TransportID: 7},
 			ok:       true,
 		},
 		{
 			// adb reads 0 as unset, but the id is the caller's to judge.
-			name:     "legacy transport id zero",
+			name:     "transport id zero",
 			service:  "transport-id:0",
 			selector: AdbDeviceSelector{Kind: AdbSelectorTransportID},
 			ok:       true,
@@ -165,19 +156,19 @@ func TestGivenTransportSelectServicesWhenParsedThenSelectorAndIDPayloadFlag(t *t
 		{name: "devices", service: "devices"},
 		{name: "version", service: "version"},
 		{name: "list-forward", service: "list-forward"},
-		{name: "no separator after transport", service: "transportfoo"},
-		{name: "keyword without its separator", service: "transportany"},
+		// Older spellings. The client never sends them; unread, they relay like any other request.
+		{name: "the older any spelling", service: "transport-any"},
+		{name: "the older usb spelling", service: "transport-usb"},
+		{name: "the older local spelling", service: "transport-local"},
+		{name: "the older serial spelling", service: "transport:R3CN30XXXX"},
 		{name: "no separator after tport", service: "tportsomething"},
 		{name: "tport with no target", service: "tport:"},
 		{name: "tport serial with no serial", service: "tport:serial:"},
-		{name: "legacy serial with no serial", service: "transport:"},
-		{name: "the tport serial tail in the legacy spelling", service: "transport-serial:R3CN30XXXX"},
 		{name: "transport id not a number", service: "transport-id:abc"},
 		{name: "transport id empty", service: "transport-id:"},
 		{name: "transport id in hex", service: "transport-id:0x7"},
 		{name: "transport id over uint64", service: "transport-id:18446744073709551616"},
 		{name: "serial grammar this parser refuses", service: "tport:serial:usb:1-1.2"},
-		{name: "legacy serial grammar this parser refuses", service: "transport:product:sailfish"},
 		{name: "the host prefix is the caller's to strip", service: "host:tport:any"},
 	}
 
@@ -215,7 +206,7 @@ func TestGivenMalformedHostPrefixesWhenSplitThenNotHandled(t *testing.T) {
 		"host:",                            // empty service
 		"host-usb:",                        // empty service
 		"host-serial:",                     // nothing after the prefix
-		"host-serial::forward:tcp:1;tcp:2", // empty serial (adb main: any device; refused here)
+		"host-serial::forward:tcp:1;tcp:2", // empty serial (adb: any device; refused here)
 		"host-serial:R3CN30XXXX",           // serial with no service
 		"host-serial:R3CN30XXXX:",          // empty service
 		"host-serial:192.168.0.1:5555:",    // port merge leaves no service
@@ -229,7 +220,7 @@ func TestGivenMalformedHostPrefixesWhenSplitThenNotHandled(t *testing.T) {
 		"host-serial:udp:192.168.0.1:5555:list-forward",
 		"host-serial:vsock:3:5555:list-forward",
 		"host-serial:[::1]:5555:list-forward",
-		// Transport ids: decimal digits only, as adb main's from_chars.
+		// Transport ids: decimal digits only, as adb's from_chars.
 		"host-transport-id:abc:list-forward",
 		"host-transport-id:+7:list-forward",
 		"host-transport-id:-7:list-forward",

@@ -21,9 +21,9 @@ import (
 func Respond(conn io.WriteCloser, selector adbwire.AdbDeviceSelector, request adbwire.AdbForwardRequest, deviceSerial string, table *ForwardRulesTable) error {
 	defer conn.Close()
 
-	// adb main acquires the transport before it reads the request pieces
-	// (1.0.39 read them first; see adbwire.ParseForwardService), so a device
-	// miss outranks both a malformed request and a listener failure.
+	// adb acquires the transport before it reads the request pieces (see
+	// adbwire.ParseForwardService), so a device miss outranks both a malformed
+	// request and a listener failure.
 	// killforward-all and list-forward never acquire one, so they answer
 	// whatever device the prefix names.
 	if request.Action == adbwire.AdbActionForward || request.Action == adbwire.AdbActionKillForward {

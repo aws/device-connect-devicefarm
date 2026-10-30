@@ -2,8 +2,9 @@
 
 `devicefarm-connect` presents itself to local `adb` clients as the adb host. It listens
 on a local TCP port and proxies each connection over the websocket of an AWS
-Device Farm remote access session to the device's adb server. Because both ends terminate at a
-genuine adb server, the proxy is a byte pipe once a connection is running. It speaks adb in two
+Device Farm remote access session to the device's adb server. It is compatible with adb 1.0.41
+and tested with platform-tools 37. Because both ends terminate at a genuine adb server, the
+proxy is a byte pipe once a connection is running. It speaks adb in two
 places only. At the accept seam, where it reads a client's first requests before dialing the
 device, it answers the forward family (`adb forward` and its list and remove forms) and the
 transport select, and refuses the reverse family while reverse is off. And it writes a
