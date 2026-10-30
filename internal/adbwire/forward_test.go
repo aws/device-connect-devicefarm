@@ -112,8 +112,9 @@ func TestGivenNonForwardServicesWhenParsedThenNotFound(t *testing.T) {
 	services := []string{
 		"version",
 		"devices",
-		"transport-any",
-		"transport:R3CN30XXXX",
+		"tport:any",
+		"transport-any", // an older select spelling; not a forward service
+		"tport:serial:R3CN30XXXX",
 		"reverse:forward:tcp:1;tcp:2",
 		"reverse:killforward:tcp:1",
 		"list-forward-x",

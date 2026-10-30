@@ -8,10 +8,9 @@ import (
 
 // AdbSelectorKind is which transport-selection rule a host prefix or transport
 // select names. adb's model: the prefixes sockets.cpp smart_socket_enqueue
-// dispatches on, the same in adb 1.0.39 and 1.0.41. Any, USB and Local are
-// adb's TransportType names (adb.h kTransportAny, kTransportUsb,
-// kTransportLocal); Serial and TransportID carry a target. The Go enum is the
-// daemon's own.
+// dispatches on. Any, USB and Local are adb's TransportType names (adb.h
+// kTransportAny, kTransportUsb, kTransportLocal); Serial and TransportID carry
+// a target. The Go enum is the daemon's own.
 type AdbSelectorKind int
 
 const (
@@ -38,8 +37,7 @@ type AdbDeviceSelector struct {
 }
 
 // unsupportedSerialPrefixes are the serial grammars of adb's parse_host_service
-// (adb main; 1.0.39's skip_host_serial lacks vsock: and localfilesystem:) this
-// parser does not implement: the named-transport prefixes, the fastboot
+// this parser does not implement: the named-transport prefixes, the fastboot
 // protocol prefixes, vsock and a bracketed IPv6 address. No Device Farm client
 // is expected to send one; such a request is refused whole rather than
 // half-parsed, and the server answers it.
@@ -57,30 +55,20 @@ var unsupportedSerialPrefixes = []string{
 // Serial parsing accepts adb's plain form (scan to the next colon) plus its
 // port-merge rule: one following all-digits segment joins any serial, so
 // "192.168.0.1:5555" survives. The grammars in unsupportedSerialPrefixes are
-// refused. An empty serial (`-s ”`, ANDROID_SERIAL=”) is refused; adb main
-// reads it as any device, adb 1.0.39 as a device not found. The grammar is adb
-// main's; 1.0.39 is looser (strtoll transport ids, no failure on a bad serial)
-// but clients emit only the common subset.
+// refused. An empty serial (`-s ”`, ANDROID_SERIAL=”) is refused; adb reads
+// it as any device.
 //
-// Request order on one connection, verified against the upstream client
-// (client/commandline.cpp, adb_client.cpp) and by driving real platform-tools
-// builds at the wire. An older client sends `adb forward` as one host-prefixed
-// request (host:, host-usb:, host-local: or host-serial:<s>:) carrying
-// forward:... itself. From platform-tools 29.0.3 (commit da9c7678264a,
-// 2019-08-06) the set and remove forms send a transport select first
-// (host:tport:any, host:tport:serial:<s> or host:transport-id:<n>), then the
-// request under the plain host: prefix: host:forward:..., host:killforward:...
-// or host:killforward-all. adb's host server obeys the select and reads no
-// device off that prefix. `adb forward --list` is one host:list-forward request
-// on every version, with no features probe. reverse:* comes bare as request
-// two on every version from 27.0.1 to 37.0.1, unclaimed by this splitter:
-// 1.0.39 already selected first with host:transport:<serial>, and 29.0.0 to
-// 29.0.2 select for reverse with host:tport:serial:<s> while forward is still
-// one request; `reverse --list` selects first too. So read the reply a select
-// wants off its spelling, never off the client version. From 35.0.2 the set
-// and remove forms also open a separate connection asking host:features,
-// host-serial:<s>:features or host-transport-id:<n>:features, and a FAIL there
-// kills the command before any forward request.
+// Request order on one connection, from the adb client source
+// (client/commandline.cpp, adb_client.cpp). `adb forward` set and remove send
+// a transport select first (host:tport:any, host:tport:serial:<s> or
+// host:transport-id:<n>), then the request under the plain host: prefix:
+// host:forward:..., host:killforward:... or host:killforward-all. adb's host
+// server obeys the select and reads no device off that prefix. `adb forward
+// --list` is one host:list-forward request, with no features probe. reverse:*
+// (`--list` included) comes bare behind the same select, unclaimed by this
+// splitter. The set and remove forms also open a separate connection asking
+// host:features, host-serial:<s>:features or host-transport-id:<n>:features,
+// and a FAIL there kills the command before any forward request.
 func SplitHostPrefix(request string) (AdbDeviceSelector, string, bool) {
 	var selector AdbDeviceSelector
 	var service string
@@ -114,19 +102,21 @@ func SplitHostPrefix(request string) (AdbDeviceSelector, string, bool) {
 
 // ParseTransportSelect reads the service half of a host request as a transport
 // select, the request that moves a connection off the host services and onto
-// one device's own. carriesID reports which reply the client waits for: the
+// one device's own. carriesID reports which reply the client waits for: a
 // tport: spelling wants OKAY plus the 8-byte transport id
-// (WriteTransportSelect), the older spellings a bare OKAY (WriteOkay). ok is
+// (WriteTransportSelect), transport-id:<n> a bare OKAY (WriteOkay). ok is
 // false for every other service, and for a select whose target this parser does
 // not implement; the byte-blind path owns those, so a refused select must reach
 // the device verbatim or a client waiting for an id waits forever.
 //
-// adb's model: the forms are switch_socket_transport's (adb_client.cpp, in adb
-// 1.0.39 and main together). The tport: spellings are adb 1.0.41's; the
-// transport spellings are adb 1.0.39's, and 1.0.41 keeps transport-id:<n> for
-// `-t`. All are frozen, so they are matched whole and no arm depends on being
-// tried before another. Any transport id is accepted: `adb devices -l` prints
-// the harness's own ids, so a client may pass one back.
+// adb's model: the forms are switch_socket_transport's (adb_client.cpp): the
+// tport: spellings for a transport type or a serial, transport-id:<n> for `-t`.
+// The older transport-any|usb|local and transport:<serial> spellings are not
+// read here. The client never sends them; one that arrives relays verbatim
+// like any unread request. All forms are frozen, so they are matched whole and
+// no arm depends on being tried before another. Any transport id is accepted:
+// `adb devices -l` prints the remote adb server's ids, so a client may pass
+// one back.
 func ParseTransportSelect(service string) (selector AdbDeviceSelector, carriesID bool, ok bool) {
 	switch service {
 	case "tport:any":
@@ -135,12 +125,6 @@ func ParseTransportSelect(service string) (selector AdbDeviceSelector, carriesID
 		return AdbDeviceSelector{Kind: AdbSelectorUSB}, true, true
 	case "tport:local":
 		return AdbDeviceSelector{Kind: AdbSelectorLocal}, true, true
-	case "transport-any":
-		return AdbDeviceSelector{Kind: AdbSelectorAny}, false, true
-	case "transport-usb":
-		return AdbDeviceSelector{Kind: AdbSelectorUSB}, false, true
-	case "transport-local":
-		return AdbDeviceSelector{Kind: AdbSelectorLocal}, false, true
 	}
 	if serial, found := strings.CutPrefix(service, "tport:serial:"); found {
 		selector, ok = serialSelector(serial)
@@ -148,10 +132,6 @@ func ParseTransportSelect(service string) (selector AdbDeviceSelector, carriesID
 			return AdbDeviceSelector{}, false, false
 		}
 		return selector, true, true
-	}
-	if serial, found := strings.CutPrefix(service, "transport:"); found {
-		selector, ok = serialSelector(serial)
-		return selector, false, ok
 	}
 	if digits, found := strings.CutPrefix(service, "transport-id:"); found {
 		transportID, err := strconv.ParseUint(digits, 10, 64)
@@ -202,7 +182,8 @@ func splitSerial(rest string) (serial, service string, ok bool) {
 }
 
 // isPort mirrors adb's port-merge test: every byte a decimal digit, at least
-// one, as adb 1.0.39 requires; adb main also merges an empty segment.
+// one. adb also merges an empty segment; this parser refuses it, since no
+// client sends one.
 func isPort(segment string) bool {
 	return segment != "" && strings.Trim(segment, "0123456789") == ""
 }

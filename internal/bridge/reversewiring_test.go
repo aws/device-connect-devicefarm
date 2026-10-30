@@ -78,7 +78,7 @@ func startReverseProxy(t *testing.T, behavior reverseMockBehavior) *reverseProxy
 	return &reverseProxy{address: address, mock: mock, device: device}
 }
 
-// command sends one reverse-family service as a modern adb client does, a select first.
+// command sends one reverse-family service as adb does, a select first.
 func (proxy *reverseProxy) command(t *testing.T, service string) string {
 	t.Helper()
 	return proxy.exchange(t, service, true)

@@ -12,11 +12,11 @@ import (
 )
 
 // connectorLoopbackIPv4 and connectorLoopbackIPv6 are the only hosts dialed, in this order. adb's
-// model: the host server's network_loopback_client (sysdeps/posix/network.cpp, 1.0.39 and 1.0.41
-// alike) dials IPv4 first and falls back to IPv6, so a server bound to ::1 alone is reached here as
-// adb reaches it. adb falls back on any failure; this daemon on a refused connect only, so a
-// timeout is never paid twice. Never 0.0.0.0, never a hostname: the port is on this machine, and
-// anything wider lets a forged announcement reach the network.
+// model: the host server's network_loopback_client (sysdeps/posix/network.cpp) dials IPv4 first
+// and falls back to IPv6, so a server bound to ::1 alone is reached here as adb reaches it. adb
+// falls back on any failure; this daemon on a refused connect only, so a timeout is never paid
+// twice. Never 0.0.0.0, never a hostname: the port is on this machine, and anything wider lets a
+// forged announcement reach the network.
 const (
 	connectorLoopbackIPv4 = "127.0.0.1"
 	connectorLoopbackIPv6 = "::1"

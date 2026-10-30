@@ -15,7 +15,8 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/testsupport"
 )
 
-// installForward is the one-request spelling of `adb forward tcp:0 tcp:9999`, framed.
+// installForward is the framed request of `adb forward tcp:0 tcp:9999`. adb sends it behind a
+// select; the daemon answers it alone too, so one write installs a rule.
 const installForward = "001bhost:forward:tcp:0;tcp:9999"
 
 // startForwardingProxy runs a proxy whose attachment answers the forward family from its own
@@ -65,8 +66,8 @@ func readForwardSuccessPort(t *testing.T, client net.Conn) int {
 }
 
 func TestGivenAForwardRequestWhenItArrivesThenItIsAnsweredLocallyAndNoWebsocketIsDialed(t *testing.T) {
-	// A pre-29.0.3 client sends one request, prefix and all. The rule and its listening
-	// socket are local, so the device's own adb server could not serve this.
+	// A lone host-prefixed forward request, as a raw client may send it. The rule and its
+	// listening socket are local, so the device's own adb server could not serve this.
 	proxyAddress, mock, _ := startForwardingProxy(t)
 	client := dialClient(t, proxyAddress)
 
@@ -94,8 +95,8 @@ func TestGivenASelectThenAForwardRequestWhenReceivedThenAnsweredLocallyAndNoWebs
 }
 
 func TestGivenASelectThenAHostPrefixedForwardWhenReceivedThenAnsweredLocallyAndNoWebsocketIsDialed(t *testing.T) {
-	// `adb forward` on adb 1.0.41: the select, then the request with its host prefix kept.
-	// The prefix names no device; the select did.
+	// `adb forward`: the select, then the request with its host prefix kept. The prefix
+	// names no device; the select did.
 	proxyAddress, mock, table := startForwardingProxy(t)
 	client := dialClient(t, proxyAddress)
 
@@ -108,7 +109,7 @@ func TestGivenASelectThenAHostPrefixedForwardWhenReceivedThenAnsweredLocallyAndN
 }
 
 func TestGivenASelectThenAHostPrefixedKillforwardWhenReceivedThenTheRuleIsRemovedAndNoWebsocketIsDialed(t *testing.T) {
-	// `adb forward --remove` on adb 1.0.41: the select, then host:killforward:<local>.
+	// `adb forward --remove`: the select, then host:killforward:<local>.
 	proxyAddress, mock, table := startForwardingProxy(t)
 	installer := dialClient(t, proxyAddress)
 	writeAll(t, installer, []byte(installForward))
@@ -212,7 +213,8 @@ func TestGivenACachedSerialWhenTheTableIsListedThenTheSerialColumnNamesTheDevice
 }
 
 func TestGivenACachedSerialWhenAForwardNamesAnotherDeviceThenItFailsButTheOwnSerialIsServed(t *testing.T) {
-	// With a serial cached, a selector can finally miss through a real client.
+	// With a serial cached, a selector can miss. A raw client names the device in the host
+	// prefix; adb names it in the select, which the seam checks the same way.
 	proxyAddress, _, table := startForwardingProxyWithSerial(t, "R3CN30ABCDE")
 	otherSerialClient := dialClient(t, proxyAddress)
 

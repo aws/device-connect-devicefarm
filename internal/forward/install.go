@@ -1,9 +1,8 @@
 package forward
 
 // AdbInstallStatus classifies an Install outcome. adb's model: the
-// adb_listeners.h InstallStatus values an install can hit, the same in adb
-// 1.0.39 and 1.0.41. The Go enum is the daemon's own, as is each value adb
-// lacks.
+// adb_listeners.h InstallStatus values an install can hit. The Go enum is the
+// daemon's own, as is each value adb lacks.
 type AdbInstallStatus int
 
 const (
@@ -25,8 +24,8 @@ const (
 )
 
 // AdbInstallResult is one Install outcome. adb's model: the status
-// install_listener (adb_listeners.cpp, 1.0.39 and 1.0.41) returns, and the
-// port and error it fills through out-parameters; adb.cpp builds the FAIL
+// install_listener (adb_listeners.cpp) returns, and the port and error it fills
+// through out-parameters; adb.cpp builds the FAIL
 // text from them. The struct is the daemon's own. FailReason is the exact FAIL
 // text for a non-OK status. ResolvedPort is the OS-assigned port for a tcp:0
 // local, else zero; adb sends the extra protocol string only then.

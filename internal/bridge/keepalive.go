@@ -24,7 +24,7 @@ const defaultProbeReplyTimeout = 5 * time.Second
 const maxProbeReplyBytes = 64 * 1024
 
 // replyLengthDigits is the width of the hex length prefix adb puts on a reply payload. Source:
-// adb_io.cpp SendProtocolString, adb 1.0.39 and 1.0.41 alike.
+// adb_io.cpp SendProtocolString.
 const replyLengthDigits = 4
 
 // SendKeepAlive opens a short-lived websocket to endpoint, sends one host:devices request,
