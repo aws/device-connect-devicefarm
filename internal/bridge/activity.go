@@ -7,15 +7,13 @@ import (
 )
 
 // activityTracker records when one proxied connection last moved bytes in either
-// direction. The refresher reads quietFor to find a safe moment to swap websockets;
-// onMark forwards each mark to ActiveDevice.MarkActivity.
+// direction. The refresher reads quietFor to find a safe moment to swap websockets.
 //
 // The zero value is not usable; construct with newActivityTracker.
 type activityTracker struct {
 	mutex        sync.Mutex
 	clock        func() time.Time
 	lastActivity time.Time
-	onMark       func()
 
 	// inFlightWrites counts writes that entered the socket and have not been stamped. It
 	// holds one invariant: quietFor never reports quiet while bytes are still in the
@@ -24,29 +22,24 @@ type activityTracker struct {
 	inFlightWrites atomic.Int32
 }
 
-// newActivityTracker builds a tracker. A nil clock defaults to time.Now; a nil onMark is
-// a no-op. The timestamp starts at construction, so a connection that never moves a byte
-// reads as quiet rather than idle since the zero time.
-func newActivityTracker(clock func() time.Time, onMark func()) *activityTracker {
+// newActivityTracker builds a tracker. A nil clock defaults to time.Now. The timestamp
+// starts at construction, so a connection that never moves a byte reads as quiet rather
+// than idle since the zero time.
+func newActivityTracker(clock func() time.Time) *activityTracker {
 	if clock == nil {
 		clock = time.Now
-	}
-	if onMark == nil {
-		onMark = func() {}
 	}
 	return &activityTracker{
 		clock:        clock,
 		lastActivity: clock(),
-		onMark:       onMark,
 	}
 }
 
-// mark stamps the activity clock and notifies the device-level tracker.
+// mark stamps the activity clock.
 func (a *activityTracker) mark() {
 	a.mutex.Lock()
 	a.lastActivity = a.clock()
 	a.mutex.Unlock()
-	a.onMark()
 }
 
 // beginWrite marks one outbound write as started. Pair every call with endWrite.

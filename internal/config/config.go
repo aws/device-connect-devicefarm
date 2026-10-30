@@ -21,7 +21,6 @@ const (
 	wsRefreshIntervalEnvVar = "DEVICEFARM_CONNECT_REFRESH_MS"
 	freeSecondWaitEnvVar    = "DEVICEFARM_CONNECT_FREE_SECOND_WAIT_MS"
 	quietWindowEnvVar       = "DEVICEFARM_CONNECT_QUIESCE_MS"
-	keepAliveIdleEnvVar     = "DEVICEFARM_CONNECT_KEEPALIVE_IDLE_MS"
 
 	deviceStreamStatusEnvVar = "DEVICEFARM_CONNECT_DEVICE_STREAM_STATUS_MS"
 	maxDeviceStreamsEnvVar   = "DEVICEFARM_CONNECT_MAX_DEVICE_STREAMS"
@@ -63,11 +62,6 @@ const (
 	// together and overrun the server's per-host connection cap.
 	DefaultRefreshJitter = 0.10
 
-	// Idle time before the daemon probes with a throwaway websocket. Server idle
-	// tracking keys off a websocket being opened. Far below the server's 5-minute
-	// idle threshold.
-	DefaultKeepAliveIdle = 60 * time.Second
-
 	// DefaultEndpointRefreshInterval is how often the daemon re-resolves the
 	// attached session's interactive endpoint. Renews the URL before
 	// endpointURLValidity lapses, with margin for a retry.
@@ -79,7 +73,7 @@ const (
 
 	// Device streams open at once per attachment: local adb connections, forwarded
 	// connections and reverse connectors together. The /adb admission ceiling less
-	// a reserve for the reverse notifier, the keep-alive probe, the parked warm
+	// a reserve for the reverse notifier, the serial fetch, the parked warm
 	// websocket and swap overlaps.
 	DefaultMaxDeviceStreams = adbAdmissionCeiling - 8
 
@@ -159,8 +153,6 @@ type ProxyConfig struct {
 	QuietWindow       time.Duration
 	QuiescePoll       time.Duration
 
-	KeepAliveIdle time.Duration
-
 	// How often the daemon re-resolves the session ARN against AWS to renew its
 	// interactive endpoint. The control-plane re-resolve, not the websocket swap
 	// above; a swap dials whatever endpoint the latest re-resolve stored.
@@ -194,7 +186,6 @@ func Default() ProxyConfig {
 		FreeSecondWait:          DefaultFreeSecondWait,
 		QuietWindow:             DefaultQuietWindow,
 		QuiescePoll:             DefaultQuiescePoll,
-		KeepAliveIdle:           DefaultKeepAliveIdle,
 		EndpointRefreshInterval: DefaultEndpointRefreshInterval,
 
 		DeviceStreamStatusTimeout: DefaultDeviceStreamStatusTimeout,
@@ -312,12 +303,6 @@ func countFromEnv(name string, fallback int) int {
 // maxDurationMillis is the largest millisecond count that still fits a
 // time.Duration once scaled to nanoseconds.
 const maxDurationMillis = int(math.MaxInt64 / int64(time.Millisecond))
-
-// KeepAliveIdleFromEnv reads the hidden DEVICEFARM_CONNECT_KEEPALIVE_IDLE_MS
-// override. Only the detached daemon calls it.
-func KeepAliveIdleFromEnv(fallback time.Duration) time.Duration {
-	return durationFromEnv(keepAliveIdleEnvVar, fallback)
-}
 
 // WithRefreshOverridesFromEnv returns a copy of c with the websocket-refresh
 // cadence taken from the hidden env overrides. Each field falls back

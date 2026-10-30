@@ -117,8 +117,8 @@ func hiddenHelpCommand(root *cobra.Command) *cobra.Command {
 // and it is forwarded to the detached daemon. The listener flags (--port,
 // --listen-addr) and --log are NOT global: they matter only to the command that
 // starts the daemon, so they are bound there (see bindListenerFlags) rather than
-// advertised on every command's help. The connection, dial, keep-alive, and stop
-// durations are intentionally not exposed: they are fixed runtime constants (see
+// advertised on every command's help. The connection, dial, and stop durations
+// are intentionally not exposed: they are fixed runtime constants (see
 // config.Default) to keep the command surface small.
 func bindPersistentFlags(cmd *cobra.Command, cfg *config.ProxyConfig) {
 	cmd.PersistentFlags().BoolVar(&cfg.Debug, "debug", cfg.Debug, "enable debug-level logging (default is info)")

@@ -200,7 +200,7 @@ func TestGivenAClientsOpeningWhenItIsReadThenOnlyTheUnansweredBytesArePending(t 
 		},
 		{
 			name: "a serial select and a host-prefixed killforward-all", said: "0017host:tport:serial:dev-10014host:killforward-all",
-			wantPending: "0014host:killforward-all", wantService: "killforward-all", wantSelected: true,
+			deviceSerial: "dev-1", wantPending: "0014host:killforward-all", wantService: "killforward-all", wantSelected: true,
 			wantReplies: "OKAY" + transportIDReply,
 		},
 		{
@@ -574,7 +574,7 @@ func TestGivenASelectThenADeviceServiceWhenDeclinedThenTheServiceReachesTheSessi
 	// command goes down this path.
 	client, mock := startSelectAwareProxy(t)
 
-	writeAll(t, client, []byte("0017host:tport:serial:dev-1"))
+	writeAll(t, client, []byte("000ehost:tport:any"))
 	readN(t, client, 12)
 	writeAll(t, client, []byte("0008shell:ls"))
 

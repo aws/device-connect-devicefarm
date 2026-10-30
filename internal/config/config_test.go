@@ -19,7 +19,6 @@ func TestGivenDefaultConfigWhenConstructedThenHasExpectedDefaults(t *testing.T) 
 	assert.False(t, cfg.Debug, "debug logging is off by default (info level)")
 	assert.Equal(t, DefaultStopTimeout, cfg.StopTimeout)
 	assert.Equal(t, DefaultDialTimeout, cfg.DialTimeout)
-	assert.Equal(t, DefaultKeepAliveIdle, cfg.KeepAliveIdle)
 	assert.Equal(t, DefaultEndpointRefreshInterval, cfg.EndpointRefreshInterval)
 	assert.Equal(t, DefaultWSRefreshInterval, cfg.WSRefreshInterval)
 	assert.Equal(t, DefaultFreeSecondWait, cfg.FreeSecondWait)
@@ -105,7 +104,7 @@ func TestGivenFullyPopulatedConfigWhenConvertedToDaemonArgsThenForwardedFlagsRou
 	// are not forwarded; the parent owns the logfile. None of these must appear on
 	// the child's argv.
 	for _, absent := range []string{
-		"--log", "--dial-timeout", "--keepalive-idle", "--refresh-interval",
+		"--log", "--dial-timeout", "--refresh-interval",
 		"--endpoint-refresh-interval", "--stop-timeout",
 	} {
 		_, present := flags[absent]
@@ -156,6 +155,8 @@ func TestGivenRefreshEnvOverrideWhenReadFromEnvThenPositiveMillisWinElseFallback
 		// These two wrap to a negative duration and to exactly zero. See durationFromEnv.
 		{name: "overflow to negative falls back", set: true, value: "9223372036855", want: DefaultWSRefreshInterval},
 		{name: "overflow to zero falls back", set: true, value: "4611686018427387904", want: DefaultWSRefreshInterval},
+		{name: "the largest non-overflowing count is honored", set: true, value: "9223372036854",
+			want: 9223372036854 * time.Millisecond},
 	}
 
 	for _, tc := range tests {
@@ -196,33 +197,6 @@ func TestGivenAllRefreshOverridesSetWhenReadFromEnvThenEachFieldTakesItsOwnValue
 	assert.Equal(t, 1500*time.Millisecond, cfg.WSRefreshInterval)
 	assert.Equal(t, 800*time.Millisecond, cfg.FreeSecondWait)
 	assert.Equal(t, 50*time.Millisecond, cfg.QuietWindow)
-}
-
-func TestGivenKeepAliveIdleOverrideWhenReadFromEnvThenItIsHonoredOrFallsBack(t *testing.T) {
-	// KeepAliveIdle shares durationFromEnv, so it inherits the same rejection rules.
-	tests := []struct {
-		name  string
-		value string
-		want  time.Duration
-	}{
-		{name: "a positive millisecond count is honored", value: "2500", want: 2500 * time.Millisecond},
-		{name: "zero falls back", value: "0", want: DefaultKeepAliveIdle},
-		{name: "negative falls back", value: "-1", want: DefaultKeepAliveIdle},
-		{name: "unparseable falls back", value: "soon", want: DefaultKeepAliveIdle},
-		// One millisecond past maxDurationMillis, which would wrap to a non-positive
-		// Duration and silently disable the probe rather than being rejected.
-		{name: "an overflowing count falls back", value: "9223372036855", want: DefaultKeepAliveIdle},
-		{name: "the largest non-overflowing count is honored", value: "9223372036854",
-			want: 9223372036854 * time.Millisecond},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(keepAliveIdleEnvVar, tc.value)
-
-			assert.Equal(t, tc.want, KeepAliveIdleFromEnv(DefaultKeepAliveIdle))
-		})
-	}
 }
 
 func TestGivenDefaultConfigWhenConstructedThenTheNewKnobsCarryTheirDefaults(t *testing.T) {

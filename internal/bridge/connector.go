@@ -50,10 +50,9 @@ func openConnector(ctx context.Context, cfg *featureConfig, device *ActiveDevice
 		return fmt.Errorf("dial the connector websocket: %w", err)
 	}
 	// Wrap before sending anything: only this reader reads the session control frame. Its tracker
-	// is fresh, not shared, so only this connection's writes gate its swap, and it marks device
-	// activity because connector bytes are the device's traffic, unlike a notifier's keepalives.
+	// is fresh, not shared, so only this connection's writes gate its swap.
 	stream := newAdbConn(cfg.dialer, device, arn, RouteAdbReverse, ws, cfg.policy,
-		newActivityTracker(nil, device.MarkActivity), cfg.logger, withTerminalSessionGone())
+		newActivityTracker(nil), cfg.logger, withTerminalSessionGone())
 	// Every failure past here closes what it opened, so the device's connection ends with the
 	// websocket rather than waiting behind a half-spliced one.
 	defer func() {

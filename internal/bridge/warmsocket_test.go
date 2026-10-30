@@ -40,6 +40,29 @@ func newWarmDevice(t *testing.T, endpoint string, policy WSRefreshPolicy) *Activ
 	return device
 }
 
+// startKeeper runs a keeper outside an attachment, so a test can set its retry delay.
+func startKeeper(t *testing.T, endpoint string, rotation, retryDelay time.Duration) (*ActiveDevice,
+	*warmSocketKeeper) {
+	t.Helper()
+	device := NewActiveDevice()
+	require.True(t, device.Set(DeviceInfo{ARN: testDeviceARN, Endpoint: endpoint, Label: "Test Device - OS 1"}))
+	keeper := newWarmSocketKeeper(device,
+		&featureConfig{dialer: newTestDialer(testWait), policy: warmPolicy(rotation), logger: noopLogger()},
+		testDeviceARN)
+	keeper.retryDelay = retryDelay
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() {
+		keeper.run(ctx)
+		close(stopped)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-stopped
+	})
+	return device, keeper
+}
+
 // parkedSocket is the keeper's parked socket, or nil.
 func parkedSocket(keeper *warmSocketKeeper) *warmSocket {
 	keeper.mu.Lock()
@@ -264,8 +287,9 @@ func TestGivenAParkedSocketWhenAForwardedConnectionArrivesThenItRidesTheParkedSo
 	}, "the stream never consumed the parked socket, or the slot never refilled")
 }
 
-func TestGivenTheServerClosesEveryParkedSocketWhenNoTakeComesThenTheKeeperDoesNotRedial(t *testing.T) {
-	// A full server pool refuses this way, and a redial there can evict a live connection.
+func TestGivenTheServerClosesEveryParkedSocketWhenNoTakeComesThenTheKeeperWaitsForTheRotation(t *testing.T) {
+	// A full server pool refuses this way, and a redial there can evict a live connection, so
+	// the short retry after a failed dial must not apply.
 	events := &socketEvents{}
 	endpoint := testsupport.NewMockWSS(t, func(ws *websocket.Conn) {
 		events.mu.Lock()
@@ -273,66 +297,72 @@ func TestGivenTheServerClosesEveryParkedSocketWhenNoTakeComesThenTheKeeperDoesNo
 		events.mu.Unlock()
 		ws.Close()
 	})
-	newWarmDevice(t, endpoint, warmPolicy(warmInterval))
+	startKeeper(t, endpoint, warmInterval, time.Millisecond)
 
 	waitFor(t, func() bool { opened, _ := events.counts(); return opened == 1 }, "the keeper never dialed")
 	time.Sleep(notifierSettle)
 
 	opened, _ := events.counts()
-	assert.Equal(t, 1, opened, "the keeper waits for a take or a rotation, not a backoff")
+	assert.Equal(t, 1, opened, "the keeper waits for a take or a rotation, not the retry delay")
 }
 
-func TestGivenAFailedParkWhenTakesComeThenTheKeeperDialsOncePerRotation(t *testing.T) {
+func TestGivenTheServerClosesEveryParkedSocketWhenTakesComeThenTheKeeperDialsOncePerRotation(t *testing.T) {
 	// A full server pool refuses a socket and can evict a live one. A refill per take would do
 	// both per take; the keeper waits for its rotation instead.
-	tests := []struct {
-		name string
-		// keeperEndpoint returns the endpoint the keeper parks on and its dial count.
-		keeperEndpoint func(t *testing.T) (endpoint string, dials func() int)
-	}{
-		{name: "the server closes every parked socket", keeperEndpoint: func(t *testing.T) (string, func() int) {
-			var opened atomic.Int32
-			endpoint := testsupport.NewMockWSS(t, func(ws *websocket.Conn) {
-				opened.Add(1)
-				ws.Close()
-			})
-			return endpoint, func() int { return int(opened.Load()) }
-		}},
-		{name: "every keeper dial fails", keeperEndpoint: func(t *testing.T) (string, func() int) {
-			address, accepted := testsupport.NewAcceptCounter(t)
-			return "wss://" + address, accepted
-		}},
+	var keeperDials atomic.Int32
+	endpoint := testsupport.NewMockWSS(t, func(ws *websocket.Conn) {
+		keeperDials.Add(1)
+		ws.Close()
+	})
+	const rotation = 200 * time.Millisecond
+	device := newWarmDevice(t, endpoint, warmPolicy(rotation))
+	keeper := attachedFeatures(t, device).warmSockets()
+	caller := testsupport.NewSessionEchoWSS(t)
+	waitFor(t, func() bool { return keeperDials.Load() == 1 }, "the keeper never dialed")
+	started := time.Now()
+
+	takes := 0
+	for time.Since(started) < 3*rotation {
+		// Only a slot the server emptied: a take of a live socket is a real take, which refills.
+		waitFor(t, func() bool { socket := parkedSocket(keeper); return socket == nil || socket.ended() },
+			"the server never closed the parked socket")
+		ws, err := keeper.adbSocket(context.Background(), newTestDialer(testWait), caller.URL)
+		require.NoError(t, err)
+		assertDialedOwn(t, ws)
+		ws.Close()
+		takes++
+		time.Sleep(rotation / 10)
 	}
 
-	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			endpoint, keeperDials := testCase.keeperEndpoint(t)
-			const rotation = 200 * time.Millisecond
-			device := newWarmDevice(t, endpoint, warmPolicy(rotation))
-			keeper := attachedFeatures(t, device).warmSockets()
-			caller := testsupport.NewSessionEchoWSS(t)
-			waitFor(t, func() bool { return keeperDials() == 1 }, "the keeper never dialed")
-			started := time.Now()
+	rotations := int(time.Since(started) / rotation)
+	assert.LessOrEqual(t, int(keeperDials.Load()), 1+rotations, "at most one keeper dial per rotation, however many takes come")
+	assert.Greater(t, int(keeperDials.Load()), 1, "a rotation still tries once")
+	assert.Equal(t, takes, caller.ConnectionsAccepted(), "each take dials once, for the caller")
+}
 
-			takes := 0
-			for time.Since(started) < 3*rotation {
-				// Only a slot the server emptied: a take of a live socket is a real take, which refills.
-				waitFor(t, func() bool { socket := parkedSocket(keeper); return socket == nil || socket.ended() },
-					"the server never closed the parked socket")
-				ws, err := keeper.adbSocket(context.Background(), newTestDialer(testWait), caller.URL)
-				require.NoError(t, err)
-				assertDialedOwn(t, ws)
-				ws.Close()
-				takes++
-				time.Sleep(rotation / 10)
-			}
+func TestGivenAFailedDialWhenTheKeeperRunsThenItRedialsAtTheRetryDelayUntilADialSucceeds(t *testing.T) {
+	// The rotation is an hour, so only the retry delay can bring the later dials.
+	unreachable, failedDials := testsupport.NewAcceptCounter(t)
+	device, keeper := startKeeper(t, "wss://"+unreachable, warmInterval, 20*time.Millisecond)
+	waitFor(t, func() bool { return failedDials() >= 3 }, "a failed dial must be retried at the retry delay")
 
-			rotations := int(time.Since(started) / rotation)
-			assert.LessOrEqual(t, keeperDials(), 1+rotations, "at most one keeper dial per rotation, however many takes come")
-			assert.Greater(t, keeperDials(), 1, "a rotation still tries once")
-			assert.Equal(t, takes, caller.ConnectionsAccepted(), "each take dials once, for the caller")
-		})
-	}
+	events := &socketEvents{}
+	require.True(t, device.UpdateEndpoint(testDeviceARN, testsupport.NewMockWSS(t, events.serve), "Test Device - OS 1"))
+
+	waitFor(t, func() bool { return parkedSocket(keeper) != nil }, "a retry never parked on the reachable endpoint")
+	dialsAtPark := failedDials()
+	time.Sleep(notifierSettle)
+	opened, _ := events.counts()
+	assert.Equal(t, 1, opened, "a parked socket waits for its rotation")
+	assert.Equal(t, dialsAtPark, failedDials(), "the retries end once a dial succeeds")
+}
+
+func TestGivenARotationShorterThanTheRetryDelayWhenDialsFailThenTheKeeperRedialsEachRotation(t *testing.T) {
+	unreachable, failedDials := testsupport.NewAcceptCounter(t)
+
+	startKeeper(t, "wss://"+unreachable, 20*time.Millisecond, time.Hour)
+
+	waitFor(t, func() bool { return failedDials() >= 3 }, "the rotation must cap the retry delay")
 }
 
 func TestGivenAParkedSocketWhenItAgesThenItClosesBeforeTheReplacementDials(t *testing.T) {

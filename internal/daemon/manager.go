@@ -31,21 +31,14 @@ const (
 	startupPollInterval = 20 * time.Millisecond
 	stopPollInterval    = 20 * time.Millisecond
 	killTimeout         = 2 * time.Second
-
-	// maxKeepAliveCheckInterval caps how often the keep-alive loop wakes. The
-	// effective interval is derived from the idle threshold (see
-	// keepAliveCheckInterval) so a probe fires within one tick of a device
-	// crossing it, even when the idle threshold is small.
-	maxKeepAliveCheckInterval = 15 * time.Second
-
-	// resolveTimeout bounds a single session lookup (the GetRemoteAccessSession
-	// call with its retries). The SDK's retry budget caps
-	// the number of attempts but not total wall time, and the add path runs on the
-	// inline control loop, so a stalled resolve would otherwise wedge every later
-	// control command. It sits below the control channel's 10s deadlines so a slow
-	// resolve surfaces as a resolve error to the CLI rather than a dead socket.
-	resolveTimeout = 8 * time.Second
 )
+
+// resolveTimeout bounds one session lookup (GetRemoteAccessSession with its retries) on
+// refresh, and the lookup plus the serial fetch on add. The SDK's retry budget caps
+// attempts, not wall time, and add runs on the inline control loop, so a stalled step would
+// wedge every later control command. It sits below the control channel's deadline so a slow
+// step surfaces as an add error to the CLI, not a dead socket. A var so tests can shrink it.
+var resolveTimeout = 8 * time.Second
 
 // spawnDaemon launches the detached daemon child and returns its pid. It is a
 // package var so tests can substitute a fake that simulates the child (writing
@@ -60,10 +53,10 @@ var findProcess = os.FindProcess
 // DaemonManager drives the daemon lifecycle: Start (detach a background daemon),
 // Stop (shut it down and wait), Status (report it), and RunForeground (the daemon
 // body itself). RunForeground is the composition root that wires config into the
-// control channel, the active-device state, the bridge, the keep-alive loop, and
-// the endpoint refresh loop. It holds the session.RemoteAccessClient it resolves
-// ARNs through as a readonly member, injected at construction, so a test wires in
-// a fake without a package-level seam.
+// control channel, the active-device state, the bridge, and the endpoint refresh
+// loop. It holds the session.RemoteAccessClient it resolves ARNs through as a
+// readonly member, injected at construction, so a test wires in a fake without a
+// package-level seam.
 type DaemonManager struct {
 	config             config.ProxyConfig
 	paths              Paths
@@ -227,18 +220,17 @@ func (m *DaemonManager) Status() (pid int, running bool) {
 }
 
 // RunForeground is the daemon body: it binds the control socket and the TCP
-// listener, owns the active-device state shared by the bridge and the keep-alive
-// loop, writes the pidfile only after the control socket is bound (so a ready
-// pidfile means the CLI can connect), and serves until ctx is cancelled
+// listener, owns the active-device state shared by the bridge and the endpoint
+// refresh loop, writes the pidfile only after the control socket is bound (so a
+// ready pidfile means the CLI can connect), and serves until ctx is cancelled
 // (SIGINT/SIGTERM) or a control shutdown request arrives. This runs in the
 // detached child.
 func (m *DaemonManager) RunForeground(ctx context.Context) error {
-	// Only the running daemon consumes KeepAliveIdle (via the keep-alive loop), the
-	// websocket-refresh cadence and the forward and reverse knobs, so the hidden
-	// test overrides are applied here rather than in the shared config seeding,
-	// keeping them off every foreground command's path. Applied before Validate so
-	// an override cannot smuggle in a value the flags could not.
-	m.config.KeepAliveIdle = config.KeepAliveIdleFromEnv(m.config.KeepAliveIdle)
+	// Only the running daemon consumes the websocket-refresh cadence and the forward
+	// and reverse knobs, so the hidden test overrides are applied here rather than in
+	// the shared config seeding, keeping them off every foreground command's path.
+	// Applied before Validate so an override cannot smuggle in a value the flags
+	// could not.
 	m.config = m.config.WithRefreshOverridesFromEnv().WithForwardReverseOverridesFromEnv()
 
 	if err := m.config.Validate(); err != nil {
@@ -252,7 +244,7 @@ func (m *DaemonManager) RunForeground(ctx context.Context) error {
 	}
 
 	// A control shutdown request cancels this context, which tears down the bridge
-	// server and the keep-alive loop the same way a signal does.
+	// server and the endpoint refresh loop the same way a signal does.
 	ctx, shutdown := context.WithCancel(ctx)
 	defer shutdown()
 	// Deferred before the binds so the record drops last, after the control
@@ -260,7 +252,7 @@ func (m *DaemonManager) RunForeground(ctx context.Context) error {
 	// must mean nothing is held.
 	defer m.pidFile.Remove()
 
-	dialer := bridge.NewWSDialer(m.config.DialTimeout).TrustRoots(m.websocketRoots)
+	dialer := m.newDialer()
 	device := bridge.NewActiveDevice(
 		bridge.WithAttachmentFeatures(dialer, m.refreshPolicy(), m.attachmentParams(), m.logger),
 	)
@@ -304,22 +296,25 @@ func (m *DaemonManager) RunForeground(ctx context.Context) error {
 		return err
 	}
 
-	handler := m.controlHandler(ctx, device, shutdown)
+	handler := m.controlHandler(ctx, device, dialer, shutdown)
 
 	m.logger.Info("starting "+config.BinaryName+" daemon", "port", m.config.ListenPort)
 
-	// Run the control server and the two periodic maintenance loops (keep-alive,
-	// endpoint refresh) alongside the bridge; the bridge server's return is the
-	// daemon's exit signal.
+	// Run the control server and the endpoint refresh loop alongside the bridge; the
+	// bridge server's return is the daemon's exit signal.
 	go func() {
 		if err := controlServer.Serve(ctx, handler); err != nil {
 			m.logger.Error("control server stopped with error", "error", err)
 		}
 	}()
-	go runPeriodic(ctx, m.keepAliveCheckInterval(), func() { m.keepAliveOnce(ctx, device, dialer) })
 	go runPeriodic(ctx, m.config.EndpointRefreshInterval, func() { m.refreshEndpointOnce(ctx, device) })
 
 	return server.Run(ctx)
+}
+
+// newDialer builds the websocket dialer the daemon's dial sites share.
+func (m *DaemonManager) newDialer() *bridge.WSDialer {
+	return bridge.NewWSDialer(m.config.DialTimeout).TrustRoots(m.websocketRoots)
 }
 
 // refreshPolicy builds the bridge's websocket-refresh policy from config.
@@ -353,12 +348,9 @@ func (manager *DaemonManager) attachmentParams() bridge.AttachmentParams {
 	}
 }
 
-// runPeriodic invokes tick every interval until ctx is cancelled. It is the
-// shared skeleton of the daemon's always-on maintenance loops; each loop's real
-// behavior lives in a single-tick decision function (keepAliveOnce,
-// refreshEndpointOnce) that reads the shared device state and no-ops when
-// nothing is attached, so it stays unit-testable without a ticker. Ticks run
-// sequentially on one goroutine per loop: a slow tick delays only its own loop.
+// runPeriodic calls tick every interval until ctx ends. Ticks run in sequence: a slow
+// tick delays the next. tick (refreshEndpointOnce) holds the logic, so tests need no
+// ticker.
 func runPeriodic(ctx context.Context, interval time.Duration, tick func()) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -376,10 +368,11 @@ func runPeriodic(ctx context.Context, interval time.Duration, tick func()) {
 // controlHandler builds the control.Handler that answers the CLI's control requests.
 // Requests run one at a time on the daemon's inline control loop.
 //
-// add attaches a device. The daemon holds one device at a time. When the request names
-// the device that is already attached, add succeeds and changes nothing. When a
-// different device is attached, add is refused. Otherwise the handler resolves the
-// session ARN to a websocket endpoint and binds the device.
+// add attaches a device. The daemon holds one at a time: a re-add of the attached device
+// succeeds and changes nothing; add refuses a different one. Otherwise the handler
+// resolves the session ARN to a websocket endpoint, fetches the device's adb serial over
+// it and binds the device. A failed resolve or fetch fails the add and binds nothing: the
+// local -s check and the forward list need the serial.
 //
 // remove detaches the attached device. When the request names an ARN, it must match the
 // attached device. That keeps a stale remove from detaching a device the caller did not
@@ -391,11 +384,12 @@ func runPeriodic(ctx context.Context, interval time.Duration, tick func()) {
 //
 // shutdown cancels the daemon context, then replies.
 //
-// ctx is the daemon context, and the resolve inside add runs under it. So a SIGTERM or
+// ctx is the daemon context, and add's resolve and fetch run under it. So a SIGTERM or
 // SIGINT that stops the daemon also cancels an add in flight. A control shutdown cannot
 // do that: it waits on the inline loop until the add returns. `bridge stop` sends that
 // shutdown, so it can wait behind an add for up to resolveTimeout.
-func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.ActiveDevice, shutdown context.CancelFunc) control.Handler {
+func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.ActiveDevice, dialer *bridge.WSDialer,
+	shutdown context.CancelFunc) control.Handler {
 	return func(req control.Request) control.Response {
 		switch req.Op {
 		case control.OpAdd:
@@ -413,17 +407,18 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 				}
 			}
 
-			resolved, err := m.resolveSession(ctx, req.ARN)
+			resolved, serial, err := m.resolveForAttach(ctx, dialer, req.ARN)
 			if err != nil {
-				m.logger.Warn("failed to resolve session on add", "error", err, "arn", req.ARN)
-				return control.Response{OK: false, Error: fmt.Sprintf("resolve session: %v", err)}
+				m.logger.Warn("failed to attach the device on add", "error", err, "arn", req.ARN)
+				return control.Response{OK: false, Error: err.Error()}
 			}
 			// Control commands are serialized on the inline accept loop and nothing
 			// else calls Set, so nothing can attach between the check above and here;
 			// this Set is expected to succeed. The failure branch is kept only as
 			// defense-in-depth against a future concurrent caller, and treats the
 			// race like the already-attached path.
-			if !device.Set(bridge.DeviceInfo{ARN: req.ARN, Endpoint: resolved.Endpoint, Label: resolved.Label}) {
+			if !device.Set(bridge.DeviceInfo{ARN: req.ARN, Endpoint: resolved.Endpoint, Label: resolved.Label,
+				Serial: serial}) {
 				current, _ := device.Current()
 				return control.Response{
 					OK:    false,
@@ -473,30 +468,34 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 	}
 }
 
-// resolveSession resolves sessionARN to the adb websocket endpoint and device
-// label through the injected remote-access client, shared by the add handler and
-// the refresh loop. The whole resolve is bounded by resolveTimeout: the SDK's
-// retry budget caps attempts, not wall time, and the add handler runs on the
-// inline control loop, so an unbounded resolve would wedge every later control
-// command.
-func (m *DaemonManager) resolveSession(ctx context.Context, sessionARN string) (session.RemoteAccessInfo, error) {
+// resolveForAttach resolves sessionARN, then fetches the device's adb serial from the
+// endpoint, both under one resolveTimeout so the add stays under the control deadline.
+func (m *DaemonManager) resolveForAttach(ctx context.Context, dialer *bridge.WSDialer,
+	sessionARN string) (session.RemoteAccessInfo, string, error) {
 	ctx, cancel := context.WithTimeout(ctx, resolveTimeout)
 	defer cancel()
-	return m.remoteAccessClient.GetSession(ctx, sessionARN)
+	resolved, err := m.remoteAccessClient.GetSession(ctx, sessionARN)
+	if err != nil {
+		return session.RemoteAccessInfo{}, "", fmt.Errorf("resolve session: %w", err)
+	}
+	serial, err := dialer.FetchDeviceSerial(ctx, resolved.Endpoint)
+	if err != nil {
+		return session.RemoteAccessInfo{}, "", fmt.Errorf("fetch the device serial: %w", err)
+	}
+	return resolved, serial, nil
 }
 
 // refreshEndpointOnce performs a single refresh: if a device is attached, it
 // re-resolves the session and updates the stored endpoint in place. Any error the
 // SDK surfaces after its retry budget detaches the device: its session can no
 // longer be resolved, so the stored endpoint is about to lapse (the URL is
-// valid ~5 min, one refresh interval away), the next keep-alive dial would fail,
-// and the remote session would idle out regardless. Detaching on the first failed
-// tick rather than tolerating a few (a credential expiry mid-session, e.g. ambient
-// temporary credentials lapsing, presents this way) is the deliberate trade-off:
-// surface a dead session promptly for a single-user local tool rather than keep a
-// device that can no longer be renewed. The ARN guards on UpdateEndpoint and
-// ClearMatching keep a refresh that races a remove or a switch to a DIFFERENT
-// device from disturbing the newer device; a same-ARN remove-then-re-add inside
+// valid ~5 min, one refresh interval away) and every later dial would fail.
+// Detaching on the first failed tick rather than tolerating a few (a credential
+// expiry mid-session, e.g. ambient temporary credentials lapsing, presents this
+// way) is the deliberate trade-off: surface a dead session promptly for a
+// single-user local tool rather than keep a device that can no longer be renewed.
+// The ARN guards on UpdateEndpoint and ClearMatching keep a refresh that races a
+// remove or a switch to a DIFFERENT device from disturbing the newer device; a same-ARN remove-then-re-add inside
 // the refresh window is an accepted limitation (see ClearMatching). It returns
 // whether a device was refreshed (for tests).
 func (m *DaemonManager) refreshEndpointOnce(ctx context.Context, device *bridge.ActiveDevice) bool {
@@ -505,7 +504,9 @@ func (m *DaemonManager) refreshEndpointOnce(ctx context.Context, device *bridge.
 		return false
 	}
 
-	resolved, err := m.resolveSession(ctx, current.ARN)
+	resolveCtx, cancel := context.WithTimeout(ctx, resolveTimeout)
+	defer cancel()
+	resolved, err := m.remoteAccessClient.GetSession(resolveCtx, current.ARN)
 	if err != nil {
 		// Do not detach on a cancelled context: that is the daemon shutting down,
 		// not a dead session, and the device state is about to be torn down anyway.
@@ -525,47 +526,6 @@ func (m *DaemonManager) refreshEndpointOnce(ctx context.Context, device *bridge.
 	// The device changed under us (removed or replaced) between the read and the
 	// update; the newer state wins and this refresh is a no-op.
 	return false
-}
-
-// keepAliveCheckInterval returns how often the keep-alive loop should wake:
-// half the idle threshold (so a device is probed within ~one half-threshold of
-// crossing it), capped at maxKeepAliveCheckInterval and floored at 1s so a tiny
-// idle threshold cannot spin the loop.
-func (m *DaemonManager) keepAliveCheckInterval() time.Duration {
-	interval := m.config.KeepAliveIdle / 2
-	if interval > maxKeepAliveCheckInterval {
-		interval = maxKeepAliveCheckInterval
-	}
-	if interval < time.Second {
-		interval = time.Second
-	}
-	return interval
-}
-
-// keepAliveOnce performs a single keep-alive check: if a device is attached and
-// has been idle past the configured threshold, it sends a synthetic host:devices
-// request so the remote Device Farm session does not go idle, caches the device
-// serial the reply names (best-effort), then resets the idle clock via
-// MarkActivity. It returns whether a probe was sent (for tests). A failed probe
-// is logged and not retried until the next tick.
-func (m *DaemonManager) keepAliveOnce(ctx context.Context, device *bridge.ActiveDevice, dialer *bridge.WSDialer) bool {
-	info, idle, tracked, present := device.IdleProbe()
-	// A tracked connection already holds a websocket, which is what keeps the remote
-	// session out of IDLE, so probing then would mint a session for nothing.
-	if !present || tracked > 0 || idle < m.config.KeepAliveIdle {
-		return false
-	}
-	serial, err := dialer.SendKeepAlive(ctx, info.Endpoint)
-	if err != nil {
-		m.logger.Warn("keep-alive probe failed", "error", err, "device", info.Label)
-		return false
-	}
-	if serial != "" {
-		device.SetSerial(info.ARN, serial)
-	}
-	device.MarkActivity()
-	m.logger.Debug("keep-alive probe sent", "device", info.Label)
-	return true
 }
 
 // waitUntilRunning polls until the daemon reports ready (pidfile present and

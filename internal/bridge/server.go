@@ -170,8 +170,7 @@ func (s *AdbProxyServer) handleConn(ctx context.Context, tcp net.Conn) {
 	defer untrack()
 	connLogger.Debug("local adb client connected", "device", info.Label)
 
-	// The serial comes from the same snapshot as the forwarding. It is empty until the
-	// keep-alive probe parses one, and an empty serial matches every selector.
+	// The serial comes from the same snapshot as the forwarding.
 	clientOpening, err := readOpening(connCtx, tcp, info.Serial)
 	if err != nil {
 		if errors.Is(err, errSelectRefused) {
@@ -220,7 +219,7 @@ func (s *AdbProxyServer) handleConn(ctx context.Context, tcp net.Conn) {
 		return
 	}
 
-	activity := newActivityTracker(nil, s.device.MarkActivity)
+	activity := newActivityTracker(nil)
 	session := newAdbConn(s.dialer, s.device, info.ARN, RouteAdb, ws, s.refresh, activity, connLogger)
 	refresher := func(done <-chan struct{}) {
 		runRefresher(connCtx, session, s.refresh, done)

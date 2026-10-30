@@ -266,16 +266,3 @@ func TestGivenFailedOpensWhenEachEndsThenItsSlotReturns(t *testing.T) {
 	assert.Equal(t, testMaxDeviceStreams+1, mock.ConnectionsAccepted(),
 		"a failed open must free its slot")
 }
-
-func TestGivenAForwardedStreamWhenItOpensThenTheKeepAliveProbeIsDeferred(t *testing.T) {
-	mock := newPrologueMock(t, "OKAY", "OKAY")
-	clock := newFakeClock()
-	device, opener := openerAt(t, mock.URL, WithClock(clock.now))
-	// Age the idle clock, so only the stream's marks can bring idle back to zero.
-	clock.advance(5 * time.Minute)
-
-	runStream(t, opener)
-
-	waitFor(t, func() bool { _, idle, _, _ := device.IdleProbe(); return idle == 0 },
-		"a forwarded stream must defer the keep-alive probe")
-}

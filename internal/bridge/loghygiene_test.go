@@ -94,6 +94,14 @@ func TestGivenAPresignedEndpointThatRefusesTheDialWhenEachSiteFailsThenTheLogCar
 				features.notifier.announce(context.Background(), testReverseToken, target.port)
 				target.requireNoDial(t)
 			}},
+		{name: "warm socket keeper", failureLine: `msg="could not dial a warm websocket; retrying"`,
+			run: func(t *testing.T, logger *slog.Logger) {
+				device := NewActiveDevice(WithAttachmentFeatures(newTestDialer(testWait), warmPolicy(warmInterval), warmParams(),
+					logger))
+				t.Cleanup(func() { device.Clear() })
+				require.True(t, device.Set(DeviceInfo{ARN: testDeviceARN,
+					Endpoint: testsupport.PresignedUnreachableEndpoint, Label: "test-device"}))
+			}},
 		{name: "reverse rule clear", failureLine: `msg="could not clear the server's reverse rules before the detach"`,
 			run: func(t *testing.T, logger *slog.Logger) {
 				// A clear needs a ready notifier and a held rule; the renewed endpoint then refuses its dial.

@@ -14,22 +14,21 @@ type DeviceInfo struct {
 	ARN      string // session ARN that produced the device
 	Endpoint string // resolved websocket endpoint to dial (path-less; dials name a Route)
 	Label    string // human-readable label shown to the user
-	Serial   string // adb serial parsed from the keep-alive probe reply; empty until one parses
+	Serial   string // adb serial, fetched by the control add before the bind
 }
 
 // ActiveDevice is the mutex-guarded single-device state shared by the accept loop,
-// the pipes, the control handler, and the keep-alive loop. Set reports whether the
+// the pipes, the control handler, the endpoint refresh loop and the attachment's own
+// goroutines. Set reports whether the
 // bind was accepted, which enforces the one-device restriction. Clearing the device
 // also cancels every in-flight connection bound to it: a proxied connection carries
 // no deadline, so nothing else would sever it.
 //
 // The zero value is not usable; construct with NewActiveDevice.
 type ActiveDevice struct {
-	mu           sync.Mutex
-	now          func() time.Time
-	present      bool
-	info         DeviceInfo
-	lastActivity time.Time
+	mu      sync.Mutex
+	present bool
+	info    DeviceInfo
 
 	// conns holds the cancel func of every connection currently bridging to the
 	// bound device, keyed by a monotonic id so each can deregister itself on exit.
@@ -71,9 +70,9 @@ type featureConfig struct {
 	logger *slog.Logger
 }
 
-// attachmentFeatures is one attachment's live features. ctx ends when the attachment
-// ends, so every stream the table starts, the notifier and the warm socket are severed
-// by the same detach that closes the listeners.
+// attachmentFeatures is one attachment's live features. ctx ends with the attachment, so
+// the detach that closes the listeners also severs the table's streams, the notifier and
+// the warm socket.
 type attachmentFeatures struct {
 	table    *forward.ForwardRulesTable
 	notifier *notifierSupervisor
@@ -112,23 +111,11 @@ func (features *attachmentFeatures) warmSockets() *warmSocketKeeper {
 // ActiveDeviceOption configures an ActiveDevice at construction.
 type ActiveDeviceOption func(*ActiveDevice)
 
-// WithClock overrides the activity clock, so a test can drive idle time
-// deterministically. A nil clock is ignored.
-func WithClock(now func() time.Time) ActiveDeviceOption {
-	return func(a *ActiveDevice) {
-		if now != nil {
-			a.now = now
-		}
-	}
-}
-
-// WithAttachmentFeatures turns on the features an attachment carries beside the adb
-// stream: a fresh forward table per device whose accepted connections become device
-// streams of their own, one warm adb websocket parked for the next dial, and, with
-// reverse on, a reverse notifier held open for the whole attachment. All dial with dialer,
-// and every detach closes the table's listeners, severs its streams and closes the
-// notifier and the warm socket. A caller with no dialer to give leaves them off rather
-// than dead.
+// WithAttachmentFeatures turns on the features beside the adb stream: a forward table per
+// device whose accepted connections become device streams, one warm adb websocket parked
+// for the next dial, and, with reverse on, a reverse notifier held for the whole attachment.
+// All dial with dialer. A detach closes the table's listeners, severs its streams and closes
+// the notifier and the warm socket. A nil dialer leaves them off rather than dead.
 func WithAttachmentFeatures(dialer *WSDialer, policy WSRefreshPolicy,
 	params AttachmentParams, logger *slog.Logger) ActiveDeviceOption {
 	if dialer == nil {
@@ -142,18 +129,17 @@ func WithAttachmentFeatures(dialer *WSDialer, policy WSRefreshPolicy,
 	}
 }
 
-// NewActiveDevice builds an empty ActiveDevice whose activity clock is time.Now,
-// overridable with WithClock.
+// NewActiveDevice builds an empty ActiveDevice.
 func NewActiveDevice(opts ...ActiveDeviceOption) *ActiveDevice {
-	a := &ActiveDevice{now: time.Now, conns: make(map[uint64]context.CancelFunc)}
+	device := &ActiveDevice{conns: make(map[uint64]context.CancelFunc)}
 	for _, opt := range opts {
-		opt(a)
+		opt(device)
 	}
-	return a
+	return device
 }
 
-// Set binds info as the active device and starts its activity clock, returning
-// false without changing anything if a device is already bound.
+// Set binds info as the active device, returning false without changing anything if a
+// device is already bound.
 func (a *ActiveDevice) Set(info DeviceInfo) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -162,7 +148,6 @@ func (a *ActiveDevice) Set(info DeviceInfo) bool {
 	}
 	a.present = true
 	a.info = info
-	a.lastActivity = a.now()
 	a.buildFeaturesLocked()
 	return true
 }
@@ -170,10 +155,10 @@ func (a *ActiveDevice) Set(info DeviceInfo) bool {
 // buildFeaturesLocked gives the attachment being bound its own features, context, stream budget
 // and reverse rule table. The stream opener is per attachment, so it can hold the ARN its
 // streams belong to.
-// Caller holds device.mu and has already assigned device.info, so this must not bind, dial, wait,
-// or call any ActiveDevice method: the opener and forward.NewForwardRulesTable only store their
-// arguments, the table binds nothing until a rule is installed, and the notifier's and the warm
-// socket keeper's own goroutines do the dialing, parked on device.mu inside EndpointFor until Set
+// Caller holds device.mu and has filled device.info, so this must not bind, dial, wait or call
+// any ActiveDevice method: the opener and forward.NewForwardRulesTable only store their
+// arguments, the table binds nothing until a rule is installed, and the notifier and the warm
+// socket keeper dial on their own goroutines, parked on device.mu inside EndpointFor until Set
 // returns.
 // Overwriting device.features is safe because Set refuses while a device is present and only
 // clearLocked drops it.
@@ -201,7 +186,7 @@ func (device *ActiveDevice) buildFeaturesLocked() {
 // listeners and the tunnel legs end now, not at their own timeouts. Call it before Clear: the
 // server refuses a reverse request with no notifier registered. Best effort, bounded by
 // reverseClearTimeout; on failure the server keeps the rules. The dial is the daemon's own, like
-// the keep-alive probe: no budget slot, no rule counted.
+// the add's serial fetch: no budget slot, no rule counted.
 func (device *ActiveDevice) ClearReverseRulesAtServer(ctx context.Context) {
 	device.mu.Lock()
 	info, features, present := device.info, device.features, device.present
@@ -248,8 +233,7 @@ func (a *ActiveDevice) clearLocked() (DeviceInfo, bool) {
 // UpdateEndpoint refreshes the bound device's endpoint and label in place, so later
 // dials (including a live connection's next websocket swap) pick up a renewed
 // endpoint. Updates only when the bound ARN matches arn, so a racing remove or
-// re-add is untouched; reports whether it did. Leaves the idle clock alone: a
-// refresh is not proxied traffic and must not defer the keep-alive probe.
+// re-add is untouched; reports whether it did.
 func (a *ActiveDevice) UpdateEndpoint(arn, endpoint, label string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -258,19 +242,6 @@ func (a *ActiveDevice) UpdateEndpoint(arn, endpoint, label string) bool {
 	}
 	a.info.Endpoint = endpoint
 	a.info.Label = label
-	return true
-}
-
-// SetSerial records the bound device's adb serial, parsed from a keep-alive probe
-// reply, and reports whether it recorded. ARN-guarded like UpdateEndpoint, so a probe
-// raced by a remove or re-add cannot tag the wrong device. The idle clock is untouched.
-func (device *ActiveDevice) SetSerial(arn, serial string) bool {
-	device.mu.Lock()
-	defer device.mu.Unlock()
-	if !device.present || device.info.ARN != arn {
-		return false
-	}
-	device.info.Serial = serial
 	return true
 }
 
@@ -327,25 +298,4 @@ func (device *ActiveDevice) trackConn(cancel context.CancelFunc) (info DeviceInf
 		defer device.mu.Unlock()
 		delete(device.conns, id)
 	}, true
-}
-
-// MarkActivity resets the idle clock to now; a no-op when no device is bound.
-func (a *ActiveDevice) MarkActivity() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.present {
-		a.lastActivity = a.now()
-	}
-}
-
-// IdleProbe reports the bound device, how long it has been idle and how many
-// connections are bridging to it, for the keep-alive loop. present is false when
-// no device is bound.
-func (device *ActiveDevice) IdleProbe() (info DeviceInfo, idle time.Duration, tracked int, present bool) {
-	device.mu.Lock()
-	defer device.mu.Unlock()
-	if !device.present {
-		return DeviceInfo{}, 0, 0, false
-	}
-	return device.info, device.now().Sub(device.lastActivity), len(device.conns), true
 }
