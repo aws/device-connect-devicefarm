@@ -7,8 +7,8 @@
 //     (sockets.cpp smart_socket_enqueue).
 //   - Host-prefix parsing: splits a request into its device selector and the
 //     bare service that follows (sockets.cpp parse_host_service), and reads
-//     that service half as a transport select, the request a modern client
-//     sends before its forward or reverse service (client/adb_client.cpp
+//     that service half as a transport select, the request an adb client
+//     sends before the service it came for (client/adb_client.cpp
 //     switch_socket_transport).
 //   - Forward spec and forward-family service parsing: kind:value endpoint
 //     specs with adb's tcp port check, and the forward:, killforward:,
@@ -21,7 +21,7 @@
 //     and SendProtocolString; adb_listeners.cpp format_listeners;
 //     transport.cpp acquire_one_transport), plus the transport select's reply:
 //     OKAY and the 8 raw little-endian bytes of a uint64 transport id, or a
-//     bare OKAY for the older spellings (adb.cpp handle_host_request; adb.h
+//     bare OKAY for host:transport-id:<n> (adb.cpp handle_host_request; adb.h
 //     TransportId).
 //
 // Two markers run through adbwire, forward and bridge. "adb's model": adb
@@ -32,15 +32,10 @@
 // carries the Adb prefix, and so does each of its constants, even one adb
 // lacks; the Go type itself is the daemon's own. An exported type without the
 // prefix is the daemon's own. Every other name here is adb's model unless its
-// comment marks it the daemon's own. The device host runs adb 1.0.39
-// (platform-tools 27) or 1.0.41 (platform-tools 37). adb pins a client to its
-// server's version, so this daemon meets only those two. A model holds for both
-// unless its comment says otherwise; the 1.0.39 claims were read against the
-// android-8.1.0_r1 tag of platform/system/core.
+// comment marks it the daemon's own.
 //
-// Pinned against the adb host server source at
-// https://android.googlesource.com/platform/packages/modules/adb/+/refs/heads/main/
-// fetched 2026-08-29 and re-read 2026-09-10; the transport select's reply also
-// against the android-11.0.0_r1 tag of platform/system/core and real clients at
-// the wire. The tests pin the exact bytes and texts.
+// This daemon is compatible with adb 1.0.41 and tested with platform-tools 37.
+//
+// The adb source files named above are at
+// https://android.googlesource.com/platform/packages/modules/adb/
 package adbwire

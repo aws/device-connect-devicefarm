@@ -6,8 +6,8 @@ import (
 )
 
 // AdbForwardAction is which member of the forward family a service names. adb's
-// model: the services adb.cpp handle_forward_request answers, the same in adb
-// 1.0.39 and 1.0.41. The Go enum is the daemon's own.
+// model: the services adb.cpp handle_forward_request answers. The Go enum is
+// the daemon's own.
 type AdbForwardAction int
 
 const (
@@ -38,9 +38,9 @@ type AdbForwardRequest struct {
 // requests stay on the byte-blind path. A non-nil error means the service IS
 // forward-family but malformed, and the error text is the exact FAIL reason
 // adb sends (adb.cpp handle_forward_request). For forward: and killforward:
-// adb main acquires the transport before it reads the pieces, so a device miss
-// outranks a malformed request. This daemon keeps that order; 1.0.39 read the
-// pieces first. list-forward and killforward-all never acquire one.
+// adb acquires the transport before it reads the pieces, so a device miss
+// outranks a malformed request. This daemon keeps that order. list-forward and
+// killforward-all never acquire one.
 func ParseForwardService(service string) (AdbForwardRequest, bool, error) {
 	switch service {
 	case "list-forward":

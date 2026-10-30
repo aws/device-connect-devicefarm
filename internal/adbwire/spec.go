@@ -8,11 +8,10 @@ import (
 )
 
 // AdbSpec is a forward endpoint specification, "kind:value". adb's model: the
-// kind:value shape of socket_spec.cpp, in adb 1.0.39 and 1.0.41 alike. The
-// struct is the daemon's own. The failure texts in this file are adb main's;
-// 1.0.39 quoted the unknown-kind text differently, and a client of either
-// version prints what it is sent. The split is purely structural; see
-// AdbForwardRequest for who validates a spec.
+// kind:value shape of socket_spec.cpp. The struct is the daemon's own. The
+// failure texts in this file are adb's; the client prints what it is sent.
+// The split is purely structural; see AdbForwardRequest for who validates a
+// spec.
 type AdbSpec struct {
 	Kind  string
 	Value string

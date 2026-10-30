@@ -19,7 +19,7 @@ import (
 
 // syntheticTransportID is the transport id the daemon reports for its one device. The
 // daemon's own value; adb numbers transports from a counter (transport.cpp). Only a
-// tport: select (adb 1.0.41) carries the id in its reply. Nonzero: adb reads 0 as unset.
+// tport: select carries the id in its reply. Nonzero: adb reads 0 as unset.
 // The same on every connection: a client reads it here and may pass it back as `-t <id>`
 // on the next one.
 const syntheticTransportID = 1
@@ -167,16 +167,14 @@ func readOpening(ctx context.Context, tcpConn net.Conn, deviceSerial string) (cl
 // on this connection and selector is what it named. An error ends the connection: the
 // reply would not write, or the select named another device and now has its FAIL.
 //
-// No client version is pinned: the reply shape follows the select's spelling. A tport: form
-// waits for OKAY plus the transport id; transport:<serial>, transport-any, transport-usb,
-// transport-local and transport-id:<n> take a bare OKAY. Real platform-tools builds from
-// 27.0.1 (adb 1.0.39) to 37.0.1 (adb 1.0.41) were driven at the wire; which spelling each
-// sends, and before which services, is at adbwire.SplitHostPrefix. An empty deviceSerial
-// matches every selector.
+// The reply shape follows the select's spelling. A tport: form waits for OKAY plus the
+// transport id; transport-id:<n> takes a bare OKAY. Which spelling adb sends, and before
+// which services, is at adbwire.SplitHostPrefix. An empty deviceSerial matches every
+// selector.
 func answerTransportSelect(writer io.Writer, request, deviceSerial string) (selector adbwire.AdbDeviceSelector,
 	claimed bool, err error) {
 	// adb's client puts every select behind the plain `host:` prefix and names its device
-	// in the service (adb_client.cpp switch_socket_transport, adb 1.0.39 and 1.0.41 alike).
+	// in the service (adb_client.cpp switch_socket_transport).
 	// Any other prefix carries a selector this seam does not read, so it goes to the
 	// device verbatim rather than being answered on a guess.
 	prefix, service, ok := adbwire.SplitHostPrefix(request)
@@ -243,10 +241,9 @@ func respondForwardLocally(tcpConn net.Conn, clientOpening opening, forwarding *
 		return true
 	}
 	if parseErr != nil {
-		// adb main acquires the transport before it reads a request's pieces (1.0.39 read
-		// them first; see adbwire.ParseForwardService), so a device miss outranks a
-		// malformed request. Only forward: and killforward: can be malformed, and both
-		// acquire one.
+		// adb acquires the transport before it reads a request's pieces (see
+		// adbwire.ParseForwardService), so a device miss outranks a malformed request.
+		// Only forward: and killforward: can be malformed, and both acquire one.
 		reason := parseErr.Error()
 		if missReason, selectorMissed := forward.SelectorMiss(selector, deviceSerial); selectorMissed {
 			reason = missReason

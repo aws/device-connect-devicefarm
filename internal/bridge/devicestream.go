@@ -90,11 +90,11 @@ func fillTo(ws WSConn, within time.Duration, receivedBytes []byte, minLength int
 	return receivedBytes, nil
 }
 
-// deviceTransportService switches a fresh session to the one device attached to the
-// harness adb server. adb's model: the legacy select spelling, which a 1.0.39 client
-// sends (adb_client.cpp switch_socket_transport) and every adb server answers with
-// exactly OKAY. Chosen over host:tport:, which appends 8 raw bytes of transport id
-// this reader would take for app bytes.
+// deviceTransportService switches a fresh session to the one device the remote adb
+// server holds. adb's model: the older select spelling, which the adb server
+// still answers with exactly OKAY (adb.cpp handle_host_request). Chosen over
+// host:tport:, which appends 8 raw bytes of transport id this reader would take for
+// app bytes.
 const deviceTransportService = "host:transport-any"
 
 // deviceTransportRequest is that service framed as a smart-socket request. The encoder
@@ -118,7 +118,7 @@ var deviceTransportRequest, _ = adbwire.EncodeRequest(deviceTransportService)
 func openDeviceStream(ctx context.Context, dialer *WSDialer, device *ActiveDevice, arn string,
 	target adbwire.AdbSpec, policy WSRefreshPolicy, statusTimeout time.Duration,
 	activity *activityTracker, logger *slog.Logger) (*adbConn, []byte, error) {
-	// target.String(), not a hardcoded "tcp:" prefix: the request the harness adb server
+	// target.String(), not a hardcoded "tcp:" prefix: the request the remote adb server
 	// must see is the spec the customer named, whatever its kind. The error arm is a guard,
 	// not a path: no parsed spec is empty or 64 KiB.
 	deviceService, err := adbwire.EncodeRequest(target.String())

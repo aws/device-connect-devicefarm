@@ -11,9 +11,8 @@ import (
 // host server for the forward family (adb.cpp handle_forward_request;
 // adb_io.cpp SendOkay, SendFail and SendProtocolString; adb_listeners.cpp
 // format_listeners; transport.cpp acquire_one_transport for the device-miss
-// texts), the same in adb 1.0.39 and 1.0.41. Success is OKAY OKAY
-// (list-forward: OKAY plus the table); failure is one FAIL plus a
-// length-prefixed reason, never OKAY then FAIL.
+// texts). Success is OKAY OKAY (list-forward: OKAY plus the table); failure is
+// one FAIL plus a length-prefixed reason, never OKAY then FAIL.
 
 const (
 	okayReply = "OKAY"
@@ -48,14 +47,14 @@ func WriteOkay(writer io.Writer) error {
 	return err
 }
 
-// WriteTransportSelect answers a tport: transport select (adb 1.0.41's) in one
-// write: OKAY plus the transport id as 8 raw bytes, with no length prefix
-// (adb.cpp handle_host_request: SendOkay, then the uint64 transport id
-// verbatim, in the host's native order, which is little-endian on every target
-// this daemon builds for). The older spellings, adb's legacy branch, take
-// WriteOkay instead: 4 bytes and no payload. Get the pair wrong and a real
-// client either reports a failure to read the transport id (a short payload),
-// hangs (no payload) or reads a protocol fault (a length prefix).
+// WriteTransportSelect answers a tport: transport select in one write: OKAY
+// plus the transport id as 8 raw bytes, with no length prefix (adb.cpp
+// handle_host_request: SendOkay, then the uint64 transport id verbatim, in the
+// host's native order, which is little-endian on every target this daemon
+// builds for). A transport-id:<n> select takes WriteOkay instead: 4 bytes and
+// no payload. Get the pair wrong and a real client either reports a failure to
+// read the transport id (a short payload), hangs (no payload) or reads a
+// protocol fault (a length prefix).
 func WriteTransportSelect(writer io.Writer, transportID uint64) error {
 	reply := binary.LittleEndian.AppendUint64([]byte(okayReply), transportID)
 	_, err := writer.Write(reply)

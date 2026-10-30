@@ -81,10 +81,10 @@ func assertSessionReceived(t *testing.T, mock *testsupport.SessionMockWSS, want 
 }
 
 func TestGivenATransportSelectWhenAnsweredThenTheReplyShapeFollowsItsSpelling(t *testing.T) {
-	// A modern client waits for the transport id as 8 raw bytes, and a short reply makes
-	// it report a failure to read one. The older spellings take a bare OKAY, and 12 bytes
-	// would leave them one reply ahead for the rest of the connection. Any id is accepted
-	// because `adb devices -l` prints the harness's own.
+	// A tport: select waits for the transport id as 8 raw bytes, and a short reply makes the
+	// client report a failure to read one. A transport-id select takes a bare OKAY, and 12
+	// bytes would leave the client one reply ahead for the rest of the connection. Any id is
+	// accepted because `adb devices -l` prints the remote adb server's own.
 	tests := []struct {
 		name         string
 		request      string
@@ -95,9 +95,7 @@ func TestGivenATransportSelectWhenAnsweredThenTheReplyShapeFollowsItsSpelling(t 
 			wantSelector: adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorAny}},
 		{name: "this device's serial", request: "host:tport:serial:dev-1", want: "OKAY" + transportIDReply,
 			wantSelector: adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorSerial, Serial: "dev-1"}},
-		{name: "the legacy spelling", request: "host:transport-any", want: "OKAY",
-			wantSelector: adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorAny}},
-		{name: "a legacy transport id", request: "host:transport-id:97", want: "OKAY",
+		{name: "a transport id", request: "host:transport-id:97", want: "OKAY",
 			wantSelector: adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorTransportID, TransportID: 97}},
 	}
 	for _, testCase := range tests {
@@ -122,7 +120,9 @@ func TestGivenARequestThatIsNotAPlainSelectWhenAnsweredThenItIsNotClaimed(t *tes
 	}{
 		// A prefixed select names its device in the prefix, which this seam does not read,
 		// so it goes to the device untouched rather than being answered on a guess.
-		{name: "a select behind a device-selecting prefix", request: "host-serial:other-device:transport-any"},
+		{name: "a select behind a device-selecting prefix", request: "host-serial:other-device:tport:any"},
+		// The older spelling. The client never sends it; unread, it relays like any other request.
+		{name: "the older any spelling", request: "host:transport-any"},
 		// Every other host service is the device's to answer.
 		{name: "a host service that selects nothing", request: "host:devices"},
 	}
@@ -184,7 +184,7 @@ func TestGivenAClientsOpeningWhenItIsReadThenOnlyTheUnansweredBytesArePending(t 
 			wantReplies: "OKAY" + transportIDReply,
 		},
 		{
-			// adb 1.0.41 keeps the plain host prefix on the forward family behind its select: the
+			// adb keeps the plain host prefix on the forward family behind its select: the
 			// device-bound bytes stay as framed, the service is read bare.
 			name: "a select and a host-prefixed forward", said: "000ehost:tport:any001bhost:forward:tcp:0;tcp:9999",
 			wantPending: "001bhost:forward:tcp:0;tcp:9999", wantService: "forward:tcp:0;tcp:9999", wantSelected: true,
@@ -201,11 +201,17 @@ func TestGivenAClientsOpeningWhenItIsReadThenOnlyTheUnansweredBytesArePending(t 
 			wantReplies: "OKAY" + transportIDReply,
 		},
 		{
-			// One request and no select: the device gets the client's own bytes and nothing
-			// else, exactly as it did before the seam learned to answer a select.
-			name: "a legacy single request", said: "0025host-serial:dev-1:forward:tcp:1;tcp:2",
-			wantPending: "0025host-serial:dev-1:forward:tcp:1;tcp:2",
-			wantService: "host-serial:dev-1:forward:tcp:1;tcp:2",
+			// A host command and no select, as `adb -s dev-1 features` sends: the device gets
+			// the client's own bytes and nothing else.
+			name: "a host command with no select", said: "001ahost-serial:dev-1:features",
+			wantPending: "001ahost-serial:dev-1:features",
+			wantService: "host-serial:dev-1:features",
+		},
+		{
+			// An older select spelling. The seam does not read it, so the device gets it as framed.
+			name: "the older any spelling, unread", said: "0012host:transport-any",
+			wantPending: "0012host:transport-any",
+			wantService: "host:transport-any",
 		},
 		{
 			// Bytes with no length prefix the parser can read are relayed, not refused: the
@@ -385,7 +391,7 @@ func TestGivenBytesCoalescedWithTheSwitchReplyWhenRelayedThenTheyReachTheClient(
 }
 
 func TestGivenTheDeviceRefusesTheSwitchWhenRelayedThenTheClientGetsAdbsRefusal(t *testing.T) {
-	// The device left the harness adb server. The client is waiting for the status word of
+	// The remote adb server lost the device. The client is waiting for the status word of
 	// its own request, so it gets the device's FAIL and prints the real reason instead of
 	// reporting a hangup.
 	mock := switchReplyMock(t, "FAIL000edevice offline")
@@ -520,7 +526,7 @@ func assertNoWebsocketDialed(t *testing.T, mock *testsupport.SessionMockWSS) {
 }
 
 func TestGivenATportSelectWhenReceivedThenOkayAndEightBytesAndNoDial(t *testing.T) {
-	// The reply a modern `adb forward` waits for: OKAY plus the transport id as 8 raw
+	// The reply `adb forward` waits for: OKAY plus the transport id as 8 raw
 	// bytes. A short one makes the client report a failure to read the transport id.
 	client, mock := startSelectAwareProxy(t)
 
@@ -532,13 +538,13 @@ func TestGivenATportSelectWhenReceivedThenOkayAndEightBytesAndNoDial(t *testing.
 		"the daemon answers the select itself, so nothing is dialed for it")
 }
 
-func TestGivenALegacyTransportIDSelectWhenReceivedThenBareOkayAndNoDial(t *testing.T) {
-	// The legacy spelling takes a bare OKAY. Reading the echo of the second request
-	// straight after the 4 bytes proves no payload followed them.
+func TestGivenATransportIDSelectWhenReceivedThenBareOkayAndNoDial(t *testing.T) {
+	// `adb -t 97` selects with transport-id:<n>, which takes a bare OKAY. Reading the echo
+	// of the second request straight after the 4 bytes proves no payload followed them.
 	client, mock := startSelectAwareProxy(t)
 
 	writeAll(t, client, []byte("0014host:transport-id:97"))
-	assert.Equal(t, "OKAY", string(readN(t, client, 4)), "a legacy select is answered with a bare OKAY")
+	assert.Equal(t, "OKAY", string(readN(t, client, 4)), "a transport-id select is answered with a bare OKAY")
 	assert.Equal(t, 0, mock.ConnectionsAccepted(), "answering a select dials nothing")
 
 	writeAll(t, client, []byte("000chost:devices"))
@@ -583,14 +589,29 @@ func TestGivenASelectAndItsServiceInOneWriteWhenReceivedThenOnlyTheServiceReache
 	assertSessionReceived(t, mock, canonicalSelect+"0008shell:ls")
 }
 
-func TestGivenALegacySingleRequestClientWhenItsRequestArrivesThenNoSelectIsAddedToTheSession(t *testing.T) {
-	// One request and no select: the device leg carries the client's own bytes and nothing
-	// else, exactly as it did before the seam learned to answer a select.
+func TestGivenAHostCommandWithNoSelectWhenItArrivesThenNoSelectIsAddedToTheSession(t *testing.T) {
+	// A host command and no select, as `adb -s dev-1 features` sends: the device leg carries
+	// the client's own bytes and nothing else.
 	client, mock := startSelectAwareProxy(t)
 
-	writeAll(t, client, []byte("0025host-serial:dev-1:forward:tcp:1;tcp:2"))
+	writeAll(t, client, []byte("001ahost-serial:dev-1:features"))
 
-	assertSessionReceived(t, mock, "0025host-serial:dev-1:forward:tcp:1;tcp:2")
+	assertSessionReceived(t, mock, "001ahost-serial:dev-1:features")
+}
+
+func TestGivenAnOlderSelectSpellingWhenItArrivesThenItReachesTheSessionVerbatimWithNoSelectAdded(t *testing.T) {
+	// The seam does not read host:transport-usb, so the select and the request behind it
+	// reach the device as framed, and the device answers the select. No select consumed
+	// here, so none added: the mock echoes both requests, and the client reads that echo,
+	// not an OKAY the daemon made up.
+	client, mock := startSelectAwareProxy(t)
+
+	writeAll(t, client, []byte("0012host:transport-usb"))
+	writeAll(t, client, []byte("0008shell:ls"))
+
+	want := "0012host:transport-usb0008shell:ls"
+	assertSessionReceived(t, mock, want)
+	assert.Equal(t, want, string(readN(t, client, len(want))), "the client reads the device's echo")
 }
 
 func TestGivenARequestPipelinedWithAppBytesWhenDeclinedThenBothReachTheSessionInOrder(t *testing.T) {
@@ -751,17 +772,12 @@ func assertRefusedReverseOff(t *testing.T, client net.Conn, mock *testsupport.Se
 }
 
 func TestGivenReverseOffWhenAReverseRequestArrivesThenTheDaemonFailsItLocallyAndDialsNothing(t *testing.T) {
-	// Shapes a client puts the family in: behind both `any` selects adb sends, and alone, with
+	// Shapes a client puts the family in: behind the `any` select adb sends, and alone, with
 	// and without a host prefix, as a raw client may.
 	shapes := []struct {
 		name string
 		send func(t *testing.T, client net.Conn, service string)
 	}{
-		{name: "behind host:transport-any", send: func(t *testing.T, client net.Conn, service string) {
-			writeAll(t, client, []byte("0012host:transport-any"))
-			require.Equal(t, "OKAY", string(readN(t, client, 4)), "the select is answered first")
-			writeAll(t, client, framed(service))
-		}},
 		{name: "behind host:tport:any", send: func(t *testing.T, client net.Conn, service string) {
 			selectAnyTransport(t, client)
 			writeAll(t, client, framed(service))

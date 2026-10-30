@@ -85,9 +85,9 @@ const (
 	// fit inside it. Source: pick.
 	DefaultMaxForwardRules = 8
 
-	// Reverse rules per attachment. The server holds the rules; each costs it a
-	// listener, an adbd listener and a harness tunnel leg, no websocket. Mirrors
-	// DefaultMaxForwardRules. Source: owner decision 2026-10-05.
+	// Reverse rules per attachment. The server holds the rules; each costs a
+	// listener at the server and one at adbd, no websocket. Mirrors
+	// DefaultMaxForwardRules. Source: pick.
 	DefaultMaxReverseRules = 8
 
 	// Client-to-server PING cadence on the reverse notifier websocket. The load

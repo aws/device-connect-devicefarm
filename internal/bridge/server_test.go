@@ -347,7 +347,7 @@ func assertRefusedOverBudget(t *testing.T, client net.Conn) {
 }
 
 func TestGivenASpentBudgetWhenALocalAdbClientConnectsThenItGetsTheLimitFailAndNothingIsDialed(t *testing.T) {
-	// The one-request shape: a client before platform-tools 29.0.3, or any host service.
+	// The one-request shape: a host service with no select.
 	proxyAddress, mock, device := startAttachedProxy(t, testPolicy())
 	spendBudget(t, device)
 	client := dialClient(t, proxyAddress)
@@ -359,8 +359,8 @@ func TestGivenASpentBudgetWhenALocalAdbClientConnectsThenItGetsTheLimitFailAndNo
 }
 
 func TestGivenASpentBudgetWhenTheSelectWasAnsweredThenTheFailAnswersTheServiceRequest(t *testing.T) {
-	// The modern shape: the select is answered at the seam, so the FAIL must answer the service
-	// behind it, whose status word the client is waiting for.
+	// The two-request shape: the select is answered at the seam, so the FAIL must answer the
+	// service behind it, whose status word the client is waiting for.
 	proxyAddress, mock, device := startAttachedProxy(t, testPolicy())
 	spendBudget(t, device)
 	client := dialClient(t, proxyAddress)

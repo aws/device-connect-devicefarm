@@ -161,14 +161,13 @@ func TestGivenDeviceRemoveWithoutRunningDaemonWhenInvokedThenFailsNotListening(t
 }
 
 func TestGivenListenerFlagsAfterProxyStartPathWhenInvokedThenParsed(t *testing.T) {
-	// The integration harness (kept outside this repository) invokes the
-	// binary as `devicefarm-connect proxy start --port N --log P --session-arn ...`, i.e.
-	// the listener/log flags follow the two-level subcommand path (they are flags of
-	// `proxy start`, not global). This guards that contract with a fast unit test
-	// rather than only the slow integration suite. fakeDaemon writes a live pidfile,
-	// so Manager.Start short-circuits (a daemon is "already running") rather than
-	// forking a real child; reaching the add request over the control socket proves
-	// the flags parsed and `proxy start` ran to completion.
+	// Callers invoke the binary as
+	// `devicefarm-connect proxy start --port N --log P --session-arn ...`: the
+	// listener/log flags are flags of `proxy start`, not global. This test guards
+	// that contract. fakeDaemon writes a live pidfile, so Manager.Start
+	// short-circuits (a daemon is "already running") instead of forking a child;
+	// reaching the add request over the control socket proves the flags parsed and
+	// `proxy start` ran.
 	addSeen := false
 	fakeDaemon(t, func(req control.Request) control.Response {
 		if req.Op == control.OpAdd {
