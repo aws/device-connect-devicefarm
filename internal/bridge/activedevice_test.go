@@ -15,7 +15,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/testsupport"
 )
 
-// fakeClock is a manually-advanced clock so idle-time math is deterministic.
+// fakeClock is a manually-advanced clock so quiet-time math is deterministic.
 type fakeClock struct{ t time.Time }
 
 func (c *fakeClock) now() time.Time          { return c.t }
@@ -98,51 +98,14 @@ func TestGivenNoDeviceWhenEndpointUpdatedThenIgnored(t *testing.T) {
 	assert.False(t, updated)
 }
 
-func TestGivenMatchingARNWhenSerialSetThenSerialRecorded(t *testing.T) {
+func TestGivenABoundSerialWhenEndpointUpdatedThenSerialSurvives(t *testing.T) {
 	device := NewActiveDevice()
-	require.True(t, device.Set(DeviceInfo{ARN: "arn:1", Endpoint: "wss://h/ws", Label: "Pixel"}))
-
-	require.True(t, device.SetSerial("arn:1", "R3CN30ABCDE"))
-
-	got, _ := device.Current()
-	assert.Equal(t, "R3CN30ABCDE", got.Serial)
-}
-
-func TestGivenMismatchedARNWhenSerialSetThenIgnored(t *testing.T) {
-	device := NewActiveDevice()
-	require.True(t, device.Set(DeviceInfo{ARN: "arn:1", Endpoint: "wss://h/ws"}))
-
-	assert.False(t, device.SetSerial("arn:other", "R3CN30ABCDE"),
-		"a probe raced by a re-add must not tag the wrong device")
-	got, _ := device.Current()
-	assert.Empty(t, got.Serial)
-}
-
-func TestGivenNoDeviceWhenSerialSetThenIgnored(t *testing.T) {
-	assert.False(t, NewActiveDevice().SetSerial("arn:1", "R3CN30ABCDE"))
-}
-
-func TestGivenRecordedSerialWhenEndpointUpdatedThenSerialSurvives(t *testing.T) {
-	device := NewActiveDevice()
-	require.True(t, device.Set(DeviceInfo{ARN: "arn:1", Endpoint: "wss://old", Label: "Old"}))
-	require.True(t, device.SetSerial("arn:1", "R3CN30ABCDE"))
+	require.True(t, device.Set(DeviceInfo{ARN: "arn:1", Endpoint: "wss://old", Label: "Old", Serial: "R3CN30ABCDE"}))
 
 	require.True(t, device.UpdateEndpoint("arn:1", "wss://new", "New"))
 
 	got, _ := device.Current()
-	assert.Equal(t, "R3CN30ABCDE", got.Serial, "an endpoint refresh must not forget the probed serial")
-}
-
-func TestGivenIdleDeviceWhenEndpointUpdatedThenIdleClockUntouched(t *testing.T) {
-	clock := newFakeClock()
-	device := NewActiveDevice(WithClock(clock.now))
-	require.True(t, device.Set(DeviceInfo{ARN: "arn:1", Endpoint: "wss://old"}))
-	clock.advance(90 * time.Second)
-
-	require.True(t, device.UpdateEndpoint("arn:1", "wss://new", "New"))
-
-	_, idle, _, _ := device.IdleProbe()
-	assert.Equal(t, 90*time.Second, idle, "a refresh is not proxied traffic; it must not defer the keep-alive")
+	assert.Equal(t, "R3CN30ABCDE", got.Serial, "an endpoint refresh must not forget the serial")
 }
 
 func TestGivenMatchingARNWhenEndpointReadThenCurrentEndpointReturned(t *testing.T) {
@@ -223,37 +186,6 @@ func TestGivenTrackedConnsWhenClearMatchingThenAllCancelled(t *testing.T) {
 	require.True(t, cleared)
 	assert.ErrorIs(t, ctx.Err(), context.Canceled, "ClearMatching must cancel every tracked connection")
 	assert.ErrorIs(t, features.ctx.Err(), context.Canceled, "ClearMatching must end the attachment")
-}
-
-func TestGivenSetDeviceWhenTimeAdvancesWithoutActivityThenIdleGrows(t *testing.T) {
-	clock := newFakeClock()
-	device := NewActiveDevice(WithClock(clock.now))
-	require.True(t, device.Set(DeviceInfo{ARN: "arn:1"}))
-
-	clock.advance(90 * time.Second)
-
-	info, idle, _, present := device.IdleProbe()
-	require.True(t, present)
-	assert.Equal(t, "arn:1", info.ARN)
-	assert.Equal(t, 90*time.Second, idle)
-}
-
-func TestGivenIdleDeviceWhenActivityMarkedThenIdleResets(t *testing.T) {
-	clock := newFakeClock()
-	device := NewActiveDevice(WithClock(clock.now))
-	require.True(t, device.Set(DeviceInfo{ARN: "arn:1"}))
-
-	clock.advance(90 * time.Second)
-	device.MarkActivity()
-	clock.advance(10 * time.Second)
-
-	_, idle, _, _ := device.IdleProbe()
-	assert.Equal(t, 10*time.Second, idle, "MarkActivity must reset the idle clock")
-}
-
-func TestGivenNoDeviceWhenIdleProbedThenReportsAbsent(t *testing.T) {
-	_, _, _, present := NewActiveDevice().IdleProbe()
-	assert.False(t, present)
 }
 
 func TestGivenNoDeviceWhenConnTrackedThenRefused(t *testing.T) {

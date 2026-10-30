@@ -221,15 +221,15 @@ type WSDialer struct {
 	dialTimeout time.Duration
 	// writeDeadline bounds each Send on a dialed connection (see sendDeadline).
 	writeDeadline time.Duration
-	// probeReplyTimeout bounds a keep-alive probe's reply read; a field so tests can
+	// serialReplyTimeout bounds the serial fetch's reply read; a field so tests can
 	// shorten it.
-	probeReplyTimeout time.Duration
+	serialReplyTimeout time.Duration
 	// trustRoots replaces the system roots (see TrustRoots).
 	trustRoots *x509.CertPool
 }
 
 func NewWSDialer(dialTimeout time.Duration) *WSDialer {
-	return &WSDialer{dialTimeout: dialTimeout, writeDeadline: sendDeadline, probeReplyTimeout: defaultProbeReplyTimeout}
+	return &WSDialer{dialTimeout: dialTimeout, writeDeadline: sendDeadline, serialReplyTimeout: defaultSerialReplyTimeout}
 }
 
 // TrustRoots verifies server chains against pool, not the system roots; a nil pool keeps

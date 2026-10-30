@@ -15,8 +15,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/adbwire"
 )
 
-// attachedSerial is the serial the keep-alive probe parsed for the one device
-// this daemon serves.
+// attachedSerial is the bound device's serial.
 const attachedSerial = "R3CN30XXXX"
 
 var (
@@ -162,22 +161,11 @@ func TestGivenRulesWhenListedThenEveryRowCarriesTheAttachedSerial(t *testing.T) 
 	first := installResolved(t, table, "tcp:5555")
 	second := installResolved(t, table, "tcp:8080")
 
-	tests := []struct {
-		name         string
-		deviceSerial string
-		column       string
-	}{
-		{"the probe parsed a serial", attachedSerial, attachedSerial},
-		{"no serial parsed yet", "", "unknown"},
-	}
-	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			rows := fmt.Sprintf("%s tcp:%d tcp:5555\n%s tcp:%d tcp:8080\n", testCase.column, first, testCase.column, second)
-			// A selector naming another device is ignored: adb lists globally.
-			reply := respond(t, table, otherDeviceSelector, listForwardRequest, testCase.deviceSerial)
-			assert.Equal(t, "OKAY"+protoString(rows), reply)
-		})
-	}
+	// A selector naming another device is ignored: adb lists globally.
+	reply := respond(t, table, otherDeviceSelector, listForwardRequest, attachedSerial)
+
+	rows := fmt.Sprintf("%s tcp:%d tcp:5555\n%s tcp:%d tcp:8080\n", attachedSerial, first, attachedSerial, second)
+	assert.Equal(t, "OKAY"+protoString(rows), reply)
 }
 
 func TestGivenNoRulesWhenListedThenOkayAndAnEmptyTable(t *testing.T) {
@@ -198,10 +186,6 @@ func TestGivenADeviceMissWhenTheListenerWouldAlsoMissThenTheDeviceTextWins(t *te
 	assert.Equal(t, deviceMissReply, respond(t, table, otherDeviceSelector, forwardRequest("tcp:0", "tcp:9999", false), attachedSerial))
 	assert.Equal(t, 1, table.ruleCount())
 	assert.Equal(t, local, table.List()[0].Local)
-
-	// The same selector matches while the daemon has not parsed its own serial.
-	assert.Equal(t, "OKAYOKAY", respond(t, table, otherDeviceSelector, killForwardRequest(local), ""))
-	assert.Zero(t, table.ruleCount())
 }
 
 func TestGivenTransportIDSelectorWhenRespondedThenItMatchesTheSingleDevice(t *testing.T) {
@@ -226,8 +210,6 @@ func TestGivenSelectorKindsWhenCheckedThenOnlyAnotherSerialMisses(t *testing.T) 
 		{"the attached serial", serialSelector(attachedSerial), attachedSerial, ""},
 		{"a transport id", adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorTransportID, TransportID: 7}, attachedSerial, ""},
 		{"the unset transport id", adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorTransportID}, attachedSerial, ""},
-		{"any device before a serial is known", anySelector, "", ""},
-		{"any serial before one is known", serialSelector("other-device"), "", ""},
 		{"another serial", serialSelector("other-device"), attachedSerial, adbwire.FailDeviceNotFound("other-device")},
 	}
 	for _, testCase := range tests {

@@ -9,12 +9,10 @@ import (
 
 // Respond is the daemon's own handle_forward_request: it answers one parsed
 // forward-family request with the adb host server's exact reply bytes and
-// closes conn, as adb closes a host service after its reply. deviceSerial is
-// the attached device's adb serial, empty until the keep-alive probe has parsed
-// one. With the device gone, forward: and killforward: get a FAIL carrying
-// adbwire.MsgNoDevices, which the caller writes; a closed table's Install returns
-// the same text. killforward-all and list-forward still answer here, over the
-// emptied table.
+// closes conn, as adb closes a host service after its reply. With the device
+// gone, forward: and killforward: get a FAIL carrying adbwire.MsgNoDevices,
+// which the caller writes; a closed table's Install returns the same text.
+// killforward-all and list-forward still answer here, over the emptied table.
 //
 // The returned error is a write failure, for logging. Refusing a request is not
 // an error: it reaches the client as a FAIL.
@@ -60,23 +58,17 @@ func Respond(conn io.WriteCloser, selector adbwire.AdbDeviceSelector, request ad
 // uses. Only a serial can miss. The any, usb and local selectors match the
 // single attached device, and so does a transport id: the ids this daemon
 // reports are its own, adb reads 0 as unset, and a client that echoes an id
-// back must reach its device. A serial matches too while deviceSerial is empty,
-// since one device is attached either way and refusing the customer's own
-// serial until the keep-alive probe parses it is worse than serving it.
+// back must reach its device.
 func SelectorMiss(selector adbwire.AdbDeviceSelector, deviceSerial string) (string, bool) {
-	if selector.Kind == adbwire.AdbSelectorSerial && deviceSerial != "" && selector.Serial != deviceSerial {
+	if selector.Kind == adbwire.AdbSelectorSerial && selector.Serial != deviceSerial {
 		return adbwire.FailDeviceNotFound(selector.Serial), true
 	}
 	return "", false
 }
 
 // listRows fills in the serial column the table does not record. The selector
-// is ignored, as adb lists every device's rules. A serial the keep-alive probe
-// has not parsed yet renders "unknown", so every row keeps three fields.
+// is ignored, as adb lists every device's rules.
 func listRows(table *ForwardRulesTable, deviceSerial string) []adbwire.AdbListedForward {
-	if deviceSerial == "" {
-		deviceSerial = "unknown"
-	}
 	rows := table.List()
 	for i := range rows {
 		rows[i].Serial = deviceSerial

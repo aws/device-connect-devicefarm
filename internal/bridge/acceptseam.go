@@ -169,8 +169,7 @@ func readOpening(ctx context.Context, tcpConn net.Conn, deviceSerial string) (cl
 //
 // The reply shape follows the select's spelling. A tport: form waits for OKAY plus the
 // transport id; transport-id:<n> takes a bare OKAY. Which spelling adb sends, and before
-// which services, is at adbwire.SplitHostPrefix. An empty deviceSerial matches every
-// selector.
+// which services, is at adbwire.SplitHostPrefix.
 func answerTransportSelect(writer io.Writer, request, deviceSerial string) (selector adbwire.AdbDeviceSelector,
 	claimed bool, err error) {
 	// adb's client puts every select behind the plain `host:` prefix and names its device
