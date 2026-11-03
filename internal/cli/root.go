@@ -75,12 +75,35 @@ func newRootCommandWithState(state *rootState) *cobra.Command {
 	}
 
 	bindPersistentFlags(root, &state.cfg)
+	root.SetHelpCommand(hiddenHelpCommand(root))
 	root.AddCommand(
 		newBridgeCommand(state),
 		newDeviceCommand(state),
 		newDaemonCommand(state),
 	)
 	return root
+}
+
+// hiddenHelpCommand replaces cobra's help command with a hidden one. cobra's command
+// list shows any subcommand named "help", hidden or not, so this one is named "usage"
+// and keeps "help" as an alias: 'help [command]' still works.
+func hiddenHelpCommand(root *cobra.Command) *cobra.Command {
+	return &cobra.Command{
+		Use:     "usage [command]",
+		Aliases: []string{"help"},
+		Short:   "Help about any command",
+		Hidden:  true,
+		RunE: func(_ *cobra.Command, args []string) error {
+			target, _, err := root.Find(args)
+			if err != nil {
+				return err
+			}
+			// cobra adds --help and --version lazily; its own help command does the same.
+			target.InitDefaultHelpFlag()
+			target.InitDefaultVersionFlag()
+			return target.Help()
+		},
+	}
 }
 
 // bindPersistentFlags wires the truly global flags to the given config. Only
