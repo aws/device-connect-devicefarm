@@ -142,7 +142,7 @@ func TestGivenMixedResultsWhenWrittenAsTextThenOneLinePerRowPlusTheCountLine(t *
 			return Result{Status: Pass, Summary: "/run/user/1000/devicefarm-connect (socket path 41 bytes)"}
 		}},
 		constantCheck("local.daemon", Result{Status: Warn, Summary: "running (pid 42) on port 6000, not 5037",
-			Hint: "the running daemon listens on port 6000, not 5037. Run 'devicefarm-connect proxy stop && devicefarm-connect proxy start --port 5037'."}),
+			Hint: "the running daemon listens on port 6000, not 5037. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 5037'."}),
 		constantCheck("local.listen-port", Result{Status: Fail, Summary: "held by an adb server (version 41)",
 			Hint: "adb kill-server"}),
 		constantCheck("relay.session", Result{Status: Pass, Summary: "unused"}, "local.listen-port"),
@@ -159,7 +159,7 @@ func TestGivenMixedResultsWhenWrittenAsTextThenOneLinePerRowPlusTheCountLine(t *
 	assert.Equal(t, []string{"local.listen-port"}, report.Rows[3].Needs)
 	assert.Equal(t, 1, report.Failed())
 	assert.Equal(t, "[PASS] local.runtime-dir: /run/user/1000/devicefarm-connect (socket path 41 bytes)\n"+
-		"[WARN] local.daemon: running (pid 42) on port 6000, not 5037; fix: the running daemon listens on port 6000, not 5037. Run 'devicefarm-connect proxy stop && devicefarm-connect proxy start --port 5037'.\n"+
+		"[WARN] local.daemon: running (pid 42) on port 6000, not 5037; fix: the running daemon listens on port 6000, not 5037. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 5037'.\n"+
 		"[FAIL] local.listen-port: held by an adb server (version 41); fix: adb kill-server\n"+
 		"[SKIP] relay.session: needs local.listen-port\n"+
 		"doctor: 1 passed, 1 warnings, 1 failed, 1 skipped\n", out.String())

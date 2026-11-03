@@ -379,7 +379,7 @@ func runPeriodic(ctx context.Context, interval time.Duration, tick func()) {
 // context, then replies. ctx is the daemon context and is the parent of the
 // add path's bounded resolve, so a SIGTERM/SIGINT that cancels it also cancels an
 // add in flight (a control shutdown, being serialized behind the add on the
-// inline loop, cannot). `proxy stop` is that shutdown: it queues behind an
+// inline loop, cannot). `bridge stop` is that shutdown: it queues behind an
 // in-flight add, bounded by resolveTimeout.
 func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.ActiveDevice, shutdown context.CancelFunc) control.Handler {
 	return func(req control.Request) control.Response {

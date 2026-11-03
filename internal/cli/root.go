@@ -37,19 +37,19 @@ func newRootCommand() *cobra.Command {
 }
 
 // newRootCommandWithState assembles the cobra command tree over state: a root that
-// owns the persistent flags plus the "proxy" (start/stop/status) and "device"
+// owns the persistent flags plus the "bridge" (start/stop/status) and "device"
 // (add/remove) command groups and the hidden "daemon" body. A test passes state to
 // read what the flags parsed.
 func newRootCommandWithState(state *rootState) *cobra.Command {
 	root := &cobra.Command{
 		Use:     config.BinaryName,
 		Version: version.String(), // root only; cobra answers it before PersistentPreRunE
-		Short:   fmt.Sprintf("Proxy a local adb client to an %s %s remote access device", awsName, productName),
+		Short:   fmt.Sprintf("Bridge a local adb client to an %s %s remote access device", awsName, productName),
 		Long: fmt.Sprintf("%s presents itself to local adb clients as the adb host. It listens\n"+
 			"on a local TCP port and pipes each connection over the websocket of an %s\n"+
-			"%s remote access session to the device's adb server. Use 'proxy start'\n"+
+			"%s remote access session to the device's adb server. Use 'bridge start'\n"+
 			"to launch the background daemon and attach a device, 'device add'/'device remove'\n"+
-			"to change the attached device, and 'proxy stop' to stop it.", config.BinaryName, awsName, productName),
+			"to change the attached device, and 'bridge stop' to stop it.", config.BinaryName, awsName, productName),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		// The generated `completion` command is noise for this tool's small,
@@ -76,7 +76,7 @@ func newRootCommandWithState(state *rootState) *cobra.Command {
 
 	bindPersistentFlags(root, &state.cfg)
 	root.AddCommand(
-		newProxyCommand(state),
+		newBridgeCommand(state),
 		newDeviceCommand(state),
 		newDaemonCommand(state),
 	)
@@ -106,7 +106,7 @@ const listenAddrUsage = "address to listen on\n" +
 	"Keep it on loopback"
 
 // bindListenerFlags wires the daemon's listener flags (--port, --listen-addr) to
-// cfg. They are needed only by the two commands that stand up the daemon: `proxy
+// cfg. They are needed only by the two commands that stand up the daemon: `bridge
 // start` (which spawns it) and the hidden `daemon` body (which is re-execed with
 // them via config.AsDaemonArgs). Every other command finds the running daemon
 // through its per-user control socket, so the port and address are irrelevant to
@@ -137,7 +137,7 @@ func initLogging(debug bool) {
 	slog.SetDefault(slog.New(handler))
 }
 
-// newManager builds a daemon.DaemonManager for the lifecycle commands (proxy
+// newManager builds a daemon.DaemonManager for the lifecycle commands (bridge
 // start/stop/status). The effective logfile path in s.paths is already resolved in
 // PersistentPreRunE, so this is a pure constructor. It passes no remote-access
 // client: Start, Stop, and Status never resolve an ARN (they signal and inspect a

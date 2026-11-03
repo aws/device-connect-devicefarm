@@ -124,7 +124,7 @@ func TestGivenRunningDaemonWithDeviceWhenRemoveDeviceInvokedThenPrintsRemovedLin
 	out, err := execRoot(t, "device", "remove", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
 
 	require.NoError(t, err)
-	assert.Contains(t, out.String(), "Removed Google Pixel 9 (OS 16) from the proxy")
+	assert.Contains(t, out.String(), "Removed Google Pixel 9 (OS 16) from the bridge")
 }
 
 func TestGivenDaemonHasNoDeviceWhenRemoveDeviceInvokedThenErrorsWithDaemonReason(t *testing.T) {
@@ -182,7 +182,7 @@ func TestGivenRunningDaemonWithDeviceWhenStatusInvokedThenReportsAttachedDevice(
 		return control.Response{OK: true, DeviceLabel: "Google Pixel 8 (OS 15)"}
 	})
 
-	out, err := execRoot(t, "proxy", "status")
+	out, err := execRoot(t, "bridge", "status")
 
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), "device attached: Google Pixel 8 (OS 15)")
@@ -193,7 +193,7 @@ func TestGivenRunningDaemonWithoutDeviceWhenStatusInvokedThenReportsNoDevice(t *
 		return control.Response{OK: true}
 	})
 
-	out, err := execRoot(t, "proxy", "status")
+	out, err := execRoot(t, "bridge", "status")
 
 	require.NoError(t, err)
 	// Literal on purpose: a changed BinaryName must fail here.
@@ -205,67 +205,67 @@ func TestGivenPidfileButNoControlSocketWhenStatusInvokedThenReportsNotRunning(t 
 	// Pidfile says running, no socket bound: status reports not running, no error.
 	fakeRuntimePaths(t)
 
-	out, err := execRoot(t, "proxy", "status")
+	out, err := execRoot(t, "bridge", "status")
 
 	require.NoError(t, err)
 	assert.Equal(t, config.BinaryName+" daemon is not running\n", out.String())
 }
 
-func TestGivenNoSessionARNWhenStartProxyInvokedThenStartsWithoutAttaching(t *testing.T) {
+func TestGivenNoSessionARNWhenStartBridgeInvokedThenStartsWithoutAttaching(t *testing.T) {
 	// fakeDaemon writes a live pidfile, so Manager.Start short-circuits to a no-op
 	// (a daemon is "already running") rather than forking a real child. This lets
-	// the no-ARN proxy start path be exercised at the unit level. The daemon's
+	// the no-ARN bridge start path be exercised at the unit level. The daemon's
 	// control handler must never see an add when no ARN is given.
 	fakeDaemon(t, func(req control.Request) control.Response {
 		if req.Op == control.OpAdd {
-			t.Error("proxy start without --session-arn must not attach a device")
+			t.Error("bridge start without --session-arn must not attach a device")
 		}
 		return control.Response{OK: true, Port: 6000}
 	})
 
-	out, err := execRoot(t, "proxy", "start", "--port", "5038")
+	out, err := execRoot(t, "bridge", "start", "--port", "5038")
 
-	require.NoError(t, err, "proxy start must not require --session-arn")
+	require.NoError(t, err, "bridge start must not require --session-arn")
 	assert.Contains(t, out.String(), "listening on port 6000 with no device attached")
 	assert.NotContains(t, out.String(), "5038", "the port must come from the daemon, not the --port flag")
 }
 
-func TestGivenRunningDaemonWithDeviceWhenStartProxyInvokedWithoutARNThenPrintsAttachedDevice(t *testing.T) {
+func TestGivenRunningDaemonWithDeviceWhenStartBridgeInvokedWithoutARNThenPrintsAttachedDevice(t *testing.T) {
 	fakeDaemon(t, func(request control.Request) control.Response {
 		assert.Equal(t, control.OpStatus, request.Op)
 		return control.Response{OK: true, DeviceLabel: "Google Pixel 9 (OS 16)", Port: 6000}
 	})
 
-	out, err := execRoot(t, "proxy", "start", "--port", "5038")
+	out, err := execRoot(t, "bridge", "start", "--port", "5038")
 
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), "listening on port 6000 with connected device: Google Pixel 9 (OS 16)")
 }
 
-func TestGivenPidfileButNoControlSocketWhenStartProxyInvokedThenReturnsNotListening(t *testing.T) {
+func TestGivenPidfileButNoControlSocketWhenStartBridgeInvokedThenReturnsNotListening(t *testing.T) {
 	// Start no-ops on the live pidfile; the status call finds no socket.
 	fakeRuntimePaths(t)
 
-	out, err := execRoot(t, "proxy", "start")
+	out, err := execRoot(t, "bridge", "start")
 
 	require.EqualError(t, err, notListeningMessage)
 	assert.NotContains(t, out.String(), "listening on port")
 }
 
-func TestGivenSessionARNWhenStartProxyInvokedThenStartsAndAttachesDevice(t *testing.T) {
+func TestGivenSessionARNWhenStartBridgeInvokedThenStartsAndAttachesDevice(t *testing.T) {
 	fakeDaemon(t, func(req control.Request) control.Response {
 		assert.Equal(t, control.OpAdd, req.Op)
 		return control.Response{OK: true, DeviceLabel: "Google Pixel 9 (OS 16)", Port: 5037}
 	})
 
-	out, err := execRoot(t, "proxy", "start", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
+	out, err := execRoot(t, "bridge", "start", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
 
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), "listening on port 5037")
 	assert.Contains(t, out.String(), "Google Pixel 9 (OS 16)")
 }
 
-func TestGivenSessionARNButDaemonCannotResolveWhenStartProxyInvokedThenErrorsButReportsDaemonUp(t *testing.T) {
+func TestGivenSessionARNButDaemonCannotResolveWhenStartBridgeInvokedThenErrorsButReportsDaemonUp(t *testing.T) {
 	// With resolution in the daemon, a bad ARN no longer fails before the spawn:
 	// the daemon starts and the attach fails. The error must make clear the daemon
 	// is up so the user retries device add rather than assuming nothing started.
@@ -273,7 +273,7 @@ func TestGivenSessionARNButDaemonCannotResolveWhenStartProxyInvokedThenErrorsBut
 		return control.Response{OK: false, Error: "resolve session: session not RUNNING"}
 	})
 
-	_, err := execRoot(t, "proxy", "start", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
+	_, err := execRoot(t, "bridge", "start", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "daemon started")

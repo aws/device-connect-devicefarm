@@ -52,14 +52,14 @@ func TestGivenCommandTreeWhenBuiltThenHasExpectedCommandGroups(t *testing.T) {
 
 	// The top level is the two command groups plus the hidden daemon body.
 	top := childNames(root)
-	for _, want := range []string{"proxy", "device", "daemon"} {
+	for _, want := range []string{"bridge", "device", "daemon"} {
 		assert.True(t, top[want], "missing top-level command %q", want)
 	}
 
-	// proxy owns start/stop/status; device owns add/remove.
-	proxy := childNames(findChild(t, root, "proxy"))
+	// bridge owns start/stop/status; device owns add/remove.
+	bridge := childNames(findChild(t, root, "bridge"))
 	for _, want := range []string{"start", "stop", "status"} {
-		assert.True(t, proxy[want], "missing proxy subcommand %q", want)
+		assert.True(t, bridge[want], "missing bridge subcommand %q", want)
 	}
 	device := childNames(findChild(t, root, "device"))
 	for _, want := range []string{"add", "remove"} {
@@ -90,7 +90,7 @@ func findChild(t *testing.T, parent *cobra.Command, name string) *cobra.Command 
 }
 
 func TestGivenParentCommandWhenInvokedWithNoArgsThenPrintsHelpExitZero(t *testing.T) {
-	for _, parent := range []string{"proxy", "device"} {
+	for _, parent := range []string{"bridge", "device"} {
 		t.Run(parent, func(t *testing.T) {
 			out, err := runRoot(t, parent)
 
@@ -101,7 +101,7 @@ func TestGivenParentCommandWhenInvokedWithNoArgsThenPrintsHelpExitZero(t *testin
 }
 
 func TestGivenParentCommandWhenInvokedWithUnknownSubcommandThenErrors(t *testing.T) {
-	for _, parent := range []string{"proxy", "device"} {
+	for _, parent := range []string{"bridge", "device"} {
 		t.Run(parent, func(t *testing.T) {
 			_, err := runRoot(t, parent, "bogus")
 
@@ -133,14 +133,14 @@ func TestGivenDaemonSubcommandWhenInspectedThenIsHidden(t *testing.T) {
 }
 
 func TestGivenNoRunningDaemonWhenStatusInvokedThenReportsNotRunning(t *testing.T) {
-	out, err := runRoot(t, "proxy", "status")
+	out, err := runRoot(t, "bridge", "status")
 
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), "not running")
 }
 
-func TestGivenNoRunningDaemonWhenProxyStopInvokedThenReportsNotListening(t *testing.T) {
-	out, err := runRoot(t, "proxy", "stop")
+func TestGivenNoRunningDaemonWhenBridgeStopInvokedThenReportsNotListening(t *testing.T) {
+	out, err := runRoot(t, "bridge", "stop")
 
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), "not listening")
@@ -160,14 +160,14 @@ func TestGivenDeviceRemoveWithoutRunningDaemonWhenInvokedThenFailsNotListening(t
 	require.Error(t, err)
 }
 
-func TestGivenListenerFlagsAfterProxyStartPathWhenInvokedThenParsed(t *testing.T) {
+func TestGivenListenerFlagsAfterBridgeStartPathWhenInvokedThenParsed(t *testing.T) {
 	// Callers invoke the binary as
-	// `devicefarm-connect proxy start --port N --log P --session-arn ...`: the
-	// listener/log flags are flags of `proxy start`, not global. This test guards
+	// `devicefarm-connect bridge start --port N --log P --session-arn ...`: the
+	// listener/log flags are flags of `bridge start`, not global. This test guards
 	// that contract. fakeDaemon writes a live pidfile, so Manager.Start
 	// short-circuits (a daemon is "already running") instead of forking a child;
 	// reaching the add request over the control socket proves the flags parsed and
-	// `proxy start` ran.
+	// `bridge start` ran.
 	addSeen := false
 	fakeDaemon(t, func(req control.Request) control.Response {
 		if req.Op == control.OpAdd {
@@ -177,15 +177,15 @@ func TestGivenListenerFlagsAfterProxyStartPathWhenInvokedThenParsed(t *testing.T
 		return control.Response{OK: true, DeviceLabel: "Pixel", Port: 5599}
 	})
 
-	_, err := execRoot(t, "proxy", "start", "--port", "5599", "--log", t.TempDir()+"/d.log",
+	_, err := execRoot(t, "bridge", "start", "--port", "5599", "--log", t.TempDir()+"/d.log",
 		"--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
 
-	require.NoError(t, err, "proxy start must parse its flags and attach through the control channel")
-	assert.True(t, addSeen, "proxy start must have parsed its flags and forwarded the add to the daemon")
+	require.NoError(t, err, "bridge start must parse its flags and attach through the control channel")
+	assert.True(t, addSeen, "bridge start must have parsed its flags and forwarded the add to the daemon")
 }
 
 func TestGivenListenerFlagOnScopedCommandWhenInvokedThenRejected(t *testing.T) {
-	// --port/--listen-addr/--log are scoped to `proxy start` (and the hidden daemon
+	// --port/--listen-addr/--log are scoped to `bridge start` (and the hidden daemon
 	// body), not global. A command that does not stand up the daemon must reject
 	// them, which is what makes the pruned "Global Flags" help honest.
 	for _, flag := range []string{"--port", "--listen-addr", "--log"} {
@@ -194,14 +194,14 @@ func TestGivenListenerFlagOnScopedCommandWhenInvokedThenRejected(t *testing.T) {
 			if flag != "--port" {
 				value = "x"
 			}
-			_, err := runRoot(t, "proxy", "status", flag, value)
-			require.Error(t, err, "%s must not be accepted on 'proxy status'", flag)
+			_, err := runRoot(t, "bridge", "status", flag, value)
+			require.Error(t, err, "%s must not be accepted on 'bridge status'", flag)
 		})
 	}
 }
 
 func TestGivenAllowAdbReverseWhenParsedThenOnlyDaemonStandingCommandsAcceptIt(t *testing.T) {
-	for _, path := range [][]string{{"proxy", "start"}, {"daemon"}} {
+	for _, path := range [][]string{{"bridge", "start"}, {"daemon"}} {
 		t.Run(strings.Join(path, " "), func(t *testing.T) {
 			state := &rootState{cfg: config.Default()}
 			cmd := newRootCommandWithState(state)
@@ -216,7 +216,7 @@ func TestGivenAllowAdbReverseWhenParsedThenOnlyDaemonStandingCommandsAcceptIt(t 
 			assert.True(t, state.cfg.ReverseEnabled, "--allow-adb-reverse must set the config's reverse setting")
 		})
 	}
-	for _, path := range [][]string{{"proxy", "status"}, {"device", "add"}} {
+	for _, path := range [][]string{{"bridge", "status"}, {"device", "add"}} {
 		t.Run(strings.Join(path, " ")+" refuses it", func(t *testing.T) {
 			// Scoped like the listener flags: the running daemon already decided, so the flag would mislead.
 			_, err := runRoot(t, path[0], path[1], "--allow-adb-reverse")
@@ -242,7 +242,7 @@ func TestGivenAnOptedInConfigWhenItsDaemonArgsReachTheDaemonCommandThenReverseSt
 func TestGivenDebugFlagWhenStatusInvokedThenAcceptedAndRuns(t *testing.T) {
 	// --debug is a boolean flag (no value); it must parse and run through to the
 	// status command rather than being rejected.
-	out, err := runRoot(t, "proxy", "status", "--debug")
+	out, err := runRoot(t, "bridge", "status", "--debug")
 
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), "not running")
@@ -272,13 +272,13 @@ func TestGivenShortVersionFlagWhenRootRunsThenPrintsTheSameLine(t *testing.T) {
 
 func TestGivenUnknownFlagWhenInvokedThenFails(t *testing.T) {
 	// The removed --log-level must no longer be accepted.
-	_, err := runRoot(t, "proxy", "status", "--log-level", "debug")
+	_, err := runRoot(t, "bridge", "status", "--log-level", "debug")
 
 	require.Error(t, err)
 }
 
-func TestGivenInvalidPortWhenProxyStartInvokedThenValidationFails(t *testing.T) {
-	_, err := runRoot(t, "proxy", "start", "--port", "0", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
+func TestGivenInvalidPortWhenBridgeStartInvokedThenValidationFails(t *testing.T) {
+	_, err := runRoot(t, "bridge", "start", "--port", "0", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
 
 	require.Error(t, err)
 }
@@ -294,7 +294,7 @@ func newTestState(t *testing.T) *rootState {
 }
 
 func TestGivenLifecycleManagerWhenRunForegroundThenRefusesWithoutRemoteAccessClient(t *testing.T) {
-	// proxy start/stop/status only signal and inspect a process, so newManager
+	// bridge start/stop/status only signal and inspect a process, so newManager
 	// deliberately builds no AWS client: doing so would make every lifecycle command
 	// load AWS config and fail on a host with none configured. The daemon body uses
 	// newDaemonManager instead, so a lifecycle manager reaching RunForeground is a

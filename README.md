@@ -24,9 +24,9 @@ The verification steps are added with the first signed release.
 # Start the background daemon and attach a Device Farm remote access device. The
 # --session-arn is optional: omit it to start the daemon with no device attached
 # and connect one later with 'device add'.
-devicefarm-connect proxy start --port 5037 --session-arn arn:aws:devicefarm:us-west-2:123456789012:session:11111111-2222-3333-4444-5555555abcde
+devicefarm-connect bridge start --port 5037 --session-arn arn:aws:devicefarm:us-west-2:123456789012:session:11111111-2222-3333-4444-5555555abcde
 
-# Point a local adb client at the proxy.
+# Point a local adb client at the bridge.
 adb -P 5037 devices
 
 # Forward a local port to the device, list the rules, then drop one.
@@ -35,7 +35,7 @@ adb -P 5037 forward --list
 adb -P 5037 forward --remove tcp:8080
 
 # Let the device reach a server running on this machine. Off by default: the daemon must have
-# been started with 'proxy start --allow-adb-reverse'.
+# been started with 'bridge start --allow-adb-reverse'.
 adb -P 5037 reverse tcp:9000 tcp:9000
 
 # Detach the active device (the listener stays up).
@@ -45,8 +45,8 @@ devicefarm-connect device remove --session-arn arn:aws:devicefarm:us-west-2:1234
 devicefarm-connect device add --session-arn arn:aws:devicefarm:us-west-2:123456789012:session:66666666-7777-8888-9999-aaaaaaaaaaaa
 
 # Report status, then stop the daemon.
-devicefarm-connect proxy status
-devicefarm-connect proxy stop
+devicefarm-connect bridge status
+devicefarm-connect bridge stop
 
 # Print the release version.
 devicefarm-connect --version
@@ -76,7 +76,7 @@ client targets that region and a session ARN from any other region is rejected
 Flags are scoped to the command they affect (see `devicefarm-connect <command> --help`).
 `--debug` (enable debug-level logging; the default is info) is global. `--version` (or `-v`)
 is accepted by the bare command only. The daemon's
-listener and logfile flags belong to `proxy start`, the only command that stands up
+listener and logfile flags belong to `bridge start`, the only command that stands up
 the daemon: `--port` (default `5037`, matching adb's own default server port) and
 `--log` (the daemon logfile, defaulting to `devicefarm-connect.log` in the per-user
 runtime directory alongside the pidfile and control socket). Moving the listener off
@@ -84,13 +84,13 @@ loopback with `--listen-addr` is not recommended; read the [Security notes](#sec
 first. `--allow-adb-reverse` belongs to the same command. Without it, `adb reverse` is off,
 and adb prints
 `error: adb reverse is off for this client; restart it with --allow-adb-reverse`. To
-turn it on, run `proxy stop`, then `proxy start --allow-adb-reverse`. The other
+turn it on, run `bridge stop`, then `bridge start --allow-adb-reverse`. The other
 commands find the running daemon through its control socket, so they do not take
 these. `--session-arn` is a per-command argument of
-`proxy start`, `device add`, and `device remove`. The dial, keep-alive, stop, and
+`bridge start`, `device add`, and `device remove`. The dial, keep-alive, stop, and
 endpoint-refresh timeouts and the websocket-refresh cadence are fixed runtime
 constants and are not exposed as flags, keeping the command surface small. A flag
-on `proxy start` configures only a daemon that command starts: against a running
+on `bridge start` configures only a daemon that command starts: against a running
 one it is accepted and ignored, so stop that daemon first.
 
 ## Platform support
@@ -150,7 +150,7 @@ the reverse path as well.
   on any failure) for the device. On each announced connection the daemon refuses its own adb
   port, any port a forward rule of the attachment binds, and any port no reverse rule of the
   attachment names; every other loopback port a rule names is reachable.
-  Reverse is off unless `proxy start` carries `--allow-adb-reverse`. Off, `adb reverse` is
+  Reverse is off unless `bridge start` carries `--allow-adb-reverse`. Off, `adb reverse` is
   refused and no notifier opens, so nothing the device starts reaches this machine.
 - **The websocket endpoint is a bearer credential.** A short-lived presigned URL, held only in
   daemon memory and renewed before it expires (`EndpointRefreshInterval`). It never crosses
@@ -163,7 +163,7 @@ the reverse path as well.
   ambient chain it inherits across the detach, and persists no credential. When those credentials
   expire the next refresh fails and the daemon detaches the device rather than proxy to an
   endpoint it cannot renew.
-- **`proxy stop` does not stop billing.** Stopping the daemon, like `device remove`, is local.
+- **`bridge stop` does not stop billing.** Stopping the daemon, like `device remove`, is local.
   The remote access session keeps running, and costing, until stopped through Device Farm.
 - **One attachment's websockets share a server-side ceiling.** A busy attachment can crowd itself
   out: each local, forwarded or reverse connection uses one of its `MaxDeviceStreams` slots.
