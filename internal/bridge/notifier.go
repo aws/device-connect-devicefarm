@@ -61,10 +61,10 @@ func dialNotifier(ctx context.Context, dialer *WSDialer, device *ActiveDevice, a
 
 // helloNotifier completes the hello exchange on a dialed notifier websocket: NOTIFIER_HELLO as
 // the first frame, then one bounded read that must be NOTIFIER_READY. ERROR is the server's
-// refusal and carries its reason; any other status is a protocol violation. Every failure
+// refusal and carries its reason; any other arm is a protocol violation. Every failure
 // closes the websocket, so a caller holding an error owns nothing.
 func helloNotifier(ws WSConn, ackWithin time.Duration) error {
-	if err := ws.Send(encodeControlFrame(controlStatusNotifierHello, "")); err != nil {
+	if err := sendControlFrame(ws, controlFrame{arm: armNotifierHello}); err != nil {
 		ws.Close()
 		return fmt.Errorf("send the notifier hello: %w", err)
 	}
@@ -74,10 +74,10 @@ func helloNotifier(ws WSConn, ackWithin time.Duration) error {
 		ws.Close() // already closed on receiveWithin's timeout path; closing twice is inert
 		return fmt.Errorf("read the notifier hello ack: %w", err)
 	}
-	switch frame.status {
-	case controlStatusNotifierReady:
+	switch frame.arm {
+	case armNotifierReady:
 		return nil
-	case controlStatusError:
+	case armError:
 		ws.Close()
 		if frame.payload == notifierSlotTakenReason {
 			return ErrNotifierSlotTaken
@@ -85,8 +85,7 @@ func helloNotifier(ws WSConn, ackWithin time.Duration) error {
 		return fmt.Errorf("%w: %s", errNotifierRefused, frame.payload)
 	default:
 		ws.Close()
-		return fmt.Errorf("the notifier hello was answered with status 0x%02x, not NOTIFIER_READY",
-			frame.status)
+		return fmt.Errorf("the notifier hello was answered with %s, not notifierReady", frame.arm)
 	}
 }
 
@@ -103,22 +102,22 @@ func (notifier *notifierConn) run(onReverseOpen func(token string, customerPort 
 		if err != nil {
 			return err
 		}
-		frame, err := parseControlFrame(message)
+		frame, err := unmarshalControlFrame(message)
 		if err != nil {
 			return err
 		}
 
-		switch frame.status {
-		case controlStatusReverseOpen:
+		switch frame.arm {
+		case armReverseOpen:
 			// The token is a bearer capability for that parked connection: never logged.
 			notifier.logger.Debug("reverse connection announced", "customerPort", frame.customerPort)
 			go onReverseOpen(frame.reverseToken, frame.customerPort)
-		case controlStatusPong:
+		case armPong:
 			onPong()
-		case controlStatusError:
+		case armError:
 			return fmt.Errorf("the server ended the notifier: %s", frame.payload)
 		default:
-			return fmt.Errorf("unexpected control frame status 0x%02x on the notifier", frame.status)
+			return fmt.Errorf("unexpected control frame %s on the notifier", frame.arm)
 		}
 	}
 }
@@ -127,7 +126,7 @@ func (notifier *notifierConn) run(onReverseOpen func(token string, customerPort 
 // Only frames on that connection, either direction, reset its idle clock. An idle notifier sends
 // none and the server sends it none, so the PING goes client to server.
 func (notifier *notifierConn) ping() error {
-	return notifier.ws.Send(encodeControlFrame(controlStatusPing, ""))
+	return sendControlFrame(notifier.ws, controlFrame{arm: armPing})
 }
 
 // Close ends the notifier, which is what returns run's parked Receive. It can queue behind an

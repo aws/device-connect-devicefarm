@@ -92,8 +92,8 @@ func (supervisor *notifierSupervisor) notifierSlotHeld() bool {
 	return supervisor.slotHeld.Load()
 }
 
-// markSlotHeld sets slotHeld; a change logs one Warn, a repeat logs nothing (run logs retries at
-// Debug).
+// markSlotHeld sets slotHeld; a change logs one Warn, a repeat logs nothing (run logs each
+// notifier end at Warn).
 func (supervisor *notifierSupervisor) markSlotHeld(held bool) {
 	if supervisor.slotHeld.Swap(held) == held {
 		return
@@ -132,7 +132,7 @@ func (supervisor *notifierSupervisor) run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		supervisor.cfg.logger.Debug("the reverse notifier ended", "device", supervisor.arn, "servedFor", served, "reason", err)
+		supervisor.cfg.logger.Warn("the reverse notifier ended; redialing", "device", supervisor.arn, "servedFor", served, "reason", err)
 		if served > supervisor.cfg.params.NotifierKeepAlive {
 			delay = supervisor.cfg.params.NotifierBackoffInitial
 			continue

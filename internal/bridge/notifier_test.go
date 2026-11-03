@@ -18,6 +18,13 @@ import (
 // testWait bounds every wait for something the notifier must do promptly.
 const testWait = 2 * time.Second
 
+// The frames a notifier sends, as literal bytes (fixture vectors notifier-hello and ping): the
+// oracle for the client's encoder, never its output.
+var (
+	notifierHelloFrame = []byte("\x00DFADB\x01{\"notifierHello\":{}}")
+	pingFrame          = []byte("\x00DFADB\x01{\"ping\":{}}")
+)
+
 // notifierServer is the scripted server half of a notifier test: it records every client
 // frame and the route the dial named, and plays a fixed script. Scripted rather than
 // stateful on purpose, so each test states the exact bytes it puts on the wire.
@@ -63,11 +70,11 @@ func newNotifierServer(t *testing.T, script ...[]byte) *notifierServer {
 						return
 					}
 				}
-			case bytes.Equal(message, encodeControlFrame(controlStatusPing, "")):
-				websocket.Message.Send(serverConn, encodeControlFrame(controlStatusPong, ""))
+			case bytes.Equal(message, pingFrame):
+				websocket.Message.Send(serverConn, testsupport.FrameEmptyArm("pong"))
 			default:
-				websocket.Message.Send(serverConn, encodeControlFrame(controlStatusError,
-					fmt.Sprintf("a ready notifier sends only PING, got %q", message)))
+				websocket.Message.Send(serverConn, testsupport.FrameError(
+					fmt.Sprintf("a ready notifier sends only ping, got %q", message)))
 				return
 			}
 		}
@@ -103,13 +110,13 @@ func dialTestNotifier(t *testing.T, endpoint string, ackWithin time.Duration) (*
 // frame is its own.
 func readyNotifier(t *testing.T, script ...[]byte) (*notifierServer, *notifierConn) {
 	t.Helper()
-	ready := append([][]byte{encodeControlFrame(controlStatusNotifierReady, "")}, script...)
+	ready := append([][]byte{testsupport.FrameEmptyArm("notifierReady")}, script...)
 	server := newNotifierServer(t, ready...)
 	notifier, err := dialTestNotifier(t, server.url, testWait)
 	require.NoError(t, err)
 	t.Cleanup(func() { notifier.Close() })
-	require.Equal(t, []byte("\x00DFADB\x00\x10"), await(t, server.frames, "the notifier hello"),
-		"NOTIFIER_HELLO must be the notifier's first frame")
+	require.Equal(t, notifierHelloFrame, await(t, server.frames, "the notifier hello"),
+		"notifierHello must be the notifier's first frame")
 	require.Equal(t, "adbreverse", await(t, server.route, "the dialed route"))
 	return server, notifier
 }
@@ -121,11 +128,6 @@ func runNotifier(notifier *notifierConn, onReverseOpen func(string, int), onPong
 	return ended
 }
 
-// reverseOpen builds a REVERSE_OPEN frame for one parked connection.
-func reverseOpen(token string, customerPort int) []byte {
-	return encodeControlFrame(controlStatusReverseOpen, fmt.Sprintf("%s:%d", token, customerPort))
-}
-
 func TestGivenABadHelloAnswerWhenTheNotifierIsDialedThenItFailsAndClosesTheSocket(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -134,10 +136,10 @@ func TestGivenABadHelloAnswerWhenTheNotifierIsDialedThenItFailsAndClosesTheSocke
 		// wantIs pins the sentinel a supervisor branches on; nil where there is none.
 		wantIs error
 	}{
-		{"a refusal", [][]byte{encodeControlFrame(controlStatusError, "notifier already registered")},
+		{"a refusal", [][]byte{testsupport.FrameError("notifier already registered")},
 			"notifier already registered", ErrNotifierSlotTaken},
-		{"a status that is not NOTIFIER_READY", [][]byte{encodeControlFrame(controlStatusPong, "")},
-			"status 0x14", nil},
+		{"an arm that is not notifierReady", [][]byte{testsupport.FrameEmptyArm("pong")},
+			"answered with pong", nil},
 		{"no answer at all", nil, errReceiveTimeout.Error(), errReceiveTimeout},
 	}
 	for _, testCase := range cases {
@@ -165,7 +167,7 @@ func TestGivenNoBoundDeviceWhenTheNotifierIsDialedThenItRefusesBeforeDialing(t *
 }
 
 func TestGivenAReverseOpenFrameWhenItArrivesThenTheTokenAndPortReachTheCallback(t *testing.T) {
-	_, notifier := readyNotifier(t, reverseOpen(testSessionUUID, 8080))
+	_, notifier := readyNotifier(t, testsupport.FrameReverseOpen(testSessionUUID, 8080))
 	announced := make(chan string, 1)
 
 	runNotifier(notifier, func(token string, customerPort int) {
@@ -176,7 +178,8 @@ func TestGivenAReverseOpenFrameWhenItArrivesThenTheTokenAndPortReachTheCallback(
 }
 
 func TestGivenSeveralReverseOpensWhenTheyArriveThenTheReadLoopIsNotBlockedByASlowCallback(t *testing.T) {
-	_, notifier := readyNotifier(t, reverseOpen(testSessionUUID, 8080), reverseOpen(testSessionUUID, 9090))
+	_, notifier := readyNotifier(t, testsupport.FrameReverseOpen(testSessionUUID, 8080),
+		testsupport.FrameReverseOpen(testSessionUUID, 9090))
 	// Every callback parks until the test ends, so the second announcement can only arrive
 	// if the read loop dispatched the first off its own goroutine.
 	release := make(chan struct{})
@@ -200,13 +203,15 @@ func TestGivenAFatalFrameWhenItArrivesThenTheRunLoopEndsWithAnError(t *testing.T
 		frame     []byte
 		wantError string
 	}{
-		{"a malformed reverse open payload", reverseOpen("not-a-uuid", 8080), "is not a UUIDv4"},
-		{"an unknown status byte", []byte("\x00DFADB\x00\x7f"), "unknown control frame status 0x7f"},
-		{"a status the notifier never receives", encodeControlFrame(controlStatusNotifierReady, ""),
-			"unexpected control frame status 0x11"},
+		{"a reverse open with a malformed token", testsupport.FrameReverseOpen("not-a-uuid", 8080),
+			"does not match the schema"},
+		// Fixture vector unknown-arm.
+		{"an unknown arm", testsupport.FrameEmptyArm("hello"), "does not match the schema"},
+		{"an arm the notifier never receives", testsupport.FrameEmptyArm("notifierReady"),
+			"unexpected control frame notifierReady"},
 		{"a message that is no control frame at all", []byte("OKAY"), errNotControlFrame.Error()},
-		{"the server ending the notifier", encodeControlFrame(controlStatusError, "notifier evicted"),
-			"notifier evicted"},
+		{"a frame on wire version 0x00", []byte("\x00DFADB\x00\x14"), errNotControlFrame.Error()},
+		{"the server ending the notifier", testsupport.FrameError("notifier evicted"), "notifier evicted"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -227,8 +232,8 @@ func TestGivenAPingWhenSentThenTheServerSeesItAndThePongReachesTheCallback(t *te
 
 	require.NoError(t, notifier.ping())
 
-	assert.Equal(t, []byte("\x00DFADB\x00\x13"), await(t, server.frames, "the ping"),
-		"PING must travel client to server, so the server's idle clock sees the notifier")
+	assert.Equal(t, pingFrame, await(t, server.frames, "the ping"),
+		"ping must travel client to server, so the server's idle clock sees the notifier")
 	await(t, ponged, "the pong to reach the callback")
 }
 

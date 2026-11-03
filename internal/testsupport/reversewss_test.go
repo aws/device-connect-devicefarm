@@ -36,13 +36,13 @@ func dialReverse(t *testing.T, mock *ReverseMockWSS) *websocket.Conn {
 	return ws
 }
 
-// dialReadyNotifier dials, sends the hello and requires the READY ack. Both are hand-written
-// wire bytes, so a wrong status constant fails here and not in a later change.
+// dialReadyNotifier dials, sends the hello and requires the READY ack. Both are literal wire
+// bytes (fixture vectors notifier-hello and notifier-ready), so a drifted builder fails here.
 func dialReadyNotifier(t *testing.T, mock *ReverseMockWSS) *websocket.Conn {
 	t.Helper()
 	ws := dialReverse(t, mock)
-	require.NoError(t, websocket.Message.Send(ws, []byte("\x00DFADB\x00\x10")))
-	require.Equal(t, []byte("\x00DFADB\x00\x11"), firstFrame(t, ws))
+	require.NoError(t, websocket.Message.Send(ws, []byte("\x00DFADB\x01{\"notifierHello\":{}}")))
+	require.Equal(t, []byte("\x00DFADB\x01{\"notifierReady\":{}}"), firstFrame(t, ws))
 	return ws
 }
 
@@ -72,13 +72,12 @@ func TestGivenALiveNotifierWhenASecondHelloArrivesThenItIsRefusedAndTheFirstKeep
 	first := dialReadyNotifier(t, mock)
 	second := dialReverse(t, mock)
 
-	require.NoError(t, websocket.Message.Send(second, encodeControlFrame(controlStatusNotifierHello, "")))
+	require.NoError(t, websocket.Message.Send(second, FrameEmptyArm(controlStatusNotifierHello)))
 
 	assertRefused(t, mock, second, "notifier already registered")
 	assert.Equal(t, 1, mock.NotifiersAccepted())
 	require.True(t, mock.Announce(testToken, 8080))
-	assert.Equal(t, fmt.Sprintf("%s:%d", testToken, 8080),
-		assertControlFrame(t, firstFrame(t, first), controlStatusReverseOpen))
+	assert.Equal(t, testToken, assertControlFrame(t, firstFrame(t, first), controlStatusReverseOpen))
 }
 
 func TestGivenABadFirstFrameWhenSentThenItIsRefusedAndCounted(t *testing.T) {
@@ -90,12 +89,11 @@ func TestGivenABadFirstFrameWhenSentThenItIsRefusedAndCounted(t *testing.T) {
 		{"adb bytes before the hello", func(t *testing.T, ws *websocket.Conn) {
 			require.NoError(t, websocket.Message.Send(ws, []byte("000chost:version")))
 		}, "first frame was not an empty NOTIFIER_HELLO"},
-		{"a hello carrying a payload", func(t *testing.T, ws *websocket.Conn) {
-			require.NoError(t, websocket.Message.Send(ws,
-				encodeControlFrame(controlStatusNotifierHello, "unexpected")))
+		{"a hello carrying a member", func(t *testing.T, ws *websocket.Conn) {
+			require.NoError(t, websocket.Message.Send(ws, FrameWithBody(`{"notifierHello":{"extra":1}}`)))
 		}, "first frame was not an empty NOTIFIER_HELLO"},
-		{"a well-formed frame of another status", func(t *testing.T, ws *websocket.Conn) {
-			require.NoError(t, websocket.Message.Send(ws, encodeControlFrame(controlStatusPing, "")))
+		{"a well-formed frame of another arm", func(t *testing.T, ws *websocket.Conn) {
+			require.NoError(t, websocket.Message.Send(ws, FrameEmptyArm(controlStatusPing)))
 		}, "first frame was not an empty NOTIFIER_HELLO"},
 		// x/net hands a text frame to a []byte receive unchanged, so it is refused on its
 		// content rather than on its opcode, which is all the daemon can see either.
@@ -103,7 +101,7 @@ func TestGivenABadFirstFrameWhenSentThenItIsRefusedAndCounted(t *testing.T) {
 			require.NoError(t, websocket.Message.Send(ws, "hello"))
 		}, "first frame was not an empty NOTIFIER_HELLO"},
 		{"a connector hello with no parked connection", func(t *testing.T, ws *websocket.Conn) {
-			require.NoError(t, websocket.Message.Send(ws, []byte("\x00DFADB\x00\x15"+testToken)))
+			require.NoError(t, websocket.Message.Send(ws, FrameConnectorHello(testToken)))
 		}, "unknown or already redeemed reverse token"},
 	}
 	for _, testCase := range cases {
@@ -128,16 +126,18 @@ func TestGivenADialWithoutTheReverseRouteWhenServedThenItIsRefusedAndCounted(t *
 	// Bounded like dialReverse: a mock that refuses without closing must fail, not hang.
 	require.NoError(t, ws.SetReadDeadline(time.Now().Add(testReadDeadline)))
 
-	assertRefused(t, mock, ws, "dialed on route")
+	// The reason quotes the routes; the JSON writer must carry the quotes through.
+	assertRefused(t, mock, ws, `dialed on route "", not "adbreverse"`)
 }
 
 func TestGivenAReadyNotifierWhenItPingsThenTheMockPongsAndCountsIt(t *testing.T) {
 	mock := NewReverseMockWSS(t)
 	ws := dialReadyNotifier(t, mock)
 
-	require.NoError(t, websocket.Message.Send(ws, []byte("\x00DFADB\x00\x13")))
+	// Fixture vectors ping and pong, as literal bytes.
+	require.NoError(t, websocket.Message.Send(ws, []byte("\x00DFADB\x01{\"ping\":{}}")))
 
-	require.Equal(t, []byte("\x00DFADB\x00\x14"), firstFrame(t, ws))
+	require.Equal(t, []byte("\x00DFADB\x01{\"pong\":{}}"), firstFrame(t, ws))
 	assert.Equal(t, 1, mock.PingsSeen())
 }
 
@@ -146,11 +146,12 @@ func TestGivenSwallowedPongsWhenTheNotifierPingsThenItIsCountedWithNoAnswer(t *t
 	ws := dialReadyNotifier(t, mock)
 	mock.SwallowPongs(true)
 
-	require.NoError(t, websocket.Message.Send(ws, encodeControlFrame(controlStatusPing, "")))
+	require.NoError(t, websocket.Message.Send(ws, FrameEmptyArm(controlStatusPing)))
 
 	require.Eventually(t, func() bool { return mock.PingsSeen() == 1 }, testWait, testPollInterval)
 	// A sentinel proves the absence positively: the next frame in is this one, not a PONG.
-	sentinel := []byte("\x00DFADB\x00\x7f")
+	// Fixture vector unknown-arm.
+	sentinel := FrameEmptyArm("hello")
 	require.True(t, mock.SendRaw(sentinel))
 	assert.Equal(t, sentinel, firstFrame(t, ws))
 }
@@ -169,16 +170,16 @@ func TestGivenAReadyNotifierWhenAnnouncedThenTheReverseOpenCarriesTheTokenAndPor
 	mock := NewReverseMockWSS(t)
 	ws := dialReadyNotifier(t, mock)
 
-	require.True(t, mock.Announce(testToken, 8080))
+	require.True(t, mock.Announce(fixtureUUID, 9090))
 
-	assert.Equal(t, []byte("\x00DFADB\x00\x12"+testToken+":8080"), firstFrame(t, ws))
+	assert.Equal(t, frameVectorBytes(t, "reverse-open-port-9090"), firstFrame(t, ws))
 }
 
 func TestGivenAReadyNotifierWhenSendRawIsUsedThenTheExactBytesArrive(t *testing.T) {
 	mock := NewReverseMockWSS(t)
 	ws := dialReadyNotifier(t, mock)
-	// A status no correct server sends, which is the point of SendRaw.
-	frame := []byte("\x00DFADB\x00\x7f")
+	// An arm no correct server sends, which is the point of SendRaw (fixture vector unknown-arm).
+	frame := FrameEmptyArm("hello")
 
 	require.True(t, mock.SendRaw(frame))
 
@@ -223,8 +224,7 @@ func TestGivenAParkedConnectionWhenItsTokenIsRedeemedThenBytesRoundTripBothWays(
 	require.NoError(t, device.SetDeadline(time.Now().Add(testWait)))
 	ws := dialReverse(t, mock)
 
-	require.NoError(t, websocket.Message.Send(ws,
-		encodeControlFrame(controlStatusConnectorHello, testToken)))
+	require.NoError(t, websocket.Message.Send(ws, FrameConnectorHello(testToken)))
 
 	assert.Len(t, assertControlFrame(t, firstFrame(t, ws), controlStatusNew), sessionUUIDLen)
 	require.NoError(t, websocket.Message.Send(ws, []byte("to the device")))
@@ -245,8 +245,7 @@ func TestGivenARefusingMockWhenATokenIsRedeemedThenTheReasonIsAnnouncedAndCounte
 	mock.RefuseConnector("the connector pool is at its cap")
 	ws := dialReverse(t, mock)
 
-	require.NoError(t, websocket.Message.Send(ws,
-		encodeControlFrame(controlStatusConnectorHello, testToken)))
+	require.NoError(t, websocket.Message.Send(ws, FrameConnectorHello(testToken)))
 
 	assertRefused(t, mock, ws, "the connector pool is at its cap")
 	assert.Equal(t, 1, mock.ConnectorsRefused())

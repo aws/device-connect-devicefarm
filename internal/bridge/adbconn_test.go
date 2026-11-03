@@ -103,34 +103,38 @@ func TestGivenNewSessionWhenControlFrameArrivesThenItIsConsumedAndUUIDLatched(t 
 	assert.Equal(t, 1, mock.SessionsOpened())
 }
 
-func TestGivenAReverseRouteStatusAsTheFirstAdbFrameWhenReceivedThenTheSessionIsRefused(t *testing.T) {
-	// The codec parses 0x10..0x15 for the reverse route, so /adb's refusal of them rests on
-	// consumeControlFrame's default arm alone.
+// firstServerFrameVerdict dials a server that answers the first client frame with firstFrame
+// and stays open, then returns Receive's verdict. Bounded: a connection that swallowed the
+// frame would park in Receive forever.
+func firstServerFrameVerdict(t *testing.T, firstFrame []byte) (*adbConn, error) {
+	t.Helper()
 	wsURL := testsupport.NewMockWSS(t, func(serverConn *websocket.Conn) {
 		serverConn.PayloadType = websocket.BinaryFrame
-		websocket.Message.Send(serverConn, newSessionControlFrame(controlStatusNotifierReady, ""))
-		io.Copy(io.Discard, serverConn) // stay open, so the failure is the refusal and not an EOF
+		websocket.Message.Send(serverConn, firstFrame)
+		io.Copy(io.Discard, serverConn) // stay open, so the failure is the verdict and not an EOF
 	})
 	conn := newTestAdbConn(t, wsURL, fastPolicy())
+	return conn, await(t, receiveInBackground(conn), "the first frame's verdict").err
+}
 
-	// Bounded: a connection that swallowed the frame would park in Receive forever.
-	failed := make(chan error, 1)
-	go func() {
-		_, receiveErr := conn.Receive()
-		failed <- receiveErr
-	}()
+func TestGivenAReverseRouteArmAsTheFirstAdbFrameWhenReceivedThenTheSessionIsRefused(t *testing.T) {
+	// The codec decodes every arm, so /adb's refusal of the reverse route's arms rests on
+	// consumeControlFrame's default arm alone.
+	conn, err := firstServerFrameVerdict(t, testsupport.FrameEmptyArm("notifierReady"))
 
-	var err error
-	select {
-	case err = <-failed:
-	case <-time.After(testTimeout):
-		t.Fatal("the notifier status was neither refused nor delivered")
-	}
-
-	require.Error(t, err, "a notifier status must not open an adb session")
-	assert.ErrorContains(t, err, "opening a new session",
-		"the refusal must come from the status switch, not from the codec")
+	require.Error(t, err, "a notifier arm must not open an adb session")
+	assert.ErrorContains(t, err, "unexpected control frame notifierReady opening a new session",
+		"the refusal must come from the arm switch, not from the codec")
 	assert.Empty(t, conn.sessionUUID(), "no session may be latched from a reverse-route frame")
+}
+
+func TestGivenAV1FrameWhenConsumedAsTheFirstServerFrameThenTheSessionFailsWithErrNotControlFrame(t *testing.T) {
+	// A byte-protocol server answers with its own magic, version byte 0x00.
+	conn, err := firstServerFrameVerdict(t, decodeHex(t, frameVector(t, "v1-magic-new-frame").Hex))
+
+	require.ErrorIs(t, err, errNotControlFrame)
+	assert.ErrorContains(t, err, "wire version 0x00", "the error names the peer's version")
+	assert.Empty(t, conn.sessionUUID(), "no session may be latched from a frame this client cannot read")
 }
 
 func TestGivenControlFrameWhenPipedToLocalAdbThenFrameNeverReachesTheTCPSide(t *testing.T) {
@@ -149,7 +153,7 @@ func TestGivenControlFrameWhenPipedToLocalAdbThenFrameNeverReachesTheTCPSide(t *
 
 	got := readN(t, appSide, len(request))
 	assert.Equal(t, request, got)
-	assert.NotContains(t, string(got), magicPrefix, "the control frame must never reach the local adb client")
+	assert.NotContains(t, string(got), controlFrameMagic, "the control frame must never reach the local adb client")
 }
 
 func TestGivenIdleConnectionWhenRefreshDueThenSwapsOnTheQuietWindow(t *testing.T) {
@@ -474,12 +478,12 @@ func TestGivenUnackedReattachWhenRefreshFailsThenPoisonedPredecessorIsDropped(t 
 		"the poisoned predecessor must be dropped, not left accepting writes the server discards")
 }
 
-func TestGivenAReverseRouteStatusAckingAReattachWhenRefreshedThenTheSwapStaysIndeterminate(t *testing.T) {
-	// attachSuccessor's default arm. The ack is payload-free, so it parses and reaches the
-	// status switch. The UUID is on the wire by then, so a status the client cannot read
-	// leaves the takeover unknown, as a lost ack does.
+func TestGivenAReverseRouteArmAckingAReattachWhenRefreshedThenTheSwapStaysIndeterminate(t *testing.T) {
+	// attachSuccessor's default arm. The ack is a valid frame, so it decodes and reaches the
+	// arm switch. The UUID is on the wire by then, so an unexpected arm leaves the takeover
+	// unknown, as a lost ack does.
 	mock := testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{
-		ReattachAckStatus: controlStatusNotifierReady,
+		ReattachAckArm: armNotifierReady.String(),
 		// Predecessor stays open and writable, so its drop is provably the client's doing.
 		CleanCutDelay: neverCleanCutDelay,
 	})
@@ -490,11 +494,33 @@ func TestGivenAReverseRouteStatusAckingAReattachWhenRefreshedThenTheSwapStaysInd
 
 	err := conn.refresh(context.Background(), nil)
 
-	require.Error(t, err, "an ack the client cannot read must fail the swap")
+	require.Error(t, err, "an ack the client cannot act on must fail the swap")
 	assert.ErrorIs(t, err, errReattachIndeterminate,
-		"a status /adb never carries proves nothing about the takeover")
-	assert.ErrorContains(t, err, "acking a reattach",
-		"the refusal must come from the status switch, not from the codec")
+		"an arm /adb never carries proves nothing about the takeover")
+	assert.ErrorContains(t, err, "unexpected control frame notifierReady acking a reattach",
+		"the refusal must come from the arm switch, not from the codec")
+	waitFor(t, func() bool { return predecessor.Send([]byte("000chost:version")) != nil },
+		"the poisoned predecessor must be dropped, not left accepting writes the server discards")
+}
+
+func TestGivenAMalformedServerFrameDuringReattachWhenParsedThenErrReattachIndeterminate(t *testing.T) {
+	// The ack names a key no arm owns, so the decoder refuses it before any switch. The UUID is
+	// on the wire by then, and only a well-formed error frame proves nothing took over.
+	mock := testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{
+		ReattachAckArm: "bogus",
+		CleanCutDelay:  neverCleanCutDelay,
+	})
+	conn := newTestAdbConn(t, mock.URL, fastPolicy())
+	handshake(t, conn)
+
+	predecessor := conn.readFrom
+
+	err := conn.refresh(context.Background(), nil)
+
+	require.Error(t, err, "an ack the client cannot decode must fail the swap")
+	assert.ErrorIs(t, err, errReattachIndeterminate)
+	assert.NotErrorIs(t, err, ErrSessionGone, "a malformed ack is no refusal")
+	assert.ErrorContains(t, err, "does not match the schema", "the decoder, not the arm switch, refused it")
 	waitFor(t, func() bool { return predecessor.Send([]byte("000chost:version")) != nil },
 		"the poisoned predecessor must be dropped, not left accepting writes the server discards")
 }
@@ -1793,7 +1819,7 @@ func TestGivenASessionEndedCloseWhenReadThenOnlyAWholeUnmaskedOneSkipsTheResume(
 			mock := testsupport.NewSessionEchoWSS(t)
 			device := NewActiveDevice()
 			require.True(t, device.Set(DeviceInfo{ARN: testDeviceARN, Endpoint: mock.URL, Label: "test-device"}))
-			opening := binaryFrame(newSessionControlFrame(controlStatusNew, testSessionUUID))
+			opening := binaryFrame(testsupport.FrameNewSession(testSessionUUID))
 			scripted := &wsConn{conn: dialScriptedServer(t, [][]byte{opening, testCase.closing}, maxInboundMessageBytes), writeDeadline: sendDeadline}
 			conn := newAdbConn(newTestDialer(testTimeout), device, testDeviceARN, RouteAdb, scripted, fastPolicy(),
 				newActivityTracker(nil), noopLogger())
