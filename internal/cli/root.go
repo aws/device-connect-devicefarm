@@ -47,9 +47,10 @@ func newRootCommandWithState(state *rootState) *cobra.Command {
 		Short:   fmt.Sprintf("Bridge a local adb client to an %s %s remote access device", awsName, productName),
 		Long: fmt.Sprintf("%s presents itself to local adb clients as the adb host. It listens\n"+
 			"on a local TCP port and pipes each connection over the websocket of an %s\n"+
-			"%s remote access session to the device's adb server. Use 'bridge start'\n"+
-			"to launch the background daemon and attach a device, 'device add'/'device remove'\n"+
-			"to change the attached device, and 'bridge stop' to stop it.", config.BinaryName, awsName, productName),
+			"%s remote access session to the device's adb server. 'device add' attaches a\n"+
+			"device and starts the background daemon when none runs; 'device remove' detaches\n"+
+			"it. 'bridge start' starts the daemon with custom options; 'bridge stop' stops it.",
+			config.BinaryName, awsName, productName),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		// The generated `completion` command is noise for this tool's small,
@@ -160,8 +161,9 @@ func initLogging(debug bool) {
 	slog.SetDefault(slog.New(handler))
 }
 
-// newManager builds a daemon.DaemonManager for the lifecycle commands (bridge
-// start/stop/status). The effective logfile path in s.paths is already resolved in
+// newManager builds a daemon.DaemonManager for the commands that start, stop or probe
+// the daemon: bridge start/stop/status and the `device add` auto-start. The
+// effective logfile path in s.paths is already resolved in
 // PersistentPreRunE, so this is a pure constructor. It passes no remote-access
 // client: Start, Stop, and Status never resolve an ARN (they signal and inspect a
 // process), so these commands must not pay the AWS config load or fail when no

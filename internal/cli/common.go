@@ -9,6 +9,7 @@ import (
 
 	"github.com/aws/device-connect-devicefarm/internal/config"
 	"github.com/aws/device-connect-devicefarm/internal/control"
+	"github.com/aws/device-connect-devicefarm/internal/daemon"
 )
 
 // awsName is the cloud provider prefix, kept in one place so every user-facing
@@ -19,9 +20,15 @@ const awsName = "AWS"
 // user-facing message names it identically.
 const productName = "Device Farm"
 
-// notListeningMessage is shown when a command needs a running daemon but none is
-// listening.
+// notListeningMessage is what 'bridge stop' prints when no daemon runs, and the error
+// 'device remove' and a live pidfile with a dead control socket report.
 const notListeningMessage = config.BinaryName + " not listening"
+
+// bridgeAutoStartNote is the help paragraph of every command that starts the bridge
+// daemon itself.
+const bridgeAutoStartNote = "If the bridge daemon is not running, this command starts it with default\n" +
+	"settings, as 'adb' starts its own server. To pick a port or other options,\n" +
+	"run 'bridge start' first."
 
 // sessionArnDescription is the shared --session-arn help text; bridge start
 // appends its own suffix.
@@ -34,23 +41,50 @@ func addSessionArnFlag(cmd *cobra.Command, state *rootState, help string) {
 	cmd.Flags().StringVar(&state.sessionARN, "session-arn", "", help)
 }
 
-// attachToDaemon sends an add request carrying the session ARN to the running
-// daemon, which resolves the ARN to a websocket endpoint itself, and prints the
-// listening line. A not-running daemon surfaces as the "not listening" message,
-// and a resolution failure in the daemon surfaces as the add error.
+// startBridge starts the bridge daemon. A package var so a test can swap in a fake
+// that does not fork.
+var startBridge = func(manager *daemon.DaemonManager) error { return manager.Start() }
+
+// startBridgeIfNotRunning starts the bridge daemon with the default settings when none
+// runs, as adb starts its server on the first command.
+func startBridgeIfNotRunning(cmd *cobra.Command, state *rootState) error {
+	manager := state.newManager()
+	if _, running := manager.Status(); running {
+		return nil
+	}
+	cmd.PrintErrln("* bridge not running; starting it now")
+	if err := startBridge(manager); err != nil {
+		return fmt.Errorf("start the bridge: %w", err)
+	}
+	return nil
+}
+
+// sendToBridge starts the bridge daemon when none runs, then sends req to it. A live
+// pidfile whose socket does not answer surfaces as the "not listening" error.
+func sendToBridge(cmd *cobra.Command, state *rootState, req control.Request) (control.Response, error) {
+	if err := startBridgeIfNotRunning(cmd, state); err != nil {
+		return control.Response{}, err
+	}
+	resp, err := state.controlClient().Send(req)
+	if err != nil {
+		if daemonNotRunning(err) {
+			return control.Response{}, errors.New(notListeningMessage)
+		}
+		return control.Response{}, err
+	}
+	return resp, nil
+}
+
+// attachToDaemon sends an add request for the session ARN to the bridge daemon, starting
+// it when none runs, and prints the listening line. The daemon resolves the ARN itself;
+// a resolution failure surfaces as the add error.
 func attachToDaemon(cmd *cobra.Command, state *rootState) error {
 	if state.sessionARN == "" {
 		return fmt.Errorf("--session-arn is required")
 	}
 
-	resp, err := state.controlClient().Send(control.Request{
-		Op:  control.OpAdd,
-		ARN: state.sessionARN,
-	})
+	resp, err := sendToBridge(cmd, state, control.Request{Op: control.OpAdd, ARN: state.sessionARN})
 	if err != nil {
-		if daemonNotRunning(err) {
-			return notListeningError()
-		}
 		return err
 	}
 	if !resp.OK {
@@ -77,12 +111,6 @@ func printListeningLine(cmd *cobra.Command, response control.Response) {
 		"%s listening on port %d with connected device: %s\n",
 		config.BinaryName, response.Port, response.DeviceLabel,
 	)
-}
-
-// notListeningError is returned by commands that require a running daemon when
-// none is listening, so the CLI exits non-zero with a clear message.
-func notListeningError() error {
-	return errors.New(notListeningMessage)
 }
 
 // daemonNotRunning reports whether err means no daemon answered the control

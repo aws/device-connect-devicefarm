@@ -535,6 +535,28 @@ func TestGivenListenPortAlreadyInUseWhenRunForegroundThenErrorsWithoutTouchingPi
 	assert.Equal(t, sentinelRecord, string(got), "RunForeground must not have written its own pid before the listener bound")
 }
 
+func TestGivenServingDaemonWhenSecondBodyRacesForItsPortThenTheFirstStaysReachable(t *testing.T) {
+	// Two `device add` runs with no daemon can both spawn a child. The loser must fail
+	// its TCP bind before it touches the control socket, or its stale-socket removal
+	// unlinks the winner's socket and the winner turns unreachable.
+	cfg := config.Default()
+	cfg.ListenPort = freePort(t)
+	winner := newTestManagerWithConfig(t, cfg)
+	done, cancel := startForeground(t, winner)
+	loser := NewManager(cfg, winner.paths, newFakeClient(testEndpoint, "unused"), slog.New(slog.DiscardHandler))
+
+	err := loser.RunForeground(context.Background())
+
+	require.Error(t, err, "the loser must fail on the occupied port")
+	resp, sendErr := control.NewDaemonClient(winner.paths.ControlSocket).Send(control.Request{Op: control.OpStatus})
+	require.NoError(t, sendErr, "the winner's control socket must still answer")
+	assert.True(t, resp.OK)
+	_, running := winner.pidFile.RunningPID()
+	assert.True(t, running, "the winner's pidfile must stay")
+	cancel()
+	require.NoError(t, <-done)
+}
+
 func TestGivenServingDaemonWhenAddAndShutdownSentOverControlSocketThenAttachesAndStops(t *testing.T) {
 	// Exercises RunForeground's wiring end to end: the control handler is served
 	// on the real Unix socket, an add resolves (stubbed) and attaches, and a

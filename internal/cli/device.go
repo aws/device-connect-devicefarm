@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -9,8 +10,8 @@ import (
 )
 
 // newDeviceCommand groups the device subcommands under one parent: "device add"
-// attaches a device to the running daemon and "device remove" detaches it. Both
-// live here so the two halves of the device lifecycle sit together.
+// attaches a device to the bridge daemon and "device remove" detaches it. Only add
+// starts the daemon when none runs.
 func newDeviceCommand(state *rootState) *cobra.Command {
 	device := &cobra.Command{
 		Use:   "device",
@@ -31,15 +32,15 @@ func newDeviceCommand(state *rootState) *cobra.Command {
 	return device
 }
 
-// newDeviceAddCommand attaches a device to an already-running daemon. It does not
-// start the daemon: a "not listening" error from the control client surfaces when
-// no daemon is running, matching the user-facing contract that "bridge start" and
-// "device add" are distinct steps. The daemon resolves the session ARN to a
-// websocket endpoint itself, so this command just forwards the ARN.
+// newDeviceAddCommand attaches a device to the bridge daemon, starting it with the
+// default settings when none runs. The daemon resolves the session ARN to a websocket
+// endpoint itself, so this command just forwards the ARN.
 func newDeviceAddCommand(state *rootState) *cobra.Command {
+	short := fmt.Sprintf("Attach a %s remote access device to the bridge", productName)
 	cmd := &cobra.Command{
 		Use:   "add",
-		Short: fmt.Sprintf("Attach a %s remote access device to the running bridge", productName),
+		Short: short,
+		Long:  short + ".\n\n" + bridgeAutoStartNote,
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return attachToDaemon(cmd, state)
@@ -49,14 +50,15 @@ func newDeviceAddCommand(state *rootState) *cobra.Command {
 	return cmd
 }
 
-// newDeviceRemoveCommand detaches the active device from the running daemon. The
-// listener stays up; only the device binding is cleared. Resolving the ARN is not
-// needed: the daemon matches the device by ARN, so the request carries just the
-// ARN.
+// newDeviceRemoveCommand detaches the active device. The listener stays up; only the
+// device binding is cleared. The daemon matches the device by ARN, so the request
+// carries just the ARN. It needs a running daemon and reports not listening otherwise.
 func newDeviceRemoveCommand(state *rootState) *cobra.Command {
+	short := fmt.Sprintf("Detach the active %s remote access device from the bridge", productName)
 	cmd := &cobra.Command{
 		Use:   "remove",
-		Short: fmt.Sprintf("Detach the active %s remote access device from the bridge", productName),
+		Short: short,
+		Long:  short + ".\n\nThis command needs a running bridge daemon.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if state.sessionARN == "" {
@@ -69,7 +71,7 @@ func newDeviceRemoveCommand(state *rootState) *cobra.Command {
 			})
 			if err != nil {
 				if daemonNotRunning(err) {
-					return notListeningError()
+					return errors.New(notListeningMessage)
 				}
 				return err
 			}
