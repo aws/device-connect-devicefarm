@@ -10,14 +10,14 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/daemon"
 )
 
-// newDaemonCommand is the hidden foreground daemon body. `proxy start` re-execs
+// newDaemonCommand is the hidden foreground daemon body. `bridge start` re-execs
 // the binary with this subcommand as a detached process; it is not intended for
 // direct use, so it is hidden from help output. It runs the bridge until
-// SIGINT/SIGTERM from a console or a control shutdown (`proxy stop`).
+// SIGINT/SIGTERM from a console or a control shutdown (`bridge stop`).
 func newDaemonCommand(state *rootState) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:    daemon.DaemonSubcommand,
-		Short:  "Run the proxy in the foreground (internal; used by 'proxy start')",
+		Short:  "Run the bridge in the foreground (internal; used by 'bridge start')",
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {

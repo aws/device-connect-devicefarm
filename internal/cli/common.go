@@ -23,12 +23,12 @@ const productName = "Device Farm"
 // listening.
 const notListeningMessage = config.BinaryName + " not listening"
 
-// sessionArnDescription is the shared --session-arn help text; proxy start
+// sessionArnDescription is the shared --session-arn help text; bridge start
 // appends its own suffix.
 var sessionArnDescription = fmt.Sprintf("%s %s remote access session ARN", awsName, productName)
 
 // addSessionArnFlag binds the --session-arn flag to the shared rootState on cmd.
-// The three commands that take a session ARN (proxy start, device add, device
+// The three commands that take a session ARN (bridge start, device add, device
 // remove) register it identically apart from the help text, so it lives here.
 func addSessionArnFlag(cmd *cobra.Command, state *rootState, help string) {
 	cmd.Flags().StringVar(&state.sessionARN, "session-arn", "", help)
