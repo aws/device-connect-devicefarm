@@ -19,7 +19,8 @@ const (
 	// time (a temporary restriction): re-adding the same session ARN is an
 	// idempotent no-op, while a different ARN while one is attached is rejected.
 	OpAdd Op = "add"
-	// OpRemove disconnects the active device if its ARN matches the request.
+	// OpRemove disconnects the attached device. With an ARN, only if it matches; with
+	// none, whichever device is attached (one at a time today).
 	OpRemove Op = "remove"
 	// OpStatus reports whether a device is connected, its label, and the daemon's
 	// listen port.
@@ -32,8 +33,8 @@ const (
 )
 
 // Request is one control command. ARN names the session for OpAdd (the daemon
-// resolves it to a websocket endpoint and device label itself) and confirms which
-// device to drop for OpRemove.
+// resolves it to a websocket endpoint and device label itself) and, when given,
+// confirms which device to drop for OpRemove.
 type Request struct {
 	Op  Op     `json:"op"`
 	ARN string `json:"arn,omitempty"`

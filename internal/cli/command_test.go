@@ -197,6 +197,29 @@ func TestGivenRunningDaemonWithDeviceWhenRemoveDeviceInvokedThenPrintsRemovedLin
 	assert.Contains(t, out.String(), "Removed Google Pixel 9 (OS 16) from the bridge")
 }
 
+func TestGivenRunningDaemonWithDeviceWhenRemoveDeviceInvokedWithoutARNThenRemovesTheAttachedDevice(t *testing.T) {
+	fakeDaemon(t, func(req control.Request) control.Response {
+		assert.Equal(t, control.OpRemove, req.Op)
+		assert.Empty(t, req.ARN, "no --session-arn must reach the daemon as an empty ARN")
+		return control.Response{OK: true, DeviceLabel: "Google Pixel 9 (OS 16)"}
+	})
+
+	out, err := execRoot(t, "device", "remove")
+
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "Removed Google Pixel 9 (OS 16) from the bridge")
+}
+
+func TestGivenSessionArnHelpWhenPrintedThenOnlyRemoveCallsItOptional(t *testing.T) {
+	remove, err := runRoot(t, "device", "remove", "--help")
+	require.NoError(t, err)
+	assert.Contains(t, remove.String(), "(optional; without it, the attached device is detached)")
+
+	add, err := runRoot(t, "device", "add", "--help")
+	require.NoError(t, err)
+	assert.NotContains(t, add.String(), "optional", "device add still requires --session-arn")
+}
+
 func TestGivenDaemonHasNoDeviceWhenRemoveDeviceInvokedThenErrorsWithDaemonReason(t *testing.T) {
 	fakeDaemon(t, func(control.Request) control.Response {
 		return control.Response{OK: false, Error: "no device is attached"}

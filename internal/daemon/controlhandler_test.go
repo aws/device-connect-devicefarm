@@ -130,6 +130,17 @@ func (s *controlHandlerSuite) TestRemoveWithMatchingARNDetaches() {
 	s.False(present)
 }
 
+func (s *controlHandlerSuite) TestRemoveWithoutARNDetachesTheAttachedDevice() {
+	s.Require().True(s.handler(addReq("arn:1")).OK)
+
+	resp := s.handler(control.Request{Op: control.OpRemove})
+
+	s.Require().True(resp.OK)
+	s.Equal("Pixel 10 (OS 17)", resp.DeviceLabel)
+	_, present := s.device.Current()
+	s.False(present)
+}
+
 func (s *controlHandlerSuite) TestRemoveWithMismatchedARNRejectedAndKept() {
 	s.Require().True(s.handler(addReq("arn:1")).OK)
 
