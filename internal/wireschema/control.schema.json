@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Control frames of the adb websocket routes. A frame is the 7-byte magic 00 44 46 41 44 42 01, then one compact UTF-8 JSON object with exactly one key naming the arm. The root refers to #/$defs/controlFrame, so the file compiles as-is in every engine and no consumer builds a wrapper. Decoders validate the parsed object against it; encoders validate nothing. conformance.json beside this file is the contract.",
+  "$ref": "#/$defs/controlFrame",
+  "$defs": {
+    "sessionUuid": {
+      "$comment": "Anchored UUIDv4: version nibble 4, variant nibble 8, 9, a or b, either case. No lookaround or backreference, so RE2, Python re and java.util.regex agree; the 36-character bound stops $ from matching before a trailing newline.",
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "reverseToken": {
+      "$comment": "Names one parked device-originated connection. UUIDv4 text, like a session uuid.",
+      "$ref": "#/$defs/sessionUuid"
+    },
+    "customerPort": {
+      "$comment": "A TCP port on the customer's machine. 0 is not dialable.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "errorReason": {
+      "$comment": "Human-readable refusal text, printable ASCII only (U+0020 to U+007E), never empty. Written as not/pattern because an anchored ^[ -~]+$ differs per engine ($ matches before a trailing newline in Python re and java.util.regex, not in RE2). Every valid reason therefore has one canonical encoding: encoders escape only \" and \\, alike in every language; a decoder also accepts any other JSON escape of a printable character.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "not": {"pattern": "[^ -~]"}
+    },
+    "emptyArm": {
+      "$comment": "notifierHello, notifierReady, ping and pong carry nothing.",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "sessionArm": {
+      "type": "object",
+      "required": ["sessionUuid"],
+      "properties": {"sessionUuid": {"$ref": "#/$defs/sessionUuid"}},
+      "additionalProperties": false
+    },
+    "errorArm": {
+      "type": "object",
+      "required": ["reason"],
+      "properties": {"reason": {"$ref": "#/$defs/errorReason"}},
+      "additionalProperties": false
+    },
+    "reverseOpenArm": {
+      "type": "object",
+      "required": ["token", "customerPort"],
+      "properties": {"token": {"$ref": "#/$defs/reverseToken"}, "customerPort": {"$ref": "#/$defs/customerPort"}},
+      "additionalProperties": false
+    },
+    "tokenArm": {
+      "type": "object",
+      "required": ["token"],
+      "properties": {"token": {"$ref": "#/$defs/reverseToken"}},
+      "additionalProperties": false
+    },
+    "controlFrame": {
+      "$comment": "Exactly one arm: an object with one member whose name is an arm key. minProperties and maxProperties bound the member count, additionalProperties false limits the name to the nine arms, properties routes the body to its arm schema.",
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "newSession": {"$ref": "#/$defs/sessionArm"},
+        "reattach": {"$ref": "#/$defs/sessionArm"},
+        "error": {"$ref": "#/$defs/errorArm"},
+        "notifierHello": {"$ref": "#/$defs/emptyArm"},
+        "notifierReady": {"$ref": "#/$defs/emptyArm"},
+        "reverseOpen": {"$ref": "#/$defs/reverseOpenArm"},
+        "ping": {"$ref": "#/$defs/emptyArm"},
+        "pong": {"$ref": "#/$defs/emptyArm"},
+        "connectorHello": {"$ref": "#/$defs/tokenArm"}
+      },
+      "additionalProperties": false
+    }
+  }
+}
