@@ -260,12 +260,6 @@ func (m *DaemonManager) RunForeground(ctx context.Context) error {
 	// must mean nothing is held.
 	defer m.pidFile.Remove()
 
-	controlServer := control.NewLocalSocketServer(m.paths.ControlSocket, m.logger)
-	if err := controlServer.Listen(); err != nil {
-		return err
-	}
-	defer controlServer.Close()
-
 	dialer := bridge.NewWSDialer(m.config.DialTimeout).TrustRoots(m.websocketRoots)
 	device := bridge.NewActiveDevice(
 		bridge.WithAttachmentFeatures(dialer, m.refreshPolicy(), m.attachmentParams(), m.logger),
@@ -285,17 +279,25 @@ func (m *DaemonManager) RunForeground(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// Bind the TCP listener before writing the pidfile so a bind failure (e.g. the
-	// listen port is already in use) surfaces as a startup error the parent
-	// reports, instead of the daemon writing its readiness pidfile and only then
-	// dying when Run tries to bind.
+	// Bind the TCP listener first. A second daemon racing for the same port fails
+	// here and never touches the control socket the winner holds: the control
+	// Listen below unlinks a socket file it finds. (A racer on another port still
+	// comes up and unlinks the winner's socket; rare and accepted.) Binding before
+	// the pidfile write makes a port clash a startup error the parent reports, not
+	// a daemon that looks ready and then dies.
 	if err := server.Listen(); err != nil {
 		return err
 	}
 	defer server.Close()
 
+	controlServer := control.NewLocalSocketServer(m.paths.ControlSocket, m.logger)
+	if err := controlServer.Listen(); err != nil {
+		return err
+	}
+	defer controlServer.Close()
+
 	// The pidfile doubles as the readiness signal, so write it only after both the
-	// control socket and the TCP listener are bound: once the parent sees the
+	// TCP listener and the control socket are bound: once the parent sees the
 	// pidfile, a CLI command can connect to the control socket without racing the
 	// bind, and the "listening" line it prints is already true.
 	if err := m.pidFile.Write(); err != nil {

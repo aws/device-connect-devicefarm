@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -17,15 +18,22 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/daemon"
 )
 
-// fakeRuntimePaths points the runtime dir at a fresh dir, so execRoot resolves
-// the same paths, and writes a live pidfile (this test process) there, so
-// Manager.Status reports "running" and Manager.Start no-ops.
-func fakeRuntimePaths(t *testing.T) daemon.Paths {
+// TestMain blocks the real bridge start: a test that needs one uses fakeBridgeStart;
+// any other test that reaches it has a bug.
+func TestMain(m *testing.M) {
+	startBridge = func(*daemon.DaemonManager) error {
+		panic("a test reached the real bridge start; use fakeBridgeStart")
+	}
+	os.Exit(m.Run())
+}
+
+// shortRuntimeDir points the runtime dir at a fresh dir under /tmp and returns the
+// paths execRoot resolves there. Not t.TempDir() or $TMPDIR: t.TempDir embeds the long
+// test name and the macOS $TMPDIR is long. DefaultPaths appends
+// devicefarm-connect/devicefarm-connect.sock, and the whole path must stay under the
+// ~104-byte Unix-domain socket path limit.
+func shortRuntimeDir(t *testing.T) daemon.Paths {
 	t.Helper()
-	// A short runtime dir under /tmp, not t.TempDir() or $TMPDIR: t.TempDir embeds
-	// the long test name and the macOS $TMPDIR is long. DefaultPaths appends
-	// devicefarm-connect/devicefarm-connect.sock, and the whole path must stay under
-	// the ~104-byte Unix-domain socket path limit.
 	runtimeDir, err := os.MkdirTemp("/tmp", "adbcli")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
@@ -33,20 +41,31 @@ func fakeRuntimePaths(t *testing.T) daemon.Paths {
 
 	paths, err := daemon.DefaultPaths()
 	require.NoError(t, err)
+	return paths
+}
 
+// writeLivePidfile writes a live pidfile (this test process) at paths, so Manager.Status
+// reports "running" and Manager.Start no-ops.
+func writeLivePidfile(t *testing.T, paths daemon.Paths) {
+	t.Helper()
 	// The PidFile holds the lock and must stay reachable until cleanup.
 	pidFile := daemon.NewPidFile(paths.PidFile, nil)
 	require.NoError(t, pidFile.Write())
 	t.Cleanup(func() { _ = pidFile.Remove() })
+}
+
+// fakeRuntimePaths is shortRuntimeDir plus a live pidfile: a daemon that looks running.
+func fakeRuntimePaths(t *testing.T) daemon.Paths {
+	t.Helper()
+	paths := shortRuntimeDir(t)
+	writeLivePidfile(t, paths)
 	return paths
 }
 
-// fakeDaemon serves handler on a real control socket at fakeRuntimePaths, so
-// command tests run end to end over a Unix socket without forking the daemon.
-func fakeDaemon(t *testing.T, handler control.Handler) {
+// serveControl serves handler on a real control socket at paths, so command tests run
+// end to end over a Unix socket without forking the daemon.
+func serveControl(t *testing.T, paths daemon.Paths, handler control.Handler) {
 	t.Helper()
-	paths := fakeRuntimePaths(t)
-
 	server := control.NewLocalSocketServer(paths.ControlSocket, slog.New(slog.DiscardHandler))
 	require.NoError(t, server.Listen())
 	ctx, cancel := context.WithCancel(context.Background())
@@ -59,6 +78,31 @@ func fakeDaemon(t *testing.T, handler control.Handler) {
 		cancel()
 		<-done
 		_ = server.Close()
+	})
+}
+
+// fakeDaemon is a daemon that looks running and answers handler on its control socket.
+func fakeDaemon(t *testing.T, handler control.Handler) {
+	t.Helper()
+	serveControl(t, fakeRuntimePaths(t), handler)
+}
+
+// stubBridgeStart replaces the bridge start for one test.
+func stubBridgeStart(t *testing.T, start func(*daemon.DaemonManager) error) {
+	t.Helper()
+	previous := startBridge
+	startBridge = start
+	t.Cleanup(func() { startBridge = previous })
+}
+
+// fakeBridgeStart makes a bridge start write the live pidfile and serve handler at paths
+// instead of forking.
+func fakeBridgeStart(t *testing.T, paths daemon.Paths, handler control.Handler) {
+	t.Helper()
+	stubBridgeStart(t, func(*daemon.DaemonManager) error {
+		writeLivePidfile(t, paths)
+		serveControl(t, paths, handler)
+		return nil
 	})
 }
 
@@ -107,12 +151,38 @@ func TestGivenDaemonCannotResolveWhenAddDeviceInvokedThenSurfacesResolveError(t 
 }
 
 func TestGivenNoControlSocketWhenAddDeviceInvokedThenReturnsNotListening(t *testing.T) {
-	// add ignores the pidfile; the helper only supplies a short unbound socket path.
+	// The live pidfile says a daemon runs, so add starts none; the socket is unbound.
 	fakeRuntimePaths(t)
 
 	_, err := execRoot(t, "device", "add", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
 
 	require.EqualError(t, err, notListeningMessage)
+}
+
+func TestGivenNoBridgeWhenAddDeviceInvokedThenStartsTheBridgeAndAttaches(t *testing.T) {
+	paths := shortRuntimeDir(t)
+	fakeBridgeStart(t, paths, func(req control.Request) control.Response {
+		assert.Equal(t, control.OpAdd, req.Op)
+		return control.Response{OK: true, DeviceLabel: "Google Pixel 9 (OS 16)", Port: 5037}
+	})
+
+	out, err := execRoot(t, "device", "add", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
+
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "* bridge not running; starting it now")
+	assert.Contains(t, out.String(), "listening on port 5037 with connected device: Google Pixel 9 (OS 16)")
+}
+
+func TestGivenBridgeStartFailsWhenAddDeviceInvokedThenErrorsWithTheStartFailure(t *testing.T) {
+	shortRuntimeDir(t)
+	startFailure := errors.New(`daemon failed to start (check "/tmp/d.log")`)
+	stubBridgeStart(t, func(*daemon.DaemonManager) error { return startFailure })
+
+	out, err := execRoot(t, "device", "add", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
+
+	require.ErrorIs(t, err, startFailure)
+	assert.ErrorContains(t, err, "start the bridge")
+	assert.NotContains(t, out.String(), "listening on port")
 }
 
 func TestGivenRunningDaemonWithDeviceWhenRemoveDeviceInvokedThenPrintsRemovedLine(t *testing.T) {
@@ -138,7 +208,20 @@ func TestGivenDaemonHasNoDeviceWhenRemoveDeviceInvokedThenErrorsWithDaemonReason
 	assert.Contains(t, err.Error(), "no device is attached")
 }
 
+func TestGivenNoBridgeWhenRemoveDeviceInvokedThenReturnsNotListeningAndStartsNone(t *testing.T) {
+	// No pidfile and no socket. TestMain panics on a real start, so this also proves
+	// remove starts nothing.
+	shortRuntimeDir(t)
+
+	out, err := execRoot(t, "device", "remove", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
+
+	require.EqualError(t, err, notListeningMessage)
+	assert.NotContains(t, out.String(), "starting it now")
+}
+
 func TestGivenNoControlSocketWhenRemoveDeviceInvokedThenReturnsNotListening(t *testing.T) {
+	// A live pidfile with no socket bound. Remove never starts a daemon, so the dead
+	// socket is what it reports.
 	fakeRuntimePaths(t)
 
 	_, err := execRoot(t, "device", "remove", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
@@ -240,6 +323,32 @@ func TestGivenRunningDaemonWithDeviceWhenStartBridgeInvokedWithoutARNThenPrintsA
 
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), "listening on port 6000 with connected device: Google Pixel 9 (OS 16)")
+}
+
+func TestGivenNoBridgeWhenStartBridgeInvokedThenStartsItAndPrintsTheListeningLine(t *testing.T) {
+	paths := shortRuntimeDir(t)
+	fakeBridgeStart(t, paths, func(req control.Request) control.Response {
+		assert.Equal(t, control.OpStatus, req.Op)
+		return control.Response{OK: true, Port: 5037}
+	})
+
+	out, err := execRoot(t, "bridge", "start")
+
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "* bridge not running; starting it now")
+	assert.Contains(t, out.String(), "listening on port 5037 with no device attached")
+}
+
+func TestGivenBridgeStartFailsWhenStartBridgeInvokedWithARNThenErrorsWithTheStartFailureOnly(t *testing.T) {
+	// The start error must not be dressed up as "daemon started but attaching failed".
+	shortRuntimeDir(t)
+	startFailure := errors.New(`daemon failed to start (check "/tmp/d.log")`)
+	stubBridgeStart(t, func(*daemon.DaemonManager) error { return startFailure })
+
+	_, err := execRoot(t, "bridge", "start", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
+
+	require.ErrorIs(t, err, startFailure)
+	assert.NotContains(t, err.Error(), "daemon started")
 }
 
 func TestGivenPidfileButNoControlSocketWhenStartBridgeInvokedThenReturnsNotListening(t *testing.T) {

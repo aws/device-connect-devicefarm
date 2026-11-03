@@ -21,9 +21,13 @@ The verification steps are added with the first signed release.
 ## Usage
 
 ```sh
-# Start the background daemon and attach a Device Farm remote access device. The
-# --session-arn is optional: omit it to start the daemon with no device attached
-# and connect one later with 'device add'.
+# Attach a Device Farm remote access device. If the bridge daemon is not running, this
+# starts it with the default settings (port 5037). If adb's own server holds that port,
+# run 'adb kill-server' first, or start the bridge on another port (next step).
+devicefarm-connect device add --session-arn arn:aws:devicefarm:us-west-2:123456789012:session:11111111-2222-3333-4444-5555555abcde
+
+# To pick a port or other options, start the bridge yourself. --session-arn is optional:
+# omit it to start with no device and add one later with 'device add'.
 devicefarm-connect bridge start --port 5037 --session-arn arn:aws:devicefarm:us-west-2:123456789012:session:11111111-2222-3333-4444-5555555abcde
 
 # Point a local adb client at the bridge.
@@ -76,8 +80,8 @@ client targets that region and a session ARN from any other region is rejected
 Flags are scoped to the command they affect (see `devicefarm-connect <command> --help`).
 `--debug` (enable debug-level logging; the default is info) is global. `--version` (or `-v`)
 is accepted by the bare command only. The daemon's
-listener and logfile flags belong to `bridge start`, the only command that stands up
-the daemon: `--port` (default `5037`, matching adb's own default server port) and
+listener and logfile flags belong to `bridge start`: `--port` (default `5037`, matching
+adb's own default server port) and
 `--log` (the daemon logfile, defaulting to `devicefarm-connect.log` in the per-user
 runtime directory alongside the pidfile and control socket). Moving the listener off
 loopback with `--listen-addr` is not recommended; read the [Security notes](#security-notes)
@@ -85,8 +89,10 @@ first. `--allow-adb-reverse` belongs to the same command. Without it, `adb rever
 and adb prints
 `error: adb reverse is off for this client; restart it with --allow-adb-reverse`. To
 turn it on, run `bridge stop`, then `bridge start --allow-adb-reverse`. The other
-commands find the running daemon through its control socket, so they do not take
-these. `--session-arn` is a per-command argument of
+commands find the daemon through its control socket, so they do not take these.
+`device add` with no daemon starts one with the default settings, as adb starts its
+own server. To pick a port or turn reverse on, run `bridge start` first.
+`--session-arn` is a per-command argument of
 `bridge start`, `device add`, and `device remove`. The dial, keep-alive, stop, and
 endpoint-refresh timeouts and the websocket-refresh cadence are fixed runtime
 constants and are not exposed as flags, keeping the command surface small. A flag

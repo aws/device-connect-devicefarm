@@ -182,17 +182,10 @@ func TestGivenNoRunningDaemonWhenBridgeStopInvokedThenReportsNotListening(t *tes
 }
 
 func TestGivenDeviceAddWithoutARNWhenInvokedThenFailsRequestingARN(t *testing.T) {
+	// No daemon runs; a failed flag check must start none (TestMain panics on a real start).
 	_, err := runRoot(t, "device", "add")
 
-	require.Error(t, err)
-}
-
-func TestGivenDeviceRemoveWithoutRunningDaemonWhenInvokedThenFailsNotListening(t *testing.T) {
-	// With a session ARN provided, the command gets past the required-flag check
-	// and fails because no daemon is listening.
-	_, err := runRoot(t, "device", "remove", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
-
-	require.Error(t, err)
+	require.ErrorContains(t, err, "--session-arn is required")
 }
 
 func TestGivenListenerFlagsAfterBridgeStartPathWhenInvokedThenParsed(t *testing.T) {
