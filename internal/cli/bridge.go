@@ -56,14 +56,11 @@ func newBridgeStartCommand(state *rootState) *cobra.Command {
 			if err := state.cfg.Validate(); err != nil {
 				return err
 			}
-
-			attachRequested := state.sessionARN != ""
-
-			if err := state.newManager().Start(); err != nil {
+			if err := startBridgeIfNotRunning(cmd, state); err != nil {
 				return err
 			}
 
-			if attachRequested {
+			if state.sessionARN != "" {
 				if err := attachToDaemon(cmd, state); err != nil {
 					return fmt.Errorf(
 						"%s daemon started but attaching the device failed; fix the issue and retry 'device add': %w",
@@ -73,13 +70,10 @@ func newBridgeStartCommand(state *rootState) *cobra.Command {
 				return nil
 			}
 
-			// Start no-ops if a daemon already runs; its port and device may differ
-			// from the flags, so ask it.
-			statusResponse, err := state.controlClient().Send(control.Request{Op: control.OpStatus})
+			// A daemon that already ran may differ from the flags in port and device,
+			// so ask it.
+			statusResponse, err := sendToBridge(cmd, state, control.Request{Op: control.OpStatus})
 			if err != nil {
-				if daemonNotRunning(err) {
-					return notListeningError()
-				}
 				return err
 			}
 			printListeningLine(cmd, statusResponse)
@@ -87,8 +81,8 @@ func newBridgeStartCommand(state *rootState) *cobra.Command {
 		},
 	}
 	// The listener and logfile flags live here, not on the root command: `bridge
-	// start` is the only user-facing command that stands up the daemon, so it is
-	// the only one for which the port, address, and logfile are meaningful.
+	// start` is the only command that configures the daemon. `device add` starts
+	// one with the defaults; every other command talks to a running one.
 	bindListenerFlags(cmd, &state.cfg)
 	bindReverseFlag(cmd, &state.cfg)
 	cmd.Flags().StringVar(&state.cfg.LogPath, "log", state.cfg.LogPath, "daemon logfile path (defaults to the per-user runtime directory)")
