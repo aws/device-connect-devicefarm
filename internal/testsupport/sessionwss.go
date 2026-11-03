@@ -10,28 +10,12 @@ import (
 	"golang.org/x/net/websocket"
 )
 
-// Control frame constants, duplicated from the server's wire contract on purpose: the
-// mock must not share the client's constants.
-const (
-	magicPrefix = "\x00DFADB\x00"
-
-	controlStatusNew      byte = 0x00
-	controlStatusReattach byte = 0x01
-	controlStatusError    byte = 0x02
-
-	// ?path=adbreverse statuses; the reverse mock serves them.
-	controlStatusNotifierHello  byte = 0x10
-	controlStatusNotifierReady  byte = 0x11
-	controlStatusReverseOpen    byte = 0x12
-	controlStatusPing           byte = 0x13
-	controlStatusPong           byte = 0x14
-	controlStatusConnectorHello byte = 0x15
-
-	sessionUUIDLen = 36
-)
+// sessionUUIDLen is the length of the reconnect signal, a bare UUIDv4 as the first client
+// frame. Duplicated from the wire contract like the frame builders.
+const sessionUUIDLen = 36
 
 // Websocket close codes the server and the relay send, duplicated from the wire contract like
-// the control frame constants.
+// the frame builders.
 const (
 	// SessionEndedCloseCode closes a session's current websocket once the server ends the
 	// session; nothing can resume it.
@@ -44,14 +28,6 @@ const (
 // Reconnect signal: a first client frame that is exactly a canonical UUIDv4.
 var uuidV4Pattern = regexp.MustCompile(
 	`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
-
-// encodeControlFrame builds magic + status + UTF-8 payload, with no length field.
-func encodeControlFrame(status byte, payload string) []byte {
-	frame := make([]byte, 0, len(magicPrefix)+1+len(payload))
-	frame = append(frame, magicPrefix...)
-	frame = append(frame, status)
-	return append(frame, payload...)
-}
 
 // SessionMockConfig configures a session-model-aware mock /adb endpoint.
 type SessionMockConfig struct {
@@ -87,10 +63,10 @@ type SessionMockConfig struct {
 	// close overtakes the ack. Zero keeps the server's own order: ack, swap, close.
 	ReattachAckDelay time.Duration
 
-	// ReattachAckStatus replaces the ack's status byte and empties its payload, so a test
-	// can drive the client's fail-closed arm for a status /adb never carries. Every such
-	// status is payload-free. Zero keeps REATTACH.
-	ReattachAckStatus byte
+	// ReattachAckArm replaces the ack with an empty-bodied frame of that arm, so a test can
+	// drive the client's fail-closed arm for a frame /adb never carries, or its decoder with
+	// a key no arm owns. Empty keeps reattach.
+	ReattachAckArm string
 
 	// OnMessage handles raw ADB bytes from the client; reply goes to whichever websocket
 	// is currently attached. Nil echoes.
@@ -287,7 +263,7 @@ func (m *SessionMockWSS) serve(ws *websocket.Conn) {
 			return
 		}
 		// Refusal: announce, then close, as the server does.
-		websocket.Message.Send(ws, encodeControlFrame(controlStatusError, "unknown or expired session"))
+		websocket.Message.Send(ws, FrameError("unknown or expired session"))
 		ws.Close()
 		return
 	}
@@ -365,17 +341,15 @@ func (m *SessionMockWSS) reattach(ws *websocket.Conn, uuid string) *MockSession 
 		return session
 	}
 
-	ackStatus := controlStatusReattach
-	ackPayload := uuid
-	if m.cfg.ReattachAckStatus != 0 {
-		ackStatus = m.cfg.ReattachAckStatus
-		ackPayload = ""
+	ack := FrameReattach(uuid)
+	if m.cfg.ReattachAckArm != "" {
+		ack = FrameEmptyArm(m.cfg.ReattachAckArm)
 	}
 
 	// No ack delay: announce BEFORE the swap, matching the server's own code order
 	// (ack, switch the pointer, close the old socket).
 	if m.cfg.ReattachAckDelay <= 0 {
-		if websocket.Message.Send(ws, encodeControlFrame(ackStatus, ackPayload)) != nil {
+		if websocket.Message.Send(ws, ack) != nil {
 			return nil
 		}
 		session.takeOver(ws, m.cfg.CleanCutDelay)
@@ -386,7 +360,7 @@ func (m *SessionMockWSS) reattach(ws *websocket.Conn, uuid string) *MockSession 
 	// stands in for the ack's flight time, not a change in server logic.
 	session.takeOver(ws, m.cfg.CleanCutDelay)
 	time.Sleep(m.cfg.ReattachAckDelay)
-	if websocket.Message.Send(ws, encodeControlFrame(ackStatus, ackPayload)) != nil {
+	if websocket.Message.Send(ws, ack) != nil {
 		return nil
 	}
 	return session
@@ -404,7 +378,7 @@ func (m *SessionMockWSS) newSession(ws *websocket.Conn) *MockSession {
 	m.sessions[uuid] = session
 	m.mu.Unlock()
 
-	if websocket.Message.Send(ws, encodeControlFrame(controlStatusNew, uuid)) != nil {
+	if websocket.Message.Send(ws, FrameNewSession(uuid)) != nil {
 		return nil
 	}
 	session.takeOver(ws, m.cfg.CleanCutDelay)

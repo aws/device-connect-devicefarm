@@ -262,7 +262,7 @@ func TestGivenPipeEndsWithErrorWhenClientConnectsThenErrorSwallowedAndServerSurv
 	oversized := make([]byte, maxInboundMessageBytes+1)
 	wsURL := testsupport.NewMockWSS(t, func(ws *websocket.Conn) {
 		ws.PayloadType = websocket.BinaryFrame
-		websocket.Message.Send(ws, newSessionControlFrame(controlStatusNew, testSessionUUID))
+		websocket.Message.Send(ws, testsupport.FrameNewSession(testSessionUUID))
 		websocket.Message.Send(ws, oversized)
 		io.Copy(io.Discard, ws)
 	})

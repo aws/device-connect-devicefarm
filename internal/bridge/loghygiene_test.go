@@ -75,7 +75,7 @@ func TestGivenAPresignedEndpointThatRefusesTheDialWhenEachSiteFailsThenTheLogCar
 				port := installRule(t, attachedFeatures(t, device), "tcp:8080")
 				assertClosed(t, dialRule(t, port), "a failed dial must close the forwarded connection")
 			}},
-		{name: "reverse notifier", failureLine: `msg="the reverse notifier ended"`,
+		{name: "reverse notifier", failureLine: `msg="the reverse notifier ended; redialing"`,
 			run: func(t *testing.T, logger *slog.Logger) {
 				// Set opens the attachment's notifier; a parked backoff keeps it to one failed dial.
 				attachPresigned(t, notifierParams(parkedKeepAlive, parkedBackoff), logger)

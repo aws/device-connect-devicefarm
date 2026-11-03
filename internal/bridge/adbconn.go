@@ -268,15 +268,15 @@ func (connection *adbConn) awaitHandshake(within time.Duration) error {
 }
 
 // consumeControlFrame decodes the first server frame and latches the session it names.
-// Only NEW is expected here; anything else fails closed.
+// Only newSession is expected here; anything else fails closed.
 func (c *adbConn) consumeControlFrame(message []byte) error {
-	frame, err := parseControlFrame(message)
+	frame, err := unmarshalControlFrame(message)
 	if err != nil {
 		return fmt.Errorf("read session control frame: %w", err)
 	}
 
-	switch frame.status {
-	case controlStatusNew:
+	switch frame.arm {
+	case armNewSession:
 		c.seam.Lock()
 		// A Close racing the handshake wins: do not revive the phase.
 		if c.phase == phaseClosed {
@@ -289,10 +289,10 @@ func (c *adbConn) consumeControlFrame(message []byte) error {
 		c.uuidReadyOnce.Do(func() { close(c.uuidReady) })
 		c.logger.Debug("adb session established", "session", frame.payload)
 		return nil
-	case controlStatusError:
+	case armError:
 		return fmt.Errorf("remote refused the adb session: %s", frame.payload)
 	default:
-		return fmt.Errorf("unexpected control frame status 0x%02x opening a new session", frame.status)
+		return fmt.Errorf("unexpected control frame %s opening a new session", frame.arm)
 	}
 }
 

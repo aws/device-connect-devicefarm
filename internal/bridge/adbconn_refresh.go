@@ -187,22 +187,22 @@ func (c *adbConn) attachSuccessor(ctx context.Context, sessionUUID string) (WSCo
 		return nil, fmt.Errorf("read reattach ack: %w: %w", errReattachIndeterminate, err)
 	}
 
-	switch frame.status {
-	case controlStatusReattach:
+	switch frame.arm {
+	case armReattach:
 		if frame.payload != sessionUUID {
 			c.sockets.forget(successor)
 			return nil, fmt.Errorf("%w: reattach ack names session %q, expected %q",
 				errReattachIndeterminate, frame.payload, sessionUUID)
 		}
 		return successor, nil
-	case controlStatusError:
+	case armError:
 		// The one determinate failure: refused outright, so nothing switched.
 		c.sockets.forget(successor)
 		return nil, fmt.Errorf("%w: %s", ErrSessionGone, frame.payload)
 	default:
 		c.sockets.forget(successor)
-		return nil, fmt.Errorf("%w: unexpected control frame status 0x%02x acking a reattach",
-			errReattachIndeterminate, frame.status)
+		return nil, fmt.Errorf("%w: unexpected control frame %s acking a reattach",
+			errReattachIndeterminate, frame.arm)
 	}
 }
 

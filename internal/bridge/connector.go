@@ -61,7 +61,7 @@ func openConnector(ctx context.Context, cfg *featureConfig, device *ActiveDevice
 		}
 	}()
 
-	if err := stream.Send(encodeControlFrame(controlStatusConnectorHello, token)); err != nil {
+	if err := sendControlFrame(stream, controlFrame{arm: armConnectorHello, payload: token}); err != nil {
 		return fmt.Errorf("send the connector hello: %w", err)
 	}
 	// The hello is the first frame, so the server answers with NEW (mints the session) or ERROR

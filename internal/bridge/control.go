@@ -60,21 +60,21 @@ var uuidV4Pattern = regexp.MustCompile(
 // leading zero. strconv.Atoi alone would accept "+80" and "0080".
 var customerPortPattern = regexp.MustCompile(`^[1-9][0-9]{0,4}$`)
 
-// errNotControlFrame means the peer does not speak the session model: a pre-session-model
-// server answers with raw ADB bytes here.
-var errNotControlFrame = errors.New("first websocket message is not a session control frame")
+// errNotControlFrame means the peer does not speak this client's wire: raw ADB bytes from a
+// server without the session model, or another wire version's magic.
+var errNotControlFrame = errors.New("first websocket message is not a control frame this client understands")
 
 // errReceiveTimeout means no message arrived within a bounded read. The connection is
 // already closed when this is returned.
 var errReceiveTimeout = errors.New("timed out waiting for a websocket message")
 
-// controlFrame is a decoded control frame: a status plus its payload.
+// controlFrame is a decoded control frame: the arm plus the fields it carries.
 type controlFrame struct {
+	// byte codec only; zero from the JSON codec.
 	status  byte
 	payload string
-	// arm is the key the JSON codec decoded; zero from the byte codec.
-	arm controlArm
-	// REVERSE_OPEN only; zero otherwise.
+	arm     controlArm
+	// reverseOpen only; zero otherwise.
 	reverseToken string
 	customerPort int
 }
@@ -193,5 +193,14 @@ func readControlFrameWithin(ws WSConn, within time.Duration) (controlFrame, erro
 	if err != nil {
 		return controlFrame{}, err
 	}
-	return parseControlFrame(message)
+	return unmarshalControlFrame(message)
+}
+
+// sendControlFrame encodes frame and sends it as one whole message.
+func sendControlFrame(destination WSConn, frame controlFrame) error {
+	message, err := marshalControlFrame(frame)
+	if err != nil {
+		return err
+	}
+	return destination.Send(message)
 }

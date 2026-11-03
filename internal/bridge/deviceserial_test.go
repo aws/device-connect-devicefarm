@@ -34,9 +34,9 @@ func probeReplyServer(t *testing.T, frames ...[]byte) string {
 	})
 }
 
-// controlFrameNew renders the V1 session control frame announcing a new session.
+// controlFrameNew opens every probe reply: the server's newSession frame.
 func controlFrameNew() []byte {
-	return []byte(magicPrefix + "\x00" + "f47ac10b-58cc-4372-a567-0e02b2c3d479")
+	return testsupport.FrameNewSession(testSessionUUID)
 }
 
 // okayDevicesReply renders the adb host:devices reply naming the given lines.
@@ -134,6 +134,9 @@ func TestGivenAReplyThatIsNoDeviceListWhenTheSerialIsFetchedThenTheErrorNamesThe
 			wantErr: errNoDeviceSerial},
 		{name: "a length never satisfied", frames: [][]byte{controlFrameNew(), neverCompletes, filler},
 			wantErr: errDevicesReplyTooLong},
+		// Fixture vector v1-magic-new-frame: a byte-protocol server's first frame.
+		{name: "a control frame on another wire version", frames: [][]byte{decodeHex(t, frameVector(t, "v1-magic-new-frame").Hex)},
+			wantErr: errNotControlFrame, wantText: "wire version 0x00"},
 	}
 
 	for _, testCase := range testCases {
@@ -146,7 +149,8 @@ func TestGivenAReplyThatIsNoDeviceListWhenTheSerialIsFetchedThenTheErrorNamesThe
 
 			if testCase.wantErr != nil {
 				require.ErrorIs(t, err, testCase.wantErr)
-			} else {
+			}
+			if testCase.wantText != "" {
 				require.ErrorContains(t, err, testCase.wantText)
 			}
 		})

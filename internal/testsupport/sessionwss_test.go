@@ -1,7 +1,10 @@
 package testsupport
 
 import (
+	"bytes"
+	"cmp"
 	"encoding/binary"
+	"encoding/json"
 	"io"
 	"testing"
 	"time"
@@ -9,6 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/websocket"
+
+	"github.com/aws/device-connect-devicefarm/internal/wireschema"
 )
 
 // The session mock is a second implementation of the /adb wire contract, so it
@@ -23,14 +28,22 @@ func firstFrame(t *testing.T, ws *websocket.Conn) []byte {
 	return message
 }
 
-// assertControlFrame checks a message is a control frame with the given status and
-// returns its payload.
-func assertControlFrame(t *testing.T, message []byte, wantStatus byte) string {
+// assertControlFrame checks message is one control frame of wantArm whose body passes the
+// shared schema, and returns the arm's text field: the session uuid, the reason or the token.
+func assertControlFrame(t *testing.T, message []byte, wantArm string) string {
 	t.Helper()
-	require.Greater(t, len(message), len(magicPrefix), "a control frame carries a status byte")
-	require.Equal(t, magicPrefix, string(message[:len(magicPrefix)]), "the magic prefix must lead the frame")
-	require.Equal(t, wantStatus, message[len(magicPrefix)])
-	return string(message[len(magicPrefix)+1:])
+	require.True(t, bytes.HasPrefix(message, []byte(controlFrameMagic)), "the magic must lead the frame")
+	body := message[len(controlFrameMagic):]
+	require.NoError(t, wireschema.Validate(body))
+	var frame map[string]struct {
+		SessionUUID string `json:"sessionUuid"`
+		Reason      string `json:"reason"`
+		Token       string `json:"token"`
+	}
+	require.NoError(t, json.Unmarshal(body, &frame))
+	require.Contains(t, frame, wantArm)
+	fields := frame[wantArm]
+	return cmp.Or(fields.SessionUUID, fields.Reason, fields.Token)
 }
 
 func TestGivenNewConnectionWhenFirstFrameSentThenServerAnnouncesANewSessionUUID(t *testing.T) {
@@ -226,19 +239,19 @@ func TestGivenAServerCloseWhenTheSessionIsReattachedThenOnlyAnEndedSessionIsRefu
 		name          string
 		closeAttached func(mock *SessionMockWSS, session *MockSession)
 		wantCloseCode int
-		wantAckStatus byte
+		wantAckArm    string
 	}{
 		{
 			name:          "the server ended the session",
 			closeAttached: func(mock *SessionMockWSS, session *MockSession) { mock.EndSession(session, SessionEndedCloseCode) },
 			wantCloseCode: SessionEndedCloseCode,
-			wantAckStatus: controlStatusError,
+			wantAckArm:    controlStatusError,
 		},
 		{
 			name:          "the relay lost its leg to the server",
 			closeAttached: func(_ *SessionMockWSS, session *MockSession) { session.DropAttached(InternalErrorCloseCode) },
 			wantCloseCode: InternalErrorCloseCode,
-			wantAckStatus: controlStatusReattach,
+			wantAckArm:    controlStatusReattach,
 		},
 	}
 
@@ -258,7 +271,7 @@ func TestGivenAServerCloseWhenTheSessionIsReattachedThenOnlyAnEndedSessionIsRefu
 			reattach := dialTestWSS(t, mock.URL)
 			reattach.PayloadType = websocket.BinaryFrame
 			require.NoError(t, websocket.Message.Send(reattach, []byte(uuid)))
-			assertControlFrame(t, firstFrame(t, reattach), testCase.wantAckStatus)
+			assertControlFrame(t, firstFrame(t, reattach), testCase.wantAckArm)
 		})
 	}
 }
