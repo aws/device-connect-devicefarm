@@ -71,7 +71,7 @@ func newTestManagerWithClient(t *testing.T, cfg config.ProxyConfig, client sessi
 // script and returns its pid. The child is reaped by a background goroutine so
 // that once Stop signals it, kill(pid, 0) returns ESRCH rather than observing a
 // zombie (which a kill-0 probe reports as alive). This mirrors production, where
-// the daemon is reparented to init and reaped there, and `devicefarm-connect proxy stop`
+// the daemon is reparented to init and reaped there, and `devicefarm-connect bridge stop`
 // signals a process that is not its own child. A cleanup force-kills the child so
 // a failing test never leaks it.
 func startRealChild(t *testing.T, script string) int {

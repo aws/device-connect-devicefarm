@@ -33,13 +33,13 @@ func newDeviceCommand(state *rootState) *cobra.Command {
 
 // newDeviceAddCommand attaches a device to an already-running daemon. It does not
 // start the daemon: a "not listening" error from the control client surfaces when
-// no daemon is running, matching the user-facing contract that "proxy start" and
+// no daemon is running, matching the user-facing contract that "bridge start" and
 // "device add" are distinct steps. The daemon resolves the session ARN to a
 // websocket endpoint itself, so this command just forwards the ARN.
 func newDeviceAddCommand(state *rootState) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add",
-		Short: fmt.Sprintf("Attach a %s remote access device to the running proxy", productName),
+		Short: fmt.Sprintf("Attach a %s remote access device to the running bridge", productName),
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return attachToDaemon(cmd, state)
@@ -56,7 +56,7 @@ func newDeviceAddCommand(state *rootState) *cobra.Command {
 func newDeviceRemoveCommand(state *rootState) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "remove",
-		Short: fmt.Sprintf("Detach the active %s remote access device from the proxy", productName),
+		Short: fmt.Sprintf("Detach the active %s remote access device from the bridge", productName),
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if state.sessionARN == "" {
@@ -77,7 +77,7 @@ func newDeviceRemoveCommand(state *rootState) *cobra.Command {
 				return fmt.Errorf("remove device: %s", resp.Error)
 			}
 
-			cmd.Printf("Removed %s from the proxy\n", resp.DeviceLabel)
+			cmd.Printf("Removed %s from the bridge\n", resp.DeviceLabel)
 			return nil
 		},
 	}

@@ -32,7 +32,7 @@ const (
 )
 
 // Default flag values. 5037 matches adb's own default server port, so a plain
-// `adb` with no -P finds the proxy.
+// `adb` with no -P finds the daemon.
 //
 // The durations are not CLI flags: fixed runtime constants seeded by Default.
 const (
@@ -130,7 +130,7 @@ const (
 	adbAdmissionCeiling = 32
 )
 
-// ProxyConfig is the resolved runtime configuration for the proxy daemon:
+// ProxyConfig is the resolved runtime configuration for the bridge daemon:
 // populated from CLI flags, passed by value into the data plane, rebuilt for the
 // detached child via AsDaemonArgs. It holds no AWS material; the session ARN is
 // a per-command argument.

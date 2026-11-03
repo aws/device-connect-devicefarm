@@ -108,7 +108,7 @@ func (s *controlHandlerSuite) TestSameDeviceAlreadyAttachedAddAgainIsIdempotentW
 	s.Require().True(s.handler(addReq("arn:1")).OK)
 
 	// Re-adding the same session ARN must succeed as a no-op rather than erroring,
-	// and must report the attached device so proxy start/device add can reprint the
+	// and must report the attached device so bridge start/device add can reprint the
 	// listening line, without making a second AWS call.
 	resp := s.handler(addReq("arn:1"))
 
