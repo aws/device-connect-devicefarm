@@ -141,7 +141,7 @@ func TestGivenAnUnknownStatusWordWhenStatusReadThenFailsClosed(t *testing.T) {
 	}{
 		{name: "not a status word", message: "WHAT"},
 		{name: "lowercase", message: "okay"},
-		{name: "a control frame where a word belongs", message: magicPrefix + "\x00"},
+		{name: "a control frame where a word belongs", message: string(testsupport.FrameEmptyArm("ping"))},
 		{name: "FAIL with a non-hex length", message: "FAILzzzzclosed"},
 	}
 
@@ -331,15 +331,14 @@ func TestGivenTheTransportSelectRefusedWhenOpenedThenTheErrorCarriesAdbsReasonAn
 
 func TestGivenTheSessionRefusedWithAnErrorFrameWhenOpenedThenTheRefusalReasonSurfaces(t *testing.T) {
 	// The other refusal shape: the remote will not open the session at all, so the refusal
-	// is the control frame itself and no status word ever arrives. Framed by hand: magic,
-	// status 0x02, reason.
+	// is the control frame itself and no status word ever arrives.
 	wsURL := testsupport.NewMockWSS(t, func(serverConn *websocket.Conn) {
 		serverConn.PayloadType = websocket.BinaryFrame
 		var first []byte
 		if websocket.Message.Receive(serverConn, &first) != nil {
 			return
 		}
-		websocket.Message.Send(serverConn, []byte("\x00DFADB\x00\x02device is not attached"))
+		websocket.Message.Send(serverConn, testsupport.FrameError("device is not attached"))
 	})
 
 	conn, leftover, err := openTestDeviceStream(t, wsURL, "8080")

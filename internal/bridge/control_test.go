@@ -292,7 +292,7 @@ func TestGivenAMalformedReverseOpenPayloadWhenParsedThenFailsClosed(t *testing.T
 func TestGivenServerThatSendsControlFrameWhenReadWithinThenFrameReturned(t *testing.T) {
 	wsURL := testsupport.NewMockWSS(t, func(ws *websocket.Conn) {
 		ws.PayloadType = websocket.BinaryFrame
-		websocket.Message.Send(ws, newSessionControlFrame(controlStatusReattach, testSessionUUID))
+		websocket.Message.Send(ws, testsupport.FrameReattach(testSessionUUID))
 		<-make(chan struct{})
 	})
 	ws := dialMock(t, wsURL)
@@ -300,8 +300,30 @@ func TestGivenServerThatSendsControlFrameWhenReadWithinThenFrameReturned(t *test
 	frame, err := readControlFrameWithin(ws, 5*time.Second)
 
 	require.NoError(t, err)
-	assert.Equal(t, controlStatusReattach, frame.status)
+	assert.Equal(t, armReattach, frame.arm)
 	assert.Equal(t, testSessionUUID, frame.payload)
+}
+
+func TestGivenAPingWhenSentThenTheServerReceivesTheVectorBytes(t *testing.T) {
+	received := make(chan []byte, 1)
+	wsURL := testsupport.NewMockWSS(t, func(ws *websocket.Conn) {
+		var message []byte
+		if websocket.Message.Receive(ws, &message) == nil {
+			received <- message
+		}
+		<-make(chan struct{})
+	})
+	ws := dialMock(t, wsURL)
+
+	require.NoError(t, sendControlFrame(ws, controlFrame{arm: armPing}))
+
+	// Fixture vector ping.
+	assert.Equal(t, []byte("\x00DFADB\x01{\"ping\":{}}"), await(t, received, "the ping"))
+}
+
+func TestGivenAFrameWithNoArmWhenSentThenItFailsBeforeAnySend(t *testing.T) {
+	// A nil destination: a send before the encode fails would panic here.
+	assert.Error(t, sendControlFrame(nil, controlFrame{}))
 }
 
 func TestGivenSilentServerWhenControlFrameReadWithinThenTimesOutAndClosesConn(t *testing.T) {

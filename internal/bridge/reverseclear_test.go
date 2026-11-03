@@ -214,9 +214,11 @@ func TestGivenTheServerBreaksTheExchangeWhenTheDeviceIsRemovedThenTheStepIsLogge
 		logged string
 	}{
 		{name: "closes before the control frame", serve: breakAfterSelect(nil), logged: "read the session control frame"},
-		{name: "refuses the session", serve: breakAfterSelect(newSessionControlFrame(controlStatusError, "no slot")),
-			logged: "refused the session"},
-		{name: "closes before the select's status word", serve: breakAfterSelect(newSessionControlFrame(controlStatusNew, "11111111-2222-4333-8444-555555555555")),
+		{name: "refuses the session", serve: breakAfterSelect(testsupport.FrameError("no slot")),
+			logged: "refused the session: no slot"},
+		{name: "answers with an arm that mints no session", serve: breakAfterSelect(testsupport.FrameConnectorHello(testReverseToken)),
+			logged: "no session was minted: unexpected control frame connectorHello"},
+		{name: "closes before the select's status word", serve: breakAfterSelect(testsupport.FrameNewSession(testSessionUUID)),
 			logged: "transport select"},
 	}
 	for _, testCase := range testCases {
@@ -232,6 +234,7 @@ func TestGivenTheServerBreaksTheExchangeWhenTheDeviceIsRemovedThenTheStepIsLogge
 
 			assert.Contains(t, logs.String(), `msg="could not clear the server's reverse rules before the detach"`)
 			assert.Contains(t, logs.String(), testCase.logged, "the Debug line names the step that broke")
+			assert.NotContains(t, logs.String(), testReverseToken, "a frame body is never logged")
 			_, present := clearing.device.Current()
 			assert.False(t, present, "a broken clear must not keep the device attached")
 		})

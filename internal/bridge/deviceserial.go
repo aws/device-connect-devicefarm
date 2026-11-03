@@ -79,7 +79,9 @@ func (dialer *WSDialer) FetchDeviceSerial(ctx context.Context, endpoint string) 
 
 // readDevicesSerial consumes the fetch connection until the devices reply parses or the
 // connection ends. The first message is the server's session control frame and is
-// skipped when present; the adb reply behind it may arrive split across messages.
+// skipped when present; the adb reply behind it may arrive split across messages. A first
+// message that is a control frame this client cannot read, such as another wire version's,
+// fails the fetch with the decoder's reason.
 func readDevicesSerial(ws WSConn) (string, error) {
 	var reply []byte
 	firstMessage := true
@@ -90,8 +92,13 @@ func readDevicesSerial(ws WSConn) (string, error) {
 		}
 		if firstMessage {
 			firstMessage = false
-			if _, parseErr := parseControlFrame(message); parseErr == nil {
+			_, decodeErr := unmarshalControlFrame(message)
+			if decodeErr == nil {
 				continue
+			}
+			// Law 1 returns the bare sentinel for adb bytes with no magic: the reply itself.
+			if decodeErr != errNotControlFrame {
+				return "", fmt.Errorf("read the session control frame: %w", decodeErr)
 			}
 		}
 		reply = append(reply, message...)

@@ -121,8 +121,7 @@ func (mock *ReverseMockWSS) SwallowPongs(swallow bool) {
 // Announce sends one REVERSE_OPEN to the live notifier, as the server does for a parked
 // device-originated connection. Reports whether it went anywhere.
 func (mock *ReverseMockWSS) Announce(token string, customerPort int) bool {
-	return mock.SendRaw(encodeControlFrame(controlStatusReverseOpen,
-		fmt.Sprintf("%s:%d", token, customerPort)))
+	return mock.SendRaw(FrameReverseOpen(token, customerPort))
 }
 
 // SendRaw sends exact bytes to the live notifier, for the frames a correct server would never
@@ -209,7 +208,7 @@ func (mock *ReverseMockWSS) serve(ws *websocket.Conn) {
 		// below on its content, which is all the daemon can see either.
 		return
 	}
-	if token := connectorToken(first); token != "" {
+	if token := connectorTokenOf(first); token != "" {
 		mock.serveConnector(ws, token)
 		return
 	}
@@ -220,7 +219,7 @@ func (mock *ReverseMockWSS) serve(ws *websocket.Conn) {
 		mock.refuse(ws, "unknown or expired session")
 		return
 	}
-	if !isEmptyControlFrame(first, controlStatusNotifierHello) {
+	if !bytes.Equal(first, FrameEmptyArm(controlStatusNotifierHello)) {
 		mock.refuse(ws, "first frame was not an empty NOTIFIER_HELLO")
 		return
 	}
@@ -239,7 +238,7 @@ func (mock *ReverseMockWSS) serve(ws *websocket.Conn) {
 		if err != nil {
 			return
 		}
-		if !isEmptyControlFrame(message, controlStatusPing) {
+		if !bytes.Equal(message, FrameEmptyArm(controlStatusPing)) {
 			// A ready notifier sends nothing but PING. The reason stays payload-free: a
 			// connector's first frame carries a bearer token.
 			mock.refuse(ws, "a ready notifier sent a frame that is not a PING")
@@ -248,20 +247,10 @@ func (mock *ReverseMockWSS) serve(ws *websocket.Conn) {
 		if !mock.countPing() {
 			continue
 		}
-		if websocket.Message.Send(ws, encodeControlFrame(controlStatusPong, "")) != nil {
+		if websocket.Message.Send(ws, FrameEmptyArm(controlStatusPong)) != nil {
 			return
 		}
 	}
-}
-
-// connectorToken returns the token a CONNECTOR_HELLO carries, or "" for any other frame and for a
-// payload-free hello, which is refused the same way.
-func connectorToken(message []byte) string {
-	prefix := encodeControlFrame(controlStatusConnectorHello, "")
-	if !bytes.HasPrefix(message, prefix) {
-		return ""
-	}
-	return string(message[len(prefix):])
 }
 
 // serveConnector redeems token and splices ws to the connection parked under it, for as long as
@@ -275,7 +264,7 @@ func (mock *ReverseMockWSS) serveConnector(ws *websocket.Conn, token string) {
 		return
 	}
 	defer parked.Close()
-	if websocket.Message.Send(ws, encodeControlFrame(controlStatusNew, connectorSessionUUID)) != nil {
+	if websocket.Message.Send(ws, FrameNewSession(connectorSessionUUID)) != nil {
 		return
 	}
 	// Binary frames, and message boundaries carry no meaning: the daemon reframes from the byte
@@ -307,12 +296,6 @@ func (mock *ReverseMockWSS) redeem(token string) (net.Conn, string) {
 	return parked, ""
 }
 
-// isEmptyControlFrame reports whether message is exactly one control frame of that status
-// carrying no payload.
-func isEmptyControlFrame(message []byte, status byte) bool {
-	return bytes.Equal(message, encodeControlFrame(status, ""))
-}
-
 // claim takes the single notifier slot for ws, or reports false when another holds it. The
 // slot is taken at the hello, so a second hello is refused before any ack.
 func (mock *ReverseMockWSS) claim(ws *websocket.Conn) bool {
@@ -327,12 +310,12 @@ func (mock *ReverseMockWSS) claim(ws *websocket.Conn) bool {
 
 // sendReady puts the READY ack on the wire and, under the same lock, counts ws and makes it the
 // announce target. One step, both ways: an announce cannot overtake the ack, and a client that
-// has read READY cannot see Announce refuse or the count lag. Holding mock.stateMutex across an 8-byte
-// write to a fresh socket cannot block; every other sender releases mock.stateMutex before it writes.
+// has read READY cannot see Announce refuse or the count lag. Holding mock.stateMutex across one
+// short write to a fresh socket cannot block; every other sender releases mock.stateMutex before it writes.
 func (mock *ReverseMockWSS) sendReady(ws *websocket.Conn) bool {
 	mock.stateMutex.Lock()
 	defer mock.stateMutex.Unlock()
-	if websocket.Message.Send(ws, encodeControlFrame(controlStatusNotifierReady, "")) != nil {
+	if websocket.Message.Send(ws, FrameEmptyArm(controlStatusNotifierReady)) != nil {
 		return false
 	}
 	if mock.notifier == ws {
@@ -372,5 +355,5 @@ func (mock *ReverseMockWSS) refuse(ws *websocket.Conn, reason string) {
 	mock.stateMutex.Lock()
 	mock.refusals = append(mock.refusals, reason)
 	mock.stateMutex.Unlock()
-	websocket.Message.Send(ws, encodeControlFrame(controlStatusError, reason))
+	websocket.Message.Send(ws, FrameError(reason))
 }

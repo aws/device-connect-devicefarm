@@ -36,13 +36,14 @@ func readNewSession(ws WSConn, within time.Duration) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read the session control frame: %w", err)
 	}
-	switch frame.status {
-	case controlStatusNew:
+	switch frame.arm {
+	case armNewSession:
 		return frame.payload, nil
-	case controlStatusError:
+	case armError:
 		return "", fmt.Errorf("%w: %s", ErrSessionRefused, frame.payload)
 	default:
-		return "", fmt.Errorf("the session control frame carried status 0x%02x, not NEW", frame.status)
+		// Only the arm: another arm's body is not this caller's to log.
+		return "", fmt.Errorf("no session was minted: unexpected control frame %s", frame.arm)
 	}
 }
 
@@ -123,16 +124,16 @@ func (dialer *WSDialer) ProbeReattach(ctx context.Context, endpoint, sessionUUID
 	if err != nil {
 		return fmt.Errorf("read the reattach ack: %w", err)
 	}
-	switch frame.status {
-	case controlStatusReattach:
+	switch frame.arm {
+	case armReattach:
 		if frame.payload != sessionUUID {
 			return fmt.Errorf("the reattach ack names session %s, not %s", frame.payload, sessionUUID)
 		}
 		return nil
-	case controlStatusError:
+	case armError:
 		return fmt.Errorf("%w: %s", ErrSessionGone, frame.payload)
 	default:
-		return fmt.Errorf("the reattach ack carried status 0x%02x, not REATTACH", frame.status)
+		return fmt.Errorf("the reattach ack carried %s, not reattach", frame.arm)
 	}
 }
 

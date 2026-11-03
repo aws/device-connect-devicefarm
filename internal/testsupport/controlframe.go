@@ -10,30 +10,43 @@ import (
 // shares the client's codec.
 const controlFrameMagic = "\x00DFADB\x01"
 
+// Arm keys, duplicated from the wire contract like the magic.
+const (
+	controlStatusNew            = "newSession"
+	controlStatusReattach       = "reattach"
+	controlStatusError          = "error"
+	controlStatusNotifierHello  = "notifierHello"
+	controlStatusNotifierReady  = "notifierReady"
+	controlStatusReverseOpen    = "reverseOpen"
+	controlStatusPing           = "ping"
+	controlStatusPong           = "pong"
+	controlStatusConnectorHello = "connectorHello"
+)
+
 // FrameNewSession is the server's answer that creates a session.
 func FrameNewSession(sessionUUID string) []byte {
-	return frameWithArm("newSession", struct {
+	return frameWithArm(controlStatusNew, struct {
 		SessionUUID string `json:"sessionUuid"`
 	}{sessionUUID})
 }
 
 // FrameReattach is the server's answer that resumes a session.
 func FrameReattach(sessionUUID string) []byte {
-	return frameWithArm("reattach", struct {
+	return frameWithArm(controlStatusReattach, struct {
 		SessionUUID string `json:"sessionUuid"`
 	}{sessionUUID})
 }
 
 // FrameError is the server's refusal with a reason.
 func FrameError(reason string) []byte {
-	return frameWithArm("error", struct {
+	return frameWithArm(controlStatusError, struct {
 		Reason string `json:"reason"`
 	}{reason})
 }
 
 // FrameReverseOpen tells the notifier a device connection waits for a connector.
 func FrameReverseOpen(token string, customerPort int) []byte {
-	return frameWithArm("reverseOpen", struct {
+	return frameWithArm(controlStatusReverseOpen, struct {
 		Token        string `json:"token"`
 		CustomerPort int    `json:"customerPort"`
 	}{token, customerPort})
@@ -41,7 +54,7 @@ func FrameReverseOpen(token string, customerPort int) []byte {
 
 // FrameConnectorHello is the client's first frame on a connector.
 func FrameConnectorHello(token string) []byte {
-	return frameWithArm("connectorHello", struct {
+	return frameWithArm(controlStatusConnectorHello, struct {
 		Token string `json:"token"`
 	}{token})
 }

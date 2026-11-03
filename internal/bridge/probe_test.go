@@ -36,13 +36,13 @@ var eachProbe = []struct {
 	{"session", func(ctx context.Context, dialer *WSDialer, endpoint string) error {
 		_, err := dialer.ProbeSession(ctx, endpoint)
 		return err
-	}, [][]byte{encodeControlFrame(controlStatusNew, testSessionUUID), []byte("OKAY")}},
+	}, [][]byte{testsupport.FrameNewSession(testSessionUUID), []byte("OKAY")}},
 	{"reattach", func(ctx context.Context, dialer *WSDialer, endpoint string) error {
 		return dialer.ProbeReattach(ctx, endpoint, testSessionUUID)
-	}, [][]byte{encodeControlFrame(controlStatusReattach, testSessionUUID)}},
+	}, [][]byte{testsupport.FrameReattach(testSessionUUID)}},
 	{"notifier", func(ctx context.Context, dialer *WSDialer, endpoint string) error {
 		return dialer.ProbeNotifier(ctx, endpoint)
-	}, [][]byte{encodeControlFrame(controlStatusNotifierReady, "")}},
+	}, [][]byte{testsupport.FrameEmptyArm("notifierReady")}},
 }
 
 func TestGivenAServerThatAcksWhenEachProbeSucceedsThenTheSocketCloses(t *testing.T) {
@@ -76,10 +76,10 @@ func TestGivenABadSessionAnswerWhenTheSessionIsProbedThenTheErrorNamesIt(t *test
 		wantError string
 		wantIs    error
 	}{
-		{"a refused session", probeReplyServer(t, encodeControlFrame(controlStatusError, "failed to connect to ADB server")),
+		{"a refused session", probeReplyServer(t, testsupport.FrameError("failed to connect to ADB server")),
 			"the remote access service refused the session: failed to connect to ADB server", ErrSessionRefused},
-		{"a status that is not NEW", probeReplyServer(t, encodeControlFrame(controlStatusReattach, testSessionUUID)),
-			"status 0x01, not NEW", nil},
+		{"an arm that is not newSession", probeReplyServer(t, testsupport.FrameReattach(testSessionUUID)),
+			"no session was minted: unexpected control frame reattach", nil},
 		{"raw adb bytes before any control frame", probeReplyServer(t, []byte("OKAY")), errNotControlFrame.Error(), errNotControlFrame},
 		{"a refused transport select", switchReplyMock(t, "FAIL000edevice offline").URL,
 			"the device adb server refused the transport select: device offline", nil},
@@ -130,16 +130,16 @@ func TestGivenTheServerRefusesTheReattachWhenReattachedThenTheErrorSaysTheSessio
 	assert.ErrorContains(t, err, "remote session is gone: unknown or expired session")
 }
 
-func TestGivenAnAckWithAnUnexpectedStatusWhenReattachedThenTheErrorNamesTheStatus(t *testing.T) {
+func TestGivenAnAckWithAnUnexpectedArmWhenReattachedThenTheErrorNamesTheArm(t *testing.T) {
 	mock := testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{
-		ReattachAckStatus: controlStatusPong, OnMessage: answerSelectWith("OKAY")})
+		ReattachAckArm: armPong.String(), OnMessage: answerSelectWith("OKAY")})
 	dialer := newTestDialer(testWait)
 	sessionUUID, err := dialer.ProbeSession(context.Background(), mock.URL)
 	require.NoError(t, err)
 
 	err = dialer.ProbeReattach(context.Background(), mock.URL, sessionUUID)
 
-	assert.ErrorContains(t, err, "status 0x14, not REATTACH")
+	assert.ErrorContains(t, err, "the reattach ack carried pong, not reattach")
 }
 
 func TestGivenABadReattachAnswerWhenReattachedThenTheErrorNamesIt(t *testing.T) {
@@ -148,7 +148,7 @@ func TestGivenABadReattachAnswerWhenReattachedThenTheErrorNamesIt(t *testing.T) 
 		endpoint  string
 		wantError string
 	}{
-		{"an ack naming another session", probeReplyServer(t, encodeControlFrame(controlStatusReattach, otherSessionUUID)),
+		{"an ack naming another session", probeReplyServer(t, testsupport.FrameReattach(otherSessionUUID)),
 			"names session " + otherSessionUUID + ", not " + testSessionUUID},
 		{"raw adb bytes before any control frame", probeReplyServer(t, []byte("OKAY")), errNotControlFrame.Error()},
 	}
@@ -186,7 +186,7 @@ func TestGivenTheNotifierSlotHeldWhenProbedThenErrNotifierSlotTakenIsReturned(t 
 }
 
 func TestGivenAnotherHelloRefusalWhenTheNotifierIsProbedThenTheErrorIsARefusalButNotTheHeldSlot(t *testing.T) {
-	server := newNotifierServer(t, encodeControlFrame(controlStatusError, "notifier evicted"))
+	server := newNotifierServer(t, testsupport.FrameError("notifier evicted"))
 
 	err := newTestDialer(testWait).ProbeNotifier(context.Background(), server.url)
 

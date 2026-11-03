@@ -570,9 +570,24 @@ func TestGivenARivalNotifierWhenItRefusesTheHelloAndLaterLeavesThenEachSlotChang
 	assert.Equal(t, 1, strings.Count(logs.String(), slotRegainedWarn), "one Warn when the slot is regained")
 }
 
+func TestGivenARefusedNotifierWhenTheSupervisorRedialsThenTheEndIsLoggedAtWarn(t *testing.T) {
+	// A rival holds the slot, so every dial is refused and the supervisor redials on its backoff.
+	// The handler's default level is Info, so the line is visible without --debug.
+	mock := serverReverseMock(t)
+	rivalNotifier(t, mock)
+	logs := &lockedBuffer{}
+	runSupervisorAt(t, mock.URL, notifierParams(parkedKeepAlive, fastBackoff), slog.New(slog.NewTextHandler(logs, nil)))
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(logs.String(), `level=WARN msg="the reverse notifier ended; redialing"`)
+	}, testWait, notifierPoll, "a refused notifier's end must be logged at the default level")
+
+	assert.Contains(t, logs.String(), notifierSlotTakenReason, "the line carries the server's reason")
+}
+
 func TestGivenARefusalWithAnotherReasonWhenTheHelloIsRefusedThenTheSlotDoesNotReadHeld(t *testing.T) {
 	// A scripted server refuses the hello with another reason; the parked backoff stops a second dial.
-	server := newNotifierServer(t, encodeControlFrame(controlStatusError, "no reverse interceptor"))
+	server := newNotifierServer(t, testsupport.FrameError("no reverse interceptor"))
 	_, supervisor, _ := runSupervisorAt(t, server.url, notifierParams(parkedKeepAlive, parkedBackoff), noopLogger())
 
 	await(t, server.closed, "the refused notifier to close")
