@@ -56,13 +56,13 @@ func TestGivenCommandTreeWhenBuiltThenHasExpectedCommandGroups(t *testing.T) {
 		assert.True(t, top[want], "missing top-level command %q", want)
 	}
 
-	// bridge owns start/stop/status; device owns add/remove.
+	// bridge owns start/stop/status; device owns add/list/remove.
 	bridge := childNames(findChild(t, root, "bridge"))
 	for _, want := range []string{"start", "stop", "status"} {
 		assert.True(t, bridge[want], "missing bridge subcommand %q", want)
 	}
 	device := childNames(findChild(t, root, "device"))
-	for _, want := range []string{"add", "remove"} {
+	for _, want := range []string{"add", "list", "remove"} {
 		assert.True(t, device[want], "missing device subcommand %q", want)
 	}
 }
