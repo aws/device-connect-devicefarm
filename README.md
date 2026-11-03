@@ -45,8 +45,9 @@ adb -P 5037 reverse tcp:9000 tcp:9000
 # List the attached devices: one line per device, the session ARN then the device name.
 devicefarm-connect device list
 
-# Detach the active device (the listener stays up).
-devicefarm-connect device remove --session-arn arn:aws:devicefarm:us-west-2:123456789012:session:11111111-2222-3333-4444-5555555abcde
+# Detach the attached device (the listener stays up). With --session-arn, the device is
+# detached only when the ARN matches.
+devicefarm-connect device remove
 
 # Attach another one. Remove first: a different ARN is refused while a device is attached.
 devicefarm-connect device add --session-arn arn:aws:devicefarm:us-west-2:123456789012:session:66666666-7777-8888-9999-aaaaaaaaaaaa
@@ -97,7 +98,8 @@ When no daemon runs, `device add` or `device list` starts one with the default
 settings, the way adb starts its own server. To pick a port or turn reverse on, run
 `bridge start` first.
 `--session-arn` is a per-command argument of
-`bridge start`, `device add`, and `device remove`. The dial, keep-alive, stop, and
+`bridge start`, `device add`, and `device remove`; `device remove` without it detaches the
+attached device. The dial, keep-alive, stop, and
 endpoint-refresh timeouts and the websocket-refresh cadence are fixed runtime
 constants and are not exposed as flags, keeping the command surface small. A flag
 on `bridge start` configures only a daemon that command starts: against a running

@@ -82,21 +82,18 @@ func newDeviceListCommand(state *rootState) *cobra.Command {
 	}
 }
 
-// newDeviceRemoveCommand detaches the active device. The listener stays up; only the
-// device binding is cleared. The daemon matches the device by ARN, so the request
-// carries just the ARN. It needs a running daemon and reports not listening otherwise.
+// newDeviceRemoveCommand detaches the attached device; the listener stays up. With
+// --session-arn the daemon detaches only when the ARN matches; without it, whichever
+// device is attached (one at a time today). It needs a running daemon and reports not
+// listening otherwise.
 func newDeviceRemoveCommand(state *rootState) *cobra.Command {
-	short := fmt.Sprintf("Detach the active %s remote access device from the bridge", productName)
+	short := fmt.Sprintf("Detach the attached %s remote access device from the bridge", productName)
 	cmd := &cobra.Command{
 		Use:   "remove",
 		Short: short,
 		Long:  short + ".\n\nThis command needs a running bridge daemon.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if state.sessionARN == "" {
-				return fmt.Errorf("--session-arn is required")
-			}
-
 			resp, err := state.controlClient().Send(control.Request{
 				Op:  control.OpRemove,
 				ARN: state.sessionARN,
@@ -115,6 +112,6 @@ func newDeviceRemoveCommand(state *rootState) *cobra.Command {
 			return nil
 		},
 	}
-	addSessionArnFlag(cmd, state, sessionArnDescription)
+	addSessionArnFlag(cmd, state, sessionArnDescription+" (optional; without it, the attached device is detached)")
 	return cmd
 }
