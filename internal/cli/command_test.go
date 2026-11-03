@@ -259,6 +259,43 @@ func TestGivenDaemonClosesWithoutReplyWhenRemoveDeviceInvokedThenSurfacesTranspo
 	assert.ErrorIs(t, err, io.EOF)
 }
 
+func TestGivenRunningDaemonWithDeviceWhenListDevicesInvokedThenPrintsOneLinePerDevice(t *testing.T) {
+	fakeDaemon(t, func(req control.Request) control.Response {
+		assert.Equal(t, control.OpList, req.Op)
+		return control.Response{OK: true, Devices: []control.AttachedDevice{
+			{SessionARN: "arn:aws:devicefarm:us-west-2:1:session:a/b/0", Label: "Google Pixel 9 (OS 16)"},
+		}}
+	})
+
+	out, err := execRoot(t, "device", "list")
+
+	require.NoError(t, err)
+	assert.Equal(t, "arn:aws:devicefarm:us-west-2:1:session:a/b/0\tGoogle Pixel 9 (OS 16)\n", out.String())
+}
+
+func TestGivenRunningDaemonWithoutDeviceWhenListDevicesInvokedThenSaysNoDevice(t *testing.T) {
+	fakeDaemon(t, func(control.Request) control.Response {
+		return control.Response{OK: true}
+	})
+
+	out, err := execRoot(t, "device", "list")
+
+	require.NoError(t, err)
+	assert.Equal(t, "no device attached; use 'device add' to connect one\n", out.String())
+}
+
+func TestGivenNoBridgeWhenListDevicesInvokedThenStartsTheBridge(t *testing.T) {
+	paths := shortRuntimeDir(t)
+	fakeBridgeStart(t, paths, func(control.Request) control.Response {
+		return control.Response{OK: true}
+	})
+
+	out, err := execRoot(t, "device", "list")
+
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "* bridge not running; starting it now")
+}
+
 func TestGivenRunningDaemonWithDeviceWhenStatusInvokedThenReportsAttachedDevice(t *testing.T) {
 	fakeDaemon(t, func(req control.Request) control.Response {
 		assert.Equal(t, control.OpStatus, req.Op)

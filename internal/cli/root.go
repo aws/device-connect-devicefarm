@@ -38,18 +38,23 @@ func newRootCommand() *cobra.Command {
 
 // newRootCommandWithState assembles the cobra command tree over state: a root that
 // owns the persistent flags plus the "bridge" (start/stop/status) and "device"
-// (add/remove) command groups and the hidden "daemon" body. A test passes state to
+// (add/list/remove) command groups and the hidden "daemon" body. A test passes state to
 // read what the flags parsed.
 func newRootCommandWithState(state *rootState) *cobra.Command {
 	root := &cobra.Command{
 		Use:     config.BinaryName,
 		Version: version.String(), // root only; cobra answers it before PersistentPreRunE
 		Short:   fmt.Sprintf("Bridge a local adb client to an %s %s remote access device", awsName, productName),
-		Long: fmt.Sprintf("%s presents itself to local adb clients as the adb host. It listens\n"+
-			"on a local TCP port and pipes each connection over the websocket of an %s\n"+
-			"%s remote access session to the device's adb server. 'device add' attaches a\n"+
-			"device and starts the background daemon when none runs; 'device remove' detaches\n"+
-			"it. 'bridge start' starts the daemon with custom options; 'bridge stop' stops it.",
+		Long: fmt.Sprintf("%s connects a local adb client to a device in an\n"+
+			"%s %s remote access session. A background bridge daemon listens on a\n"+
+			"local TCP port in place of the adb server and carries each adb connection\n"+
+			"over the session's websocket to the device.\n"+
+			"\n"+
+			"  device add      Attach a device. Starts the daemon when none runs.\n"+
+			"  device list     Show the attached device. Starts the daemon when none runs.\n"+
+			"  device remove   Detach the attached device.\n"+
+			"  bridge start    Start the daemon with custom options, such as --port.\n"+
+			"  bridge stop     Stop the daemon.",
 			config.BinaryName, awsName, productName),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -162,7 +167,7 @@ func initLogging(debug bool) {
 }
 
 // newManager builds a daemon.DaemonManager for the commands that start, stop or probe
-// the daemon: bridge start/stop/status and the `device add` auto-start. The
+// the daemon: bridge start/stop/status and the `device add`/`device list` auto-start. The
 // effective logfile path in s.paths is already resolved in
 // PersistentPreRunE, so this is a pure constructor. It passes no remote-access
 // client: Start, Stop, and Status never resolve an ARN (they signal and inspect a

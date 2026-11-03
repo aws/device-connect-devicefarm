@@ -42,6 +42,9 @@ adb -P 5037 forward --remove tcp:8080
 # been started with 'bridge start --allow-adb-reverse'.
 adb -P 5037 reverse tcp:9000 tcp:9000
 
+# List the attached devices: one line per device, the session ARN then the device name.
+devicefarm-connect device list
+
 # Detach the active device (the listener stays up).
 devicefarm-connect device remove --session-arn arn:aws:devicefarm:us-west-2:123456789012:session:11111111-2222-3333-4444-5555555abcde
 
@@ -90,8 +93,9 @@ and adb prints
 `error: adb reverse is off for this client; restart it with --allow-adb-reverse`. To
 turn it on, run `bridge stop`, then `bridge start --allow-adb-reverse`. The other
 commands find the daemon through its control socket, so they do not take these.
-`device add` with no daemon starts one with the default settings, as adb starts its
-own server. To pick a port or turn reverse on, run `bridge start` first.
+When no daemon runs, `device add` or `device list` starts one with the default
+settings, the way adb starts its own server. To pick a port or turn reverse on, run
+`bridge start` first.
 `--session-arn` is a per-command argument of
 `bridge start`, `device add`, and `device remove`. The dial, keep-alive, stop, and
 endpoint-refresh timeouts and the websocket-refresh cadence are fixed runtime

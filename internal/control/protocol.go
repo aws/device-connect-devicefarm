@@ -1,6 +1,6 @@
 // Package control is the daemon's control channel: a per-user Unix-domain socket
-// over which the foreground CLI mutates a running detached daemon (add or remove
-// the connected device, query status, shut it down). Signals cannot carry an ARN
+// over which the foreground CLI mutates a running detached daemon (add, list or
+// remove the connected device, query status, shut it down). Signals cannot carry an ARN
 // or return a device label, so a small request/response protocol fills that gap.
 //
 // One connection carries exactly one request and one response, both single JSON
@@ -24,6 +24,9 @@ const (
 	// OpStatus reports whether a device is connected, its label, and the daemon's
 	// listen port.
 	OpStatus Op = "status"
+	// OpList reports every connected device, at most one today, each with its
+	// session ARN.
+	OpList Op = "list"
 	// OpShutdown stops the daemon after replying.
 	OpShutdown Op = "shutdown"
 )
@@ -39,10 +42,18 @@ type Request struct {
 // Response is the daemon's reply. OK reports whether the operation succeeded;
 // Error carries the reason when it did not. DeviceLabel and Port describe the
 // daemon's resulting state so the CLI can print the listening line without a
-// second round trip.
+// second round trip. Devices is the OpList reply: one entry per connected device. An
+// OpList reply carries no Port.
 type Response struct {
-	OK          bool   `json:"ok"`
-	Error       string `json:"error,omitempty"`
-	DeviceLabel string `json:"deviceLabel,omitempty"`
-	Port        int    `json:"port,omitempty"`
+	OK          bool             `json:"ok"`
+	Error       string           `json:"error,omitempty"`
+	DeviceLabel string           `json:"deviceLabel,omitempty"`
+	Port        int              `json:"port,omitempty"`
+	Devices     []AttachedDevice `json:"devices,omitempty"`
+}
+
+// AttachedDevice is one connected device in an OpList reply.
+type AttachedDevice struct {
+	SessionARN string `json:"sessionArn"`
+	Label      string `json:"label"`
 }

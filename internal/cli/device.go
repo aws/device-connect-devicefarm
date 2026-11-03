@@ -10,12 +10,13 @@ import (
 )
 
 // newDeviceCommand groups the device subcommands under one parent: "device add"
-// attaches a device to the bridge daemon and "device remove" detaches it. Only add
-// starts the daemon when none runs.
+// attaches a device to the bridge daemon, "device list" lists the attached devices and
+// "device remove" detaches one. Add and list start the daemon when none runs; remove
+// needs a running one.
 func newDeviceCommand(state *rootState) *cobra.Command {
 	device := &cobra.Command{
 		Use:   "device",
-		Short: fmt.Sprintf("Attach or detach a %s remote access device", productName),
+		Short: fmt.Sprintf("Attach, list or detach %s remote access devices", productName),
 		Args:  cobra.NoArgs,
 		// A RunE makes the parent runnable, so cobra validates Args (NoArgs) rather
 		// than short-circuiting to help for a non-runnable command: `device` alone
@@ -27,6 +28,7 @@ func newDeviceCommand(state *rootState) *cobra.Command {
 	}
 	device.AddCommand(
 		newDeviceAddCommand(state),
+		newDeviceListCommand(state),
 		newDeviceRemoveCommand(state),
 	)
 	return device
@@ -48,6 +50,36 @@ func newDeviceAddCommand(state *rootState) *cobra.Command {
 	}
 	addSessionArnFlag(cmd, state, sessionArnDescription)
 	return cmd
+}
+
+// newDeviceListCommand prints one line per attached device: the session ARN, a tab,
+// the device label. Only one device can be attached today. The one-line-per-device
+// output keeps its shape when more are allowed.
+func newDeviceListCommand(state *rootState) *cobra.Command {
+	short := fmt.Sprintf("List the %s remote access devices attached to the bridge", productName)
+	return &cobra.Command{
+		Use:   "list",
+		Short: short,
+		Long:  short + ".\n\nOne line per device: the session ARN, then the device name.\n\n" + bridgeAutoStartNote,
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			resp, err := sendToBridge(cmd, state, control.Request{Op: control.OpList})
+			if err != nil {
+				return err
+			}
+			if !resp.OK {
+				return fmt.Errorf("list devices: %s", resp.Error)
+			}
+			if len(resp.Devices) == 0 {
+				cmd.Println("no device attached; use 'device add' to connect one")
+				return nil
+			}
+			for _, attached := range resp.Devices {
+				cmd.Printf("%s\t%s\n", attached.SessionARN, attached.Label)
+			}
+			return nil
+		},
+	}
 }
 
 // newDeviceRemoveCommand detaches the active device. The listener stays up; only the
