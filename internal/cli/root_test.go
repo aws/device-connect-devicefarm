@@ -120,6 +120,41 @@ func TestGivenCommandTreeWhenBuiltThenCompletionCommandNotRegistered(t *testing.
 	}
 }
 
+func TestGivenRootHelpWhenPrintedThenListsTheCommandGroupsWithoutHelp(t *testing.T) {
+	out, err := runRoot(t, "--help")
+
+	require.NoError(t, err)
+	assert.Regexp(t, `(?m)^  bridge `, out.String())
+	assert.Regexp(t, `(?m)^  device `, out.String())
+	assert.NotRegexp(t, `(?m)^  help `, out.String(), "the help subcommand must stay off the command list")
+	assert.NotRegexp(t, `(?m)^  usage `, out.String(), "the hidden help command's own name must not show either")
+}
+
+func TestGivenHelpSubcommandWhenInvokedForACommandThenPrintsThatCommandsHelp(t *testing.T) {
+	out, err := runRoot(t, "help", "bridge", "start")
+
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "Start the bridge daemon")
+	assert.Contains(t, out.String(), "--session-arn")
+	assert.Contains(t, out.String(), "-h, --help", "help must list the same flags as --help")
+}
+
+func TestGivenHelpSubcommandWhenInvokedAloneThenPrintsTheRootHelp(t *testing.T) {
+	out, err := runRoot(t, "help")
+
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "Available Commands:")
+	assert.Regexp(t, `(?m)^  device `, out.String())
+	assert.Contains(t, out.String(), "-v, --version", "help must list the root's flags as --help does")
+}
+
+func TestGivenHelpSubcommandWhenInvokedForAnUnknownCommandThenErrors(t *testing.T) {
+	_, err := runRoot(t, "help", "bogus")
+
+	// Literal on purpose: a changed BinaryName must fail here.
+	require.EqualError(t, err, `unknown command "bogus" for "devicefarm-connect"`)
+}
+
 func TestGivenDaemonSubcommandWhenInspectedThenIsHidden(t *testing.T) {
 	root := newRootCommand()
 
