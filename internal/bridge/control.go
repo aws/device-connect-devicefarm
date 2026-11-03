@@ -72,6 +72,8 @@ var errReceiveTimeout = errors.New("timed out waiting for a websocket message")
 type controlFrame struct {
 	status  byte
 	payload string
+	// arm is the key the JSON codec decoded; zero from the byte codec.
+	arm controlArm
 	// REVERSE_OPEN only; zero otherwise.
 	reverseToken string
 	customerPort int
