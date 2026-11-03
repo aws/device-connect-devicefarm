@@ -30,8 +30,8 @@ const bridgeAutoStartNote = "If the bridge daemon is not running, this command s
 	"settings, as 'adb' starts its own server. To pick a port or other options,\n" +
 	"run 'bridge start' first."
 
-// sessionArnDescription is the shared --session-arn help text; bridge start
-// appends its own suffix.
+// sessionArnDescription is the shared --session-arn help text; bridge start and
+// device remove append their own suffixes.
 var sessionArnDescription = fmt.Sprintf("%s %s remote access session ARN", awsName, productName)
 
 // addSessionArnFlag binds the --session-arn flag to the shared rootState on cmd.
