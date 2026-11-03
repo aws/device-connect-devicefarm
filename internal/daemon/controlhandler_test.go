@@ -162,6 +162,22 @@ func (s *controlHandlerSuite) TestUnknownOpRejected() {
 	s.False(resp.OK)
 }
 
+func (s *controlHandlerSuite) TestListReportsEachAttachedDeviceWithItsSessionARN() {
+	s.Require().True(s.handler(addReq("arn:1")).OK)
+
+	resp := s.handler(control.Request{Op: control.OpList})
+
+	s.Require().True(resp.OK)
+	s.Equal([]control.AttachedDevice{{SessionARN: "arn:1", Label: "Pixel 10 (OS 17)"}}, resp.Devices)
+}
+
+func (s *controlHandlerSuite) TestListWithNoDeviceReportsAnEmptyList() {
+	resp := s.handler(control.Request{Op: control.OpList})
+
+	s.Require().True(resp.OK)
+	s.Empty(resp.Devices)
+}
+
 func (s *controlHandlerSuite) TestStatusReportsAttachedLabel() {
 	s.Require().True(s.handler(addReq("arn:1")).OK)
 

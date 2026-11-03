@@ -373,16 +373,28 @@ func runPeriodic(ctx context.Context, interval time.Duration, tick func()) {
 	}
 }
 
-// controlHandler builds the control.Handler that mutates the daemon's device
-// state. add resolves the request ARN to a websocket endpoint and binds it,
-// enforcing the one-device limit except that re-adding the same ARN is an
-// idempotent no-op; remove drops the device only if its ARN matches (so a stale
-// remove cannot disconnect a different device); shutdown cancels the daemon
-// context, then replies. ctx is the daemon context and is the parent of the
-// add path's bounded resolve, so a SIGTERM/SIGINT that cancels it also cancels an
-// add in flight (a control shutdown, being serialized behind the add on the
-// inline loop, cannot). `bridge stop` is that shutdown: it queues behind an
-// in-flight add, bounded by resolveTimeout.
+// controlHandler builds the control.Handler that answers the CLI's control requests.
+// Requests run one at a time on the daemon's inline control loop.
+//
+// add attaches a device. The daemon holds one device at a time. When the request names
+// the device that is already attached, add succeeds and changes nothing. When a
+// different device is attached, add is refused. Otherwise the handler resolves the
+// session ARN to a websocket endpoint and binds the device.
+//
+// remove detaches the attached device. When the request names an ARN, it must match the
+// attached device. That keeps a stale remove from detaching a device the caller did not
+// mean.
+//
+// status reports the listen port and the attached device, when there is one. list
+// reports each attached device with its session ARN; the list is empty when none is
+// attached.
+//
+// shutdown cancels the daemon context, then replies.
+//
+// ctx is the daemon context, and the resolve inside add runs under it. So a SIGTERM or
+// SIGINT that stops the daemon also cancels an add in flight. A control shutdown cannot
+// do that: it waits on the inline loop until the add returns. `bridge stop` sends that
+// shutdown, so it can wait behind an add for up to resolveTimeout.
 func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.ActiveDevice, shutdown context.CancelFunc) control.Handler {
 	return func(req control.Request) control.Response {
 		switch req.Op {
@@ -442,6 +454,13 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 				return control.Response{OK: true, Port: m.config.ListenPort}
 			}
 			return control.Response{OK: true, DeviceLabel: current.Label, Port: m.config.ListenPort}
+
+		case control.OpList:
+			resp := control.Response{OK: true}
+			if current, present := device.Current(); present {
+				resp.Devices = []control.AttachedDevice{{SessionARN: current.ARN, Label: current.Label}}
+			}
+			return resp
 
 		case control.OpShutdown:
 			m.logger.Info("shutdown requested over control channel")
