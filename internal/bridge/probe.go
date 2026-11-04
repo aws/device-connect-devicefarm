@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"time"
 )
 
@@ -17,6 +18,20 @@ import (
 // ErrSessionRefused is the server's ERROR to a fresh session's first frame; sessionRefusal carries
 // its reason. Exported for ProbeSession's callers.
 var ErrSessionRefused = errors.New("the remote access service refused the session")
+
+// sessionUUIDLen is the exact length the server requires of a reconnect's first frame.
+const sessionUUIDLen = 36
+
+// uuidV4Pattern is the anchored UUIDv4 pattern the server matches a reconnect's first frame
+// against.
+var uuidV4Pattern = regexp.MustCompile(
+	`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
+
+// isUUIDv4 reports whether text is exactly one canonical UUIDv4: ProbeReattach's check of its
+// caller's session UUID before the dial.
+func isUUIDv4(text string) bool {
+	return len(text) == sessionUUIDLen && uuidV4Pattern.MatchString(text)
+}
 
 // replyWithin bounds one reply read: what is left of ctx's deadline, else the dial timeout. A
 // spent deadline falls back too: closeOnCancel ends that read at once.

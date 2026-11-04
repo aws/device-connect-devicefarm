@@ -2,63 +2,11 @@ package bridge
 
 import (
 	"errors"
-	"fmt"
-	"regexp"
-	"strconv"
-	"strings"
 	"time"
 )
 
-// Session control frame: magicPrefix + one status byte + UTF-8 payload, one whole message,
-// no length field. On ?path=adb it is always the first server frame; the client consumes it
-// and never forwards it. On ?path=adbreverse the first frame is the client's (a hello) and a
-// notifier exchanges control frames for its whole life.
-//
-// Wire contract shared with the server. Change both together.
-const (
-	magicPrefix = "\x00DFADB\x00"
-
-	// controlStatusNew announces a fresh session; payload is its UUID.
-	controlStatusNew byte = 0x00
-	// controlStatusReattach acks a reconnect; payload is the resumed session's UUID.
-	controlStatusReattach byte = 0x01
-	// controlStatusError refuses the connection; payload is a human-readable reason.
-	controlStatusError byte = 0x02
-
-	// 0x03 to 0x0F are reserved for /adb. The adbreverse route starts at 0x10 so a misrouted
-	// frame is recognizable in a hex dump; /adb's callers refuse 0x10 and above.
-
-	// controlStatusNotifierHello opens a notifier: client to server, first frame, empty payload.
-	controlStatusNotifierHello byte = 0x10
-	// controlStatusNotifierReady acks the notifier hello: server to client, empty payload.
-	controlStatusNotifierReady byte = 0x11
-	// controlStatusReverseOpen announces a parked device-originated connection: server to
-	// client on the notifier; payload is "<token>:<customer_port>".
-	controlStatusReverseOpen byte = 0x12
-	// controlStatusPing is the notifier keepalive: client to server, empty payload.
-	controlStatusPing byte = 0x13
-	// controlStatusPong echoes one PING: server to client, empty payload.
-	controlStatusPong byte = 0x14
-	// controlStatusConnectorHello attaches a websocket to a parked connection: client to
-	// server, first frame; payload is the token from REVERSE_OPEN.
-	controlStatusConnectorHello byte = 0x15
-
-	// sessionUUIDLen is the exact length the server requires of a reconnect's first frame.
-	// A reverse token is UUIDv4 text of the same length.
-	sessionUUIDLen = 36
-
-	// maxTCPPort bounds a REVERSE_OPEN customer port.
-	maxTCPPort = 65535
-)
-
-// uuidV4Pattern is the anchored UUIDv4 pattern the server matches a reconnect's first frame
-// against. Also applied to NEW/REATTACH payloads and to reverse tokens.
-var uuidV4Pattern = regexp.MustCompile(
-	`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
-
-// customerPortPattern is the REVERSE_OPEN port grammar: 1 to 5 decimal digits, no sign, no
-// leading zero. strconv.Atoi alone would accept "+80" and "0080".
-var customerPortPattern = regexp.MustCompile(`^[1-9][0-9]{0,4}$`)
+// Session control frames: the record, a bounded read and a send. controlcodec.go owns the
+// wire layout.
 
 // errNotControlFrame means the peer does not speak this client's wire: raw ADB bytes from a
 // server without the session model, or another wire version's magic.
@@ -68,85 +16,15 @@ var errNotControlFrame = errors.New("first websocket message is not a control fr
 // already closed when this is returned.
 var errReceiveTimeout = errors.New("timed out waiting for a websocket message")
 
-// controlFrame is a decoded control frame: the arm plus the fields it carries.
+// controlFrame is one control frame: the arm plus the fields it carries.
 type controlFrame struct {
-	// byte codec only; zero from the JSON codec.
-	status  byte
+	arm controlArm
+	// Session UUID (newSession, reattach), reason (error) or token (connectorHello).
+	// Empty for other arms.
 	payload string
-	arm     controlArm
 	// reverseOpen only; zero otherwise.
 	reverseToken string
 	customerPort int
-}
-
-// isUUIDv4 reports whether text is exactly one canonical UUIDv4.
-func isUUIDv4(text string) bool {
-	return len(text) == sessionUUIDLen && uuidV4Pattern.MatchString(text)
-}
-
-// parseControlFrame decodes one whole websocket message as a control frame. Fails closed:
-// anything malformed errors. Which statuses a caller accepts is the caller's check.
-func parseControlFrame(message []byte) (controlFrame, error) {
-	if len(message) < len(magicPrefix)+1 || string(message[:len(magicPrefix)]) != magicPrefix {
-		return controlFrame{}, errNotControlFrame
-	}
-
-	status := message[len(magicPrefix)]
-	payload := string(message[len(magicPrefix)+1:])
-	frame := controlFrame{status: status, payload: payload}
-	switch status {
-	case controlStatusNew, controlStatusReattach, controlStatusConnectorHello:
-		if !isUUIDv4(payload) {
-			return controlFrame{}, fmt.Errorf(
-				"control frame status 0x%02x carries %q, which is not a UUIDv4", status, payload)
-		}
-	case controlStatusError:
-		// A variable-length reason, surfaced to the caller as-is.
-	case controlStatusNotifierHello, controlStatusNotifierReady, controlStatusPing, controlStatusPong:
-		if payload != "" {
-			return controlFrame{}, fmt.Errorf(
-				"control frame status 0x%02x carries %q, expected an empty payload", status, payload)
-		}
-	case controlStatusReverseOpen:
-		token, customerPort, err := parseReverseOpen(payload)
-		if err != nil {
-			return controlFrame{}, fmt.Errorf("control frame status 0x%02x: %w", status, err)
-		}
-		frame.reverseToken, frame.customerPort = token, customerPort
-	default:
-		return controlFrame{}, fmt.Errorf("unknown control frame status 0x%02x", status)
-	}
-	return frame, nil
-}
-
-// encodeControlFrame builds one control frame: magicPrefix, status, payload. It validates
-// nothing; the peer's parser does.
-func encodeControlFrame(status byte, payload string) []byte {
-	frame := make([]byte, 0, len(magicPrefix)+1+len(payload))
-	frame = append(frame, magicPrefix...)
-	frame = append(frame, status)
-	return append(frame, payload...)
-}
-
-// parseReverseOpen splits a REVERSE_OPEN payload, "<token>:<customer_port>", into its
-// validated halves. Splits once on the first colon; anything else fails closed. A payload
-// with no separator may be a whole token, so that error does not echo it.
-func parseReverseOpen(payload string) (token string, port int, err error) {
-	token, portText, found := strings.Cut(payload, ":")
-	if !found {
-		return "", 0, errors.New("reverse open payload has no port separator")
-	}
-	if !isUUIDv4(token) {
-		return "", 0, fmt.Errorf("reverse open token %q is not a UUIDv4", token)
-	}
-	if !customerPortPattern.MatchString(portText) {
-		return "", 0, fmt.Errorf("reverse open port %q is not 1 to 5 digits with no sign or leading zero", portText)
-	}
-	port, _ = strconv.Atoi(portText) // cannot fail: the pattern admits only 1 to 5 ASCII digits
-	if port > maxTCPPort {
-		return "", 0, fmt.Errorf("reverse open port %d is above %d", port, maxTCPPort)
-	}
-	return token, port, nil
 }
 
 // receivedMessage is one Receive's raw outcome, handed from a reader goroutine to the code
