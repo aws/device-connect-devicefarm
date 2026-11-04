@@ -5,8 +5,9 @@
 // endpoint is time-limited and must be renewed while a device stays attached.
 //
 // Public surface: RemoteAccessClient (the application-layer interface the daemon
-// depends on), RemoteAccessInfo (its result), and NewRemoteAccessClient (the real,
-// AWS-backed implementation). Everything else - the SDK-shaped getter, the ARN
+// depends on), RemoteAccessInfo (its result), NewRemoteAccessClient (the real,
+// AWS-backed implementation) and UnsupportedDeviceError (the refusal of a device
+// this client cannot serve). Everything else - the SDK-shaped getter, the ARN
 // helper, the config loading - is internal to this package, so no aws-sdk-go-v2
 // type crosses the package boundary.
 package session
@@ -112,10 +113,11 @@ func NewRemoteAccessClient(ctx context.Context, logger *slog.Logger) (RemoteAcce
 // response to a RemoteAccessInfo (the interactive endpoint verbatim, plus the
 // device label). Validating the ARN is the explicit first step,
 // so a malformed ARN, a non-Device-Farm ARN, or one from a region this client was
-// not built for fails fast, before any network call. An Android device below
-// minimumAndroidMajor is refused after the call (only the response names the
-// device) and before the endpoint check, so a session still PREPARING on such a
-// device is refused at once, not after a wait and a retry.
+// not built for fails fast, before any network call. A non-Android device, or an
+// Android device below minimumAndroidMajor, is refused as an UnsupportedDeviceError.
+// That check runs after the call (only the response names the device) and before
+// the endpoint check, so a session still PREPARING on such a device fails at once,
+// not after a wait and a retry.
 func (c awsRemoteAccessClient) GetSession(ctx context.Context, sessionARN string) (RemoteAccessInfo, error) {
 	if err := validateSessionARN(sessionARN); err != nil {
 		return RemoteAccessInfo{}, err
@@ -132,7 +134,7 @@ func (c awsRemoteAccessClient) GetSession(ctx context.Context, sessionARN string
 	if remoteAccessSession == nil {
 		return RemoteAccessInfo{}, fmt.Errorf("remote access session %q not found", sessionARN)
 	}
-	if err := refuseUnsupportedAndroid(sessionARN, remoteAccessSession.Device, c.logger); err != nil {
+	if err := refuseUnsupportedDevice(sessionARN, remoteAccessSession.Device, c.logger); err != nil {
 		return RemoteAccessInfo{}, err
 	}
 	if remoteAccessSession.Endpoints == nil || aws.ToString(remoteAccessSession.Endpoints.InteractiveEndpoint) == "" {
@@ -171,28 +173,82 @@ func validateSessionARN(sessionARN string) error {
 	return nil
 }
 
-// refuseUnsupportedAndroid rejects a session on an Android device below
-// minimumAndroidMajor. iOS and a missing device pass: refusing them is a separate
-// decision. An OS version that does not parse passes with a warning: the floor is
-// a compatibility rule, not a security bound, so an odd format must not lock out a
+// androidPlatform is the UnsupportedDeviceError.Platform word for an Android device.
+const androidPlatform = "Android"
+
+// UnsupportedDeviceError is the refusal of a device this client cannot serve: a
+// non-Android platform, or an Android release below minimumAndroidMajor. Platform
+// is the word the text uses ("Android", "iOS", or the raw value). OSVersion is the
+// release the response reports. An in-process caller tells the two refusals apart
+// with errors.As and BelowAndroidFloor, not by reading the text; the control
+// channel carries only the text.
+type UnsupportedDeviceError struct {
+	SessionARN string
+	Platform   string
+	OSVersion  string
+}
+
+// BelowAndroidFloor reports whether the device is Android but older than
+// minimumAndroidMajor. Otherwise the platform itself is unsupported.
+func (refusal UnsupportedDeviceError) BelowAndroidFloor() bool {
+	return refusal.Platform == androidPlatform
+}
+
+// Error is the sentence the user reads on stderr.
+func (refusal UnsupportedDeviceError) Error() string {
+	if !refusal.BelowAndroidFloor() {
+		return fmt.Sprintf(
+			"remote access session %q is on an %s device, but this client only supports Android devices",
+			refusal.SessionARN, refusal.Platform,
+		)
+	}
+	return fmt.Sprintf(
+		"remote access session %q is on an Android %s device, but this client only supports Android %d and above",
+		refusal.SessionARN, refusal.OSVersion, minimumAndroidMajor,
+	)
+}
+
+// refuseUnsupportedDevice returns an UnsupportedDeviceError for a non-Android
+// device or an Android device below minimumAndroidMajor. A missing device or empty
+// platform passes: the SDK Platform is a plain string, so absent and empty look the
+// same, and the gate refuses only what the response names as non-Android. An
+// Android version that does not parse passes with a warning. The gate is a
+// compatibility rule, not a security bound; an odd response must not lock out a
 // working device.
-func refuseUnsupportedAndroid(sessionARN string, device *types.Device, logger *slog.Logger) error {
-	if device == nil || device.Platform != types.DevicePlatformAndroid {
+func refuseUnsupportedDevice(sessionARN string, device *types.Device, logger *slog.Logger) error {
+	if device == nil || device.Platform == "" {
 		return nil
 	}
-	osVersion := aws.ToString(device.Os)
-	major, ok := androidMajor(osVersion)
+	refusal := UnsupportedDeviceError{
+		SessionARN: sessionARN,
+		Platform:   platformName(device.Platform),
+		OSVersion:  aws.ToString(device.Os),
+	}
+	if device.Platform != types.DevicePlatformAndroid {
+		return refusal
+	}
+	major, ok := androidMajor(refusal.OSVersion)
 	if !ok {
-		logger.Warn("device OS version not parsed; allowing the session", "os", osVersion, "arn", sessionARN)
+		logger.Warn("device OS version not parsed; allowing the session", "os", refusal.OSVersion, "arn", sessionARN)
 		return nil
 	}
 	if major < minimumAndroidMajor {
-		return fmt.Errorf(
-			"remote access session %q is on an Android %s device, but this client only supports Android %d and above",
-			sessionARN, osVersion, minimumAndroidMajor,
-		)
+		return refusal
 	}
 	return nil
+}
+
+// platformName maps a Device Farm platform value to the refusal text's word:
+// ANDROID to "Android", IOS to "iOS", anything else raw.
+func platformName(platform types.DevicePlatform) string {
+	switch platform {
+	case types.DevicePlatformAndroid:
+		return androidPlatform
+	case types.DevicePlatformIos:
+		return "iOS"
+	default:
+		return string(platform)
+	}
 }
 
 // androidMajor reads the integer before the first dot of the OS version Device

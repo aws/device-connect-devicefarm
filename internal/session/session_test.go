@@ -71,17 +71,22 @@ func (f *fakeGetter) GetRemoteAccessSession(
 	return f.out, f.err
 }
 
+// sessionOutput builds a session on an Android device with its interactive
+// endpoint set.
 func sessionOutput(endpoint, name, os string) *devicefarm.GetRemoteAccessSessionOutput {
 	return &devicefarm.GetRemoteAccessSessionOutput{
 		RemoteAccessSession: &types.RemoteAccessSession{
 			Endpoints: &types.RemoteAccessEndpoints{InteractiveEndpoint: aws.String(endpoint)},
-			Device:    &types.Device{Name: aws.String(name), Os: aws.String(os)},
+			Device: &types.Device{
+				Name:     aws.String(name),
+				Os:       aws.String(os),
+				Platform: types.DevicePlatformAndroid,
+			},
 		},
 	}
 }
 
-// platformSessionOutput is sessionOutput plus the device platform the Android
-// floor keys on.
+// platformSessionOutput is sessionOutput with the device platform replaced.
 func platformSessionOutput(platform types.DevicePlatform, os string) *devicefarm.GetRemoteAccessSessionOutput {
 	out := sessionOutput("wss://host.example/ws", "Lab device", os)
 	out.RemoteAccessSession.Device.Platform = platform
@@ -157,7 +162,7 @@ func TestGivenAPIErrorWhenResolvedThenErrorPropagated(t *testing.T) {
 }
 
 func TestGivenSessionMissingDeviceFieldsWhenResolvedThenLabelDegradesGracefully(t *testing.T) {
-	// No device means no platform or version to check, so the floor passes.
+	// No device means no platform or version to check, so the device gate passes.
 	out := &devicefarm.GetRemoteAccessSessionOutput{
 		RemoteAccessSession: &types.RemoteAccessSession{
 			Endpoints: &types.RemoteAccessEndpoints{InteractiveEndpoint: aws.String("wss://host.example/ws")},
@@ -327,28 +332,101 @@ func TestGivenAndroidDeviceWithUnparsableOSWhenSessionFetchedThenSessionAllowedW
 	}
 }
 
-func TestGivenPreparingSessionOnAndroidBelowNineWhenSessionFetchedThenVersionRefusalComesFirst(t *testing.T) {
+func TestGivenPreparingSessionOnUnsupportedDeviceWhenSessionFetchedThenRefusalComesFirst(t *testing.T) {
 	// The device is known before the endpoint exists, so the user learns at once
 	// that the device is unsupported instead of waiting for RUNNING and retrying.
-	out := platformSessionOutput(types.DevicePlatformAndroid, "8.0.0")
-	out.RemoteAccessSession.Endpoints = nil
-	out.RemoteAccessSession.Status = types.ExecutionStatusPreparing
+	tests := []struct {
+		name         string
+		platform     types.DevicePlatform
+		os           string
+		wantFragment string
+	}{
+		{name: "Android below the floor", platform: types.DevicePlatformAndroid, os: "8.0.0", wantFragment: "only supports Android 9 and above"},
+		{name: "iOS", platform: types.DevicePlatformIos, os: "17.0", wantFragment: "is on an iOS device"},
+	}
 
-	_, err := newClient(&fakeGetter{out: out}).GetSession(context.Background(), testSessionARN)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out := platformSessionOutput(tc.platform, tc.os)
+			out.RemoteAccessSession.Endpoints = nil
+			out.RemoteAccessSession.Status = types.ExecutionStatusPreparing
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "only supports Android 9 and above", "the version refusal must come first")
-	assert.NotContains(t, err.Error(), "interactive endpoint", "the endpoint check must not run before the floor")
+			_, err := newClient(&fakeGetter{out: out}).GetSession(context.Background(), testSessionARN)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantFragment, "the device refusal must come first")
+			assert.NotContains(t, err.Error(), "interactive endpoint", "the endpoint check must not run before the gate")
+		})
+	}
 }
 
-func TestGivenIOSDeviceWhenSessionFetchedThenVersionIsNotChecked(t *testing.T) {
-	// An iOS version below the floor must not be read as Android.
-	fake := &fakeGetter{out: platformSessionOutput(types.DevicePlatformIos, "8.4")}
+func TestGivenNonAndroidDeviceWhenSessionFetchedThenErrorNamesThePlatformAndAndroidOnly(t *testing.T) {
+	// IOS is spelled "iOS"; an unknown platform is spelled raw. The version plays
+	// no part: iOS 8.4 is refused as iOS, not as Android below the floor.
+	tests := []struct {
+		platform types.DevicePlatform
+		wantName string
+	}{
+		{platform: types.DevicePlatformIos, wantName: "iOS"},
+		{platform: types.DevicePlatform("WATCH"), wantName: "WATCH"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.wantName, func(t *testing.T) {
+			fake := &fakeGetter{out: platformSessionOutput(tc.platform, "8.4")}
+
+			_, err := newClient(fake).GetSession(context.Background(), testSessionARN)
+
+			require.Error(t, err)
+			assert.Equal(t,
+				fmt.Sprintf("remote access session %q is on an %s device, but this client only supports Android devices",
+					testSessionARN, tc.wantName),
+				err.Error(), "the error must name the platform and that only Android is served")
+			assert.Equal(t, 1, fake.calls, "the device is known only from the response, so the call must be made")
+		})
+	}
+}
+
+func TestGivenUnsupportedDeviceWhenTheRefusalIsWrappedThenErrorsAsYieldsThePlatformAndOS(t *testing.T) {
+	// The daemon wraps the resolver's error as below. An in-process caller reaches
+	// the refusal with errors.As and tells an iOS device from an old Android
+	// release without reading the text.
+	tests := []struct {
+		name           string
+		platform       types.DevicePlatform
+		os             string
+		wantPlatform   string
+		wantBelowFloor bool
+	}{
+		{name: "iOS", platform: types.DevicePlatformIos, os: "17.0", wantPlatform: "iOS", wantBelowFloor: false},
+		{name: "Android below the floor", platform: types.DevicePlatformAndroid, os: "8.0.0", wantPlatform: "Android", wantBelowFloor: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeGetter{out: platformSessionOutput(tc.platform, tc.os)}
+
+			_, err := newClient(fake).GetSession(context.Background(), testSessionARN)
+			wrapped := fmt.Errorf("resolve session: %w", err)
+
+			var refusal UnsupportedDeviceError
+			require.ErrorAs(t, wrapped, &refusal)
+			assert.Equal(t,
+				UnsupportedDeviceError{SessionARN: testSessionARN, Platform: tc.wantPlatform, OSVersion: tc.os},
+				refusal)
+			assert.Equal(t, tc.wantBelowFloor, refusal.BelowAndroidFloor())
+		})
+	}
+}
+
+func TestGivenDeviceWithoutPlatformWhenSessionFetchedThenSessionAllowed(t *testing.T) {
+	// No platform in the response, so the gate fails open, as for a missing device.
+	fake := &fakeGetter{out: platformSessionOutput("", "16")}
 
 	got, err := newClient(fake).GetSession(context.Background(), testSessionARN)
 
 	require.NoError(t, err)
-	assert.Equal(t, "Lab device (OS 8.4)", got.Label)
+	assert.Equal(t, "Lab device (OS 16)", got.Label)
 }
 
 func TestGivenOSStringsWhenAndroidMajorParsedThenMajorAndOk(t *testing.T) {
