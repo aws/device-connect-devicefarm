@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -113,12 +114,50 @@ func TestGivenAProbedSessionWhenReattachedThenTheServerAcksThatSession(t *testin
 }
 
 func TestGivenAMalformedSessionUUIDWhenReattachedThenNothingIsDialed(t *testing.T) {
-	mock := testsupport.NewSessionEchoWSS(t)
+	cases := []struct {
+		name        string
+		sessionUUID string
+	}{
+		{"far too short", "not-a-session-uuid"},
+		{"one character too short", testSessionUUID[:35]},
+		{"one character too long", testSessionUUID + "0"},
+		{"version nibble 3, not 4", "11111111-2222-3333-8444-555555555555"},
+		{"variant nibble c, not 8 to b", "11111111-2222-4333-c444-555555555555"},
+		{"right length, wrong shape", "not-a-uuid-but-exactly-36-chars-long"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			mock := testsupport.NewSessionEchoWSS(t)
 
-	err := newTestDialer(testWait).ProbeReattach(context.Background(), mock.URL, "not-a-session-uuid")
+			err := newTestDialer(testWait).ProbeReattach(context.Background(), mock.URL, testCase.sessionUUID)
 
-	assert.ErrorContains(t, err, `"not-a-session-uuid" is not a session uuid`)
-	assert.Zero(t, mock.ConnectionsAccepted(), "a malformed uuid must not reach the server")
+			assert.ErrorContains(t, err, fmt.Sprintf("%q is not a session uuid", testCase.sessionUUID))
+			assert.Zero(t, mock.ConnectionsAccepted(), "a malformed uuid must not reach the server")
+		})
+	}
+}
+
+func TestGivenACanonicalUUIDv4InEitherCaseWhenReattachedThenTheServerReadsAReconnect(t *testing.T) {
+	cases := []struct {
+		name        string
+		sessionUUID string
+	}{
+		{"lowercase", "01234567-89ab-4cde-bf01-23456789abcd"},
+		{"uppercase", "01234567-89AB-4CDE-BF01-23456789ABCD"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			mock := testsupport.NewSessionEchoWSS(t)
+
+			err := newTestDialer(testWait).ProbeReattach(context.Background(), mock.URL, testCase.sessionUUID)
+
+			// Empty mock: refuses a reconnect, mints a session for any other first frame.
+			assert.ErrorIs(t, err, ErrSessionGone)
+			assert.ErrorContains(t, err, "unknown or expired session")
+			assert.Equal(t, 1, mock.ConnectionsAccepted(), "a canonical uuid must be dialed")
+			assert.Zero(t, mock.SessionsOpened(), "a reconnect must not mint a session")
+		})
+	}
 }
 
 func TestGivenTheServerRefusesTheReattachWhenReattachedThenTheErrorSaysTheSessionIsGone(t *testing.T) {

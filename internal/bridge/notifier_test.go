@@ -174,7 +174,7 @@ func TestGivenAReverseOpenFrameWhenItArrivesThenTheTokenAndPortReachTheCallback(
 		announced <- fmt.Sprintf("%s:%d", token, customerPort)
 	}, func() {})
 
-	assert.Equal(t, reverseOpenPayload(testSessionUUID, 8080), await(t, announced, "the announced connection"))
+	assert.Equal(t, testSessionUUID+":8080", await(t, announced, "the announced connection"))
 }
 
 func TestGivenSeveralReverseOpensWhenTheyArriveThenTheReadLoopIsNotBlockedByASlowCallback(t *testing.T) {
