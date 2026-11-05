@@ -5,17 +5,20 @@
 // endpoint is time-limited and must be renewed while a device stays attached.
 //
 // Public surface: RemoteAccessClient (the application-layer interface the daemon
-// depends on), RemoteAccessInfo (its result), NewRemoteAccessClient (the real,
-// AWS-backed implementation) and UnsupportedDeviceError (the refusal of a device
-// this client cannot serve). Everything else - the SDK-shaped getter, the ARN
-// helper, the config loading - is internal to this package, so no aws-sdk-go-v2
-// type crosses the package boundary.
+// depends on), RemoteAccessInfo (its result), and NewRemoteAccessClient (the real,
+// AWS-backed implementation), and the Err sentinels a GetSession failure carries,
+// with SessionEndedError for the status word, RequestRejectedError for the
+// service's error code and UnsupportedDeviceError for the refused device.
+// Everything else - the SDK-shaped getter, the ARN helper, the config loading - is
+// internal to this package, so no aws-sdk-go-v2 type crosses the package boundary.
 package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -46,6 +49,77 @@ const clientRegion = "us-west-2"
 // relay behind a remote access session does not work below it, so GetSession
 // refuses an older Android device.
 const minimumAndroidMajor = 9
+
+// Sentinels for errors.Is. GetSession wraps them into its texts, where their words read in
+// place; the SDK's own text stays inside the wrap.
+var (
+	// ErrInvalidARN: not a Device Farm session ARN this client can serve.
+	ErrInvalidARN = errors.New("invalid session ARN")
+	// ErrAccessDenied: the credentials lack devicefarm:GetRemoteAccessSession on the session.
+	ErrAccessDenied = errors.New("access denied")
+	// ErrSessionNotFound: no session has this ARN in this account and region.
+	ErrSessionNotFound = errors.New("not found")
+	// ErrUnsupportedDevice: the session's device is one this client does not serve (a non-Android
+	// platform, or an Android release below minimumAndroidMajor). UnsupportedDeviceError matches it
+	// and keeps its own text.
+	ErrUnsupportedDevice = errors.New("unsupported device")
+	// ErrSessionEnded: the session is COMPLETED or STOPPING. SessionEndedError carries which.
+	ErrSessionEnded = errors.New("has ended")
+	// ErrNoEndpointYet: the session is not RUNNING, so it has no endpoint to dial.
+	ErrNoEndpointYet = errors.New("has no interactive endpoint yet")
+	// ErrRequestRejected: the service answered with a 4xx that is not a throttle: the request
+	// itself is bad (credentials, signature, token, ARN shape). RequestRejectedError carries the
+	// code. Throttles, 5xx and transport failures carry no sentinel.
+	ErrRequestRejected = errors.New("request rejected")
+)
+
+// RequestRejectedError is the ErrRequestRejected failure with the service's error code, for a
+// caller that tells the user which.
+type RequestRejectedError struct {
+	Code  string
+	Cause error
+}
+
+func (rejected *RequestRejectedError) Error() string {
+	return fmt.Sprintf("%v (%s): %v", ErrRequestRejected, rejected.Code, rejected.Cause)
+}
+
+func (rejected *RequestRejectedError) Unwrap() error { return rejected.Cause }
+
+func (*RequestRejectedError) Is(target error) bool { return target == ErrRequestRejected }
+
+// throttleErrorCodes are the API error codes the SDK treats as throttles: aws/retry
+// DefaultThrottleErrorCodes (standard.go) in aws-sdk-go-v2 v1.41.12, copied so the retry package
+// stays out of this package's imports.
+var throttleErrorCodes = map[string]bool{
+	"Throttling":                             true,
+	"ThrottlingException":                    true,
+	"ThrottledException":                     true,
+	"RequestThrottledException":              true,
+	"TooManyRequestsException":               true,
+	"ProvisionedThroughputExceededException": true,
+	"TransactionInProgressException":         true,
+	"RequestLimitExceeded":                   true,
+	"BandwidthLimitExceeded":                 true,
+	"LimitExceededException":                 true,
+	"RequestThrottled":                       true,
+	"SlowDown":                               true,
+	"PriorRequestNotComplete":                true,
+	"EC2ThrottledException":                  true,
+}
+
+// SessionEndedError is the ErrSessionEnded failure with the status word that ended the session,
+// for a caller that tells the user which.
+type SessionEndedError struct {
+	SessionARN string
+	Status     string
+}
+
+func (ended *SessionEndedError) Error() string {
+	return fmt.Sprintf("remote access session %q %v (status %s)", ended.SessionARN, ErrSessionEnded, ended.Status)
+}
+
+func (*SessionEndedError) Is(target error) bool { return target == ErrSessionEnded }
 
 // RemoteAccessInfo is the outcome of resolving a session ARN: the websocket URL
 // to dial (the interactive endpoint verbatim, path-less; each dial site names its
@@ -109,45 +183,84 @@ func NewRemoteAccessClient(ctx context.Context, logger *slog.Logger) (RemoteAcce
 	return awsRemoteAccessClient{getter: devicefarm.NewFromConfig(cfg), logger: logger}, nil
 }
 
+// apiErrorCode and httpResponse match the SDK's API error and its HTTP response by shape, so
+// its error packages stay out of the package's non-test imports.
+type apiErrorCode interface{ ErrorCode() string }
+
+type httpResponse interface{ HTTPStatusCode() int }
+
+// classifyAPIError maps an API error to its sentinel: three codes by name, then any other 4xx
+// that is not a throttle as ErrRequestRejected. Throttles (a throttle code, or a 429 whatever its
+// code), 5xx and errors with no response pass through.
+func classifyAPIError(err error) error {
+	code := ""
+	var apiErr apiErrorCode
+	if errors.As(err, &apiErr) {
+		code = apiErr.ErrorCode()
+	}
+	switch code {
+	case "AccessDeniedException":
+		return fmt.Errorf("%w: %w", ErrAccessDenied, err)
+	case "NotFoundException":
+		return fmt.Errorf("session %w: %w", ErrSessionNotFound, err)
+	case "ArgumentException":
+		return fmt.Errorf("%w: %w", ErrInvalidARN, err)
+	}
+	var response httpResponse
+	if errors.As(err, &response) && !throttleErrorCodes[code] {
+		status := response.HTTPStatusCode()
+		if status >= 400 && status < 500 && status != http.StatusTooManyRequests {
+			return &RequestRejectedError{Code: code, Cause: err}
+		}
+	}
+	return err
+}
+
 // GetSession looks up the remote access session named by sessionARN and maps the
 // response to a RemoteAccessInfo (the interactive endpoint verbatim, plus the
 // device label). Validating the ARN is the explicit first step,
 // so a malformed ARN, a non-Device-Farm ARN, or one from a region this client was
-// not built for fails fast, before any network call. A non-Android device, or an
-// Android device below minimumAndroidMajor, is refused as an UnsupportedDeviceError.
-// That check runs after the call (only the response names the device) and before
-// the endpoint check, so a session still PREPARING on such a device fails at once,
-// not after a wait and a retry.
+// not built for fails fast, before any network call. A COMPLETED or STOPPING
+// session is reported as ended whatever its device. Then a non-Android device, or
+// an Android device below minimumAndroidMajor, is refused as an
+// UnsupportedDeviceError (only the response names the device) before the endpoint
+// check, so a session still PREPARING on such a device is refused at once, not
+// after a wait and a retry. Only a RUNNING session with an endpoint resolves.
 func (c awsRemoteAccessClient) GetSession(ctx context.Context, sessionARN string) (RemoteAccessInfo, error) {
 	if err := validateSessionARN(sessionARN); err != nil {
-		return RemoteAccessInfo{}, err
+		return RemoteAccessInfo{}, fmt.Errorf("%w: %w", ErrInvalidARN, err)
 	}
 
 	out, err := c.getter.GetRemoteAccessSession(ctx, &devicefarm.GetRemoteAccessSessionInput{
 		Arn: aws.String(sessionARN),
 	})
 	if err != nil {
-		return RemoteAccessInfo{}, fmt.Errorf("GetRemoteAccessSession %q: %w", sessionARN, err)
+		return RemoteAccessInfo{}, fmt.Errorf("GetRemoteAccessSession %q: %w", sessionARN, classifyAPIError(err))
 	}
 
 	remoteAccessSession := out.RemoteAccessSession
 	if remoteAccessSession == nil {
-		return RemoteAccessInfo{}, fmt.Errorf("remote access session %q not found", sessionARN)
+		return RemoteAccessInfo{}, fmt.Errorf("remote access session %q %w", sessionARN, ErrSessionNotFound)
+	}
+	// An ended session is ended whatever its device: the floor below is about attaching.
+	status := remoteAccessSession.Status
+	if status == types.ExecutionStatusCompleted || status == types.ExecutionStatusStopping {
+		return RemoteAccessInfo{}, &SessionEndedError{SessionARN: sessionARN, Status: string(status)}
 	}
 	if err := refuseUnsupportedDevice(sessionARN, remoteAccessSession.Device, c.logger); err != nil {
 		return RemoteAccessInfo{}, err
 	}
-	if remoteAccessSession.Endpoints == nil || aws.ToString(remoteAccessSession.Endpoints.InteractiveEndpoint) == "" {
-		return RemoteAccessInfo{}, fmt.Errorf(
-			"remote access session %q has no interactive endpoint yet (status %s); is it RUNNING?",
-			sessionARN, remoteAccessSession.Status,
-		)
+	endpoint := ""
+	if remoteAccessSession.Endpoints != nil {
+		endpoint = aws.ToString(remoteAccessSession.Endpoints.InteractiveEndpoint)
+	}
+	// Only RUNNING is dialable: a pending session has no endpoint yet.
+	if status != types.ExecutionStatusRunning || endpoint == "" {
+		return RemoteAccessInfo{}, fmt.Errorf("remote access session %q %w (status %s); is it RUNNING?",
+			sessionARN, ErrNoEndpointYet, status)
 	}
 
-	return RemoteAccessInfo{
-		Endpoint: aws.ToString(remoteAccessSession.Endpoints.InteractiveEndpoint),
-		Label:    deviceLabel(remoteAccessSession.Device),
-	}, nil
+	return RemoteAccessInfo{Endpoint: endpoint, Label: deviceLabel(remoteAccessSession.Device)}, nil
 }
 
 // validateSessionARN rejects a session ARN the client cannot serve: one that is
@@ -179,9 +292,10 @@ const androidPlatform = "Android"
 // UnsupportedDeviceError is the refusal of a device this client cannot serve: a
 // non-Android platform, or an Android release below minimumAndroidMajor. Platform
 // is the word the text uses ("Android", "iOS", or the raw value). OSVersion is the
-// release the response reports. An in-process caller tells the two refusals apart
-// with errors.As and BelowAndroidFloor, not by reading the text; the control
-// channel carries only the text.
+// release the response reports. It matches ErrUnsupportedDevice for errors.Is. An
+// in-process caller tells the two refusals apart with errors.As and
+// BelowAndroidFloor, not by reading the text; the control channel carries only the
+// text.
 type UnsupportedDeviceError struct {
 	SessionARN string
 	Platform   string
@@ -193,6 +307,8 @@ type UnsupportedDeviceError struct {
 func (refusal UnsupportedDeviceError) BelowAndroidFloor() bool {
 	return refusal.Platform == androidPlatform
 }
+
+func (UnsupportedDeviceError) Is(target error) bool { return target == ErrUnsupportedDevice }
 
 // Error is the sentence the user reads on stderr.
 func (refusal UnsupportedDeviceError) Error() string {

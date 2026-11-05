@@ -73,6 +73,9 @@ type adbConn struct {
 	// terminalSessionGone ends the connection on a refused reattach instead of opening a
 	// fresh session. Set at construction and never written after, so it needs no lock.
 	terminalSessionGone bool
+	// refusals is asked what became of the session after a refused reattach ends the
+	// connection. Nil asks nothing. Set at construction, like terminalSessionGone.
+	refusals *refusalGate
 
 	// sockets is the teardown set and the closed latch, with its own mutex: teardown
 	// must not queue behind a refresh's dial-and-ack.
@@ -120,6 +123,12 @@ type adbConnOption func(*adbConn)
 // and a reason into the application's own byte stream.
 func withTerminalSessionGone() adbConnOption {
 	return func(connection *adbConn) { connection.terminalSessionGone = true }
+}
+
+// withRefusalGate makes a refused reattach that ends the connection ask gate what became of the
+// session, so a dead session detaches the device instead of refusing every later stream.
+func withRefusalGate(gate *refusalGate) adbConnOption {
+	return func(connection *adbConn) { connection.refusals = gate }
 }
 
 // newAdbConn wraps an already-dialed websocket as a session's first. The control frame
@@ -290,7 +299,7 @@ func (c *adbConn) consumeControlFrame(message []byte) error {
 		c.logger.Debug("adb session established", "session", frame.payload)
 		return nil
 	case armError:
-		return fmt.Errorf("remote refused the adb session: %s", frame.payload)
+		return &sessionRefusal{reason: frame.payload}
 	default:
 		return fmt.Errorf("unexpected control frame %s opening a new session", frame.arm)
 	}

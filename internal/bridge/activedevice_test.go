@@ -142,7 +142,7 @@ func TestGivenMatchingARNWhenClearMatchingThenDetachesAndReturnsIt(t *testing.T)
 	info := DeviceInfo{ARN: "arn:1", Endpoint: "wss://h", Label: "Pixel"}
 	require.True(t, device.Set(info))
 
-	cleared, ok := device.ClearMatching("arn:1")
+	cleared, ok := device.ClearMatching("arn:1", "the session ended")
 
 	require.True(t, ok)
 	assert.Equal(t, info, cleared)
@@ -155,7 +155,7 @@ func TestGivenMismatchedARNWhenClearMatchingThenKeepsDevice(t *testing.T) {
 	info := DeviceInfo{ARN: "arn:1", Endpoint: "wss://h", Label: "Pixel"}
 	require.True(t, device.Set(info))
 
-	_, ok := device.ClearMatching("arn:other")
+	_, ok := device.ClearMatching("arn:other", "the session ended")
 
 	assert.False(t, ok, "ClearMatching must not detach a device whose ARN does not match")
 	got, present := device.Current()
@@ -164,7 +164,7 @@ func TestGivenMismatchedARNWhenClearMatchingThenKeepsDevice(t *testing.T) {
 }
 
 func TestGivenNoDeviceWhenClearMatchingThenReportsNothing(t *testing.T) {
-	_, ok := NewActiveDevice().ClearMatching("arn:1")
+	_, ok := NewActiveDevice().ClearMatching("arn:1", "the session ended")
 	assert.False(t, ok)
 }
 
@@ -182,7 +182,7 @@ func TestGivenTrackedConnsWhenClearMatchingThenAllCancelled(t *testing.T) {
 	_, _, _, ok := device.trackConn(cancel)
 	require.True(t, ok)
 
-	_, cleared := device.ClearMatching("arn:1")
+	_, cleared := device.ClearMatching("arn:1", "the session ended")
 
 	require.True(t, cleared)
 	assert.ErrorIs(t, ctx.Err(), context.Canceled, "ClearMatching must cancel every tracked connection")
@@ -497,4 +497,45 @@ func TestGivenAnAlternateLoopbackAddressInUseWhenRuleInstalledThenTheBindIsLoopb
 	dialRule(t, port)
 	waitFor(t, func() bool { return mock.SessionsOpened() == 1 },
 		"the loopback listener never served the rule")
+}
+
+func TestGivenAnARNGuardedDetachWhenRecordedThenLastDetachHoldsTheReasonUntilTheNextSet(t *testing.T) {
+	device := NewActiveDevice()
+	require.True(t, device.Set(DeviceInfo{ARN: "arn:1", Endpoint: "wss://127.0.0.1:0/a", Label: "One"}))
+	_, detached := device.LastDetach()
+	assert.False(t, detached, "an attached device has no last detach")
+
+	_, cleared := device.ClearMatching("arn:1", "the session ended")
+	require.True(t, cleared)
+
+	last, detached := device.LastDetach()
+	require.True(t, detached)
+	assert.Equal(t, "the session ended", last.Reason)
+	assert.WithinDuration(t, time.Now(), last.At, time.Minute)
+
+	require.True(t, device.Set(DeviceInfo{ARN: "arn:2", Endpoint: "wss://127.0.0.1:0/b", Label: "Two"}))
+	_, detached = device.LastDetach()
+	assert.False(t, detached, "the next attach clears the record")
+}
+
+func TestGivenAUserRemoveWhenClearedThenNoLastDetachIsRecorded(t *testing.T) {
+	device := NewActiveDevice()
+	require.True(t, device.Set(DeviceInfo{ARN: "arn:1", Endpoint: "wss://127.0.0.1:0/a", Label: "One"}))
+
+	_, cleared := device.Clear()
+	require.True(t, cleared)
+
+	_, detached := device.LastDetach()
+	assert.False(t, detached, "a remove by the user is not a detach the status reports")
+}
+
+func TestGivenAMismatchedARNWhenClearMatchingRunsThenNoLastDetachIsRecorded(t *testing.T) {
+	device := NewActiveDevice()
+	require.True(t, device.Set(DeviceInfo{ARN: "arn:1", Endpoint: "wss://127.0.0.1:0/a", Label: "One"}))
+
+	_, cleared := device.ClearMatching("arn:other", "the session ended")
+
+	assert.False(t, cleared)
+	_, detached := device.LastDetach()
+	assert.False(t, detached, "a refused detach records nothing")
 }

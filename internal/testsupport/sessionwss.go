@@ -68,10 +68,19 @@ type SessionMockConfig struct {
 	// a key no arm owns. Empty keeps reattach.
 	ReattachAckArm string
 
+	// RefuseNewSessions answers the first N fresh sessions with an ERROR frame carrying
+	// NewSessionRefusalReason, as the server does when it cannot reach the device's adb server;
+	// negative refuses every one. RefuseNewSessions on the mock changes it mid-test.
+	RefuseNewSessions int
+
 	// OnMessage handles raw ADB bytes from the client; reply goes to whichever websocket
 	// is currently attached. Nil echoes.
 	OnMessage func(session *MockSession, data []byte) (reply []byte)
 }
+
+// NewSessionRefusalReason is the ERROR payload RefuseNewSessions answers with: the server's own
+// text for a device whose adb server it cannot reach.
+const NewSessionRefusalReason = "failed to connect to ADB server"
 
 // MockSession is one durable server-side session: it outlives any single websocket,
 // as the real server's session does.
@@ -164,6 +173,9 @@ type SessionMockWSS struct {
 	// droppedSockets marks websockets whose reattach was dropped transiently, so serve
 	// closes them silently instead of announcing a refusal.
 	droppedSockets map[*websocket.Conn]struct{}
+	// newSessionRefusalsLeft is how many more fresh sessions are refused; negative is every one.
+	newSessionRefusalsLeft int
+	newSessionsRefused     int
 }
 
 // NewSessionMockWSS starts a session-aware mock /adb endpoint, torn down via t.Cleanup.
@@ -177,10 +189,40 @@ func NewSessionMockWSS(t *testing.T, cfg SessionMockConfig) *SessionMockWSS {
 // newSessionMock is a session mock with no endpoint yet.
 func newSessionMock(cfg SessionMockConfig) *SessionMockWSS {
 	return &SessionMockWSS{
-		cfg:            cfg,
-		sessions:       make(map[string]*MockSession),
-		droppedSockets: make(map[*websocket.Conn]struct{}),
+		cfg:                    cfg,
+		sessions:               make(map[string]*MockSession),
+		droppedSockets:         make(map[*websocket.Conn]struct{}),
+		newSessionRefusalsLeft: cfg.RefuseNewSessions,
 	}
+}
+
+// RefuseNewSessions sets how many of the next fresh sessions are refused; negative is every one,
+// zero none. See SessionMockConfig.RefuseNewSessions.
+func (m *SessionMockWSS) RefuseNewSessions(count int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.newSessionRefusalsLeft = count
+}
+
+// NewSessionsRefused returns how many fresh sessions were refused with an ERROR frame.
+func (m *SessionMockWSS) NewSessionsRefused() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.newSessionsRefused
+}
+
+// takeNewSessionRefusal reports whether this fresh session is refused, consuming one refusal.
+func (m *SessionMockWSS) takeNewSessionRefusal() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.newSessionRefusalsLeft == 0 {
+		return false
+	}
+	if m.newSessionRefusalsLeft > 0 {
+		m.newSessionRefusalsLeft--
+	}
+	m.newSessionsRefused++
+	return true
 }
 
 // ConnectionsAccepted returns how many websockets were served, refusals included.
@@ -263,7 +305,11 @@ func (m *SessionMockWSS) serve(ws *websocket.Conn) {
 			return
 		}
 		// Refusal: announce, then close, as the server does.
-		websocket.Message.Send(ws, FrameError("unknown or expired session"))
+		reason := "unknown or expired session"
+		if !isReconnect {
+			reason = NewSessionRefusalReason
+		}
+		websocket.Message.Send(ws, FrameError(reason))
 		ws.Close()
 		return
 	}
@@ -366,8 +412,12 @@ func (m *SessionMockWSS) reattach(ws *websocket.Conn, uuid string) *MockSession 
 	return session
 }
 
-// newSession mints a session, announces its UUID, and attaches ws.
+// newSession mints a session, announces its UUID, and attaches ws. Nil when RefuseNewSessions
+// refuses this one; serve announces the refusal.
 func (m *SessionMockWSS) newSession(ws *websocket.Conn) *MockSession {
+	if m.takeNewSessionRefusal() {
+		return nil
+	}
 	m.mu.Lock()
 	m.nextUUID++
 	m.sessionsOpened++
