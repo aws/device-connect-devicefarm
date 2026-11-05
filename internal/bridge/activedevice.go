@@ -17,6 +17,14 @@ type DeviceInfo struct {
 	Serial   string // adb serial, fetched by the control add before the bind
 }
 
+// LastDetach is why and when the daemon last detached a device on its own: a session the
+// refresh could not renew or a refused connection found gone. Cleared by the next Set. Clear
+// records none.
+type LastDetach struct {
+	Reason string
+	At     time.Time
+}
+
 // ActiveDevice is the mutex-guarded single-device state shared by the accept loop,
 // the pipes, the control handler, the endpoint refresh loop and the attachment's own
 // goroutines. Set reports whether the
@@ -26,9 +34,14 @@ type DeviceInfo struct {
 //
 // The zero value is not usable; construct with NewActiveDevice.
 type ActiveDevice struct {
-	mu      sync.Mutex
-	present bool
-	info    DeviceInfo
+	mu         sync.Mutex
+	present    bool
+	info       DeviceInfo
+	lastDetach LastDetach
+
+	// refusalHandler is asked about the session after a refused fresh adb connection; see
+	// WithRefusalHandler. Set once at construction. Nil: no lookup.
+	refusalHandler RefusalHandler
 
 	// conns holds the cancel func of every connection currently bridging to the
 	// bound device, keyed by a monotonic id so each can deregister itself on exit.
@@ -86,8 +99,17 @@ type attachmentFeatures struct {
 	// reverseEnabled off: the seam refuses the reverse family; see refuseReverseFamily
 	reverseEnabled bool
 	hostReplies    *hostReplyCache // the server's host replies the seam answers from; see answerHostQuery
+	sessionLookups *refusalGate    // the daemon's session lookups after refused connections; see refusalGate
 	ctx            context.Context
 	cancel         context.CancelFunc
+}
+
+// refusalGate returns the attachment's gate, or nil without features. consult is nil-safe.
+func (features *attachmentFeatures) refusalGate() *refusalGate {
+	if features == nil {
+		return nil
+	}
+	return features.sessionLookups
 }
 
 // close ends the attachment. The context dies before the listeners, so a connection
@@ -133,6 +155,13 @@ func WithAttachmentFeatures(dialer *WSDialer, policy WSRefreshPolicy,
 	}
 }
 
+// WithRefusalHandler makes a refused fresh session or a failed dial ask handler about the
+// session first: RUNNING renews the endpoint and the connection dials once more, dead detaches
+// with the reason the client reads. Lookups run one at a time per attachment.
+func WithRefusalHandler(handler RefusalHandler) ActiveDeviceOption {
+	return func(device *ActiveDevice) { device.refusalHandler = handler }
+}
+
 // NewActiveDevice builds an empty ActiveDevice.
 func NewActiveDevice(opts ...ActiveDeviceOption) *ActiveDevice {
 	device := &ActiveDevice{conns: make(map[uint64]context.CancelFunc)}
@@ -152,6 +181,7 @@ func (a *ActiveDevice) Set(info DeviceInfo) bool {
 	}
 	a.present = true
 	a.info = info
+	a.lastDetach = LastDetach{}
 	a.buildFeaturesLocked()
 	return true
 }
@@ -175,12 +205,13 @@ func (device *ActiveDevice) buildFeaturesLocked() {
 	budget := &streamBudget{limit: config.params.MaxDeviceStreams}
 	features := &attachmentFeatures{ctx: ctx, cancel: cancel, budget: budget,
 		reverseRules:   newReverseRules(config.params.MaxReverseRules),
-		reverseEnabled: config.params.ReverseEnabled}
+		reverseEnabled: config.params.ReverseEnabled,
+		sessionLookups: &refusalGate{handler: device.refusalHandler, device: device}}
 	fetcher := &hostReplyFetcher{device: device, dialer: config.dialer, arn: device.info.ARN}
 	features.hostReplies = newHostReplyCache(fetcher.fetch)
 	features.warm = newWarmSocketKeeper(device, config, device.info.ARN)
 	opener := &deviceStreamOpener{device: device, cfg: config, arn: device.info.ARN, ctx: ctx, budget: budget,
-		warm: features.warm}
+		features: features}
 	features.table = forward.NewForwardRulesTable(opener, config.params.MaxForwardRules, config.logger)
 	features.notifier = newNotifierSupervisor(device, config, device.info.ARN, features.table, features.reverseRules, budget)
 	go features.notifier.run(features.ctx)
@@ -266,17 +297,27 @@ func (a *ActiveDevice) EndpointFor(arn string) (string, bool) {
 	return a.info.Endpoint, true
 }
 
-// ClearMatching is Clear guarded by ARN: the refresh loop uses it to detach a device
-// whose session it can no longer resolve, without dropping a different device
-// attached meanwhile. A same-ARN remove-then-re-add in that window (ABA) is not
-// protected; accepted for a single-user tool (see refreshEndpointOnce).
-func (a *ActiveDevice) ClearMatching(arn string) (DeviceInfo, bool) {
+// ClearMatching is Clear guarded by ARN: the refresh loop and the refusal lookups use it to
+// detach a device whose session they can no longer resolve, without dropping a different
+// device attached meanwhile, and record reason as the LastDetach. A same-ARN
+// remove-then-re-add in that window (ABA) is not protected; accepted for a single-user
+// tool (see refreshEndpointOnce).
+func (a *ActiveDevice) ClearMatching(arn, reason string) (DeviceInfo, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if !a.present || a.info.ARN != arn {
 		return DeviceInfo{}, false
 	}
+	a.lastDetach = LastDetach{Reason: reason, At: time.Now()}
 	return a.clearLocked()
+}
+
+// LastDetach returns why and when the daemon last detached a device on its own, and false
+// while a device is attached or none was detached that way since the last Set.
+func (device *ActiveDevice) LastDetach() (LastDetach, bool) {
+	device.mu.Lock()
+	defer device.mu.Unlock()
+	return device.lastDetach, device.lastDetach.Reason != ""
 }
 
 // Current returns the bound device and true, or a zero value and false when none

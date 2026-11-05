@@ -7,14 +7,18 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/url"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/devicefarm"
 	"github.com/aws/aws-sdk-go-v2/service/devicefarm/types"
+	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -76,6 +80,7 @@ func (f *fakeGetter) GetRemoteAccessSession(
 func sessionOutput(endpoint, name, os string) *devicefarm.GetRemoteAccessSessionOutput {
 	return &devicefarm.GetRemoteAccessSessionOutput{
 		RemoteAccessSession: &types.RemoteAccessSession{
+			Status:    types.ExecutionStatusRunning,
 			Endpoints: &types.RemoteAccessEndpoints{InteractiveEndpoint: aws.String(endpoint)},
 			Device: &types.Device{
 				Name:     aws.String(name),
@@ -97,6 +102,18 @@ func platformSessionOutput(platform types.DevicePlatform, os string) *devicefarm
 // log builds its own client.
 func newClient(getter remoteAccessGetter) awsRemoteAccessClient {
 	return awsRemoteAccessClient{getter: getter, logger: slog.New(slog.DiscardHandler)}
+}
+
+// apiFailure is the error chain the SDK hands back for a modeled or generic API error.
+func apiFailure(apiErr error) error {
+	return apiFailureWithStatus(http.StatusBadRequest, apiErr)
+}
+
+// apiFailureWithStatus is apiFailure with the response's HTTP status.
+func apiFailureWithStatus(status int, apiErr error) error {
+	return &smithy.OperationError{ServiceID: "Device Farm", OperationName: "GetRemoteAccessSession",
+		Err: &awshttp.ResponseError{ResponseError: &smithyhttp.ResponseError{
+			Response: &smithyhttp.Response{Response: &http.Response{StatusCode: status}}, Err: apiErr}}}
 }
 
 func TestGivenRunningSessionWhenResolvedThenReturnsEndpointAndLabel(t *testing.T) {
@@ -125,30 +142,54 @@ func TestGivenResolvedSessionWhenReturnedThenEndpointCarriesNoPathParameter(t *t
 	assert.False(t, parsed.Query().Has("path"), "the resolved endpoint must not name a route")
 }
 
-func TestGivenSessionWithoutInteractiveEndpointWhenResolvedThenErrors(t *testing.T) {
-	tests := []struct {
-		name string
-		out  *devicefarm.GetRemoteAccessSessionOutput
-	}{
-		{name: "nil session", out: &devicefarm.GetRemoteAccessSessionOutput{}},
-		{
-			name: "nil endpoints",
-			out:  &devicefarm.GetRemoteAccessSessionOutput{RemoteAccessSession: &types.RemoteAccessSession{}},
-		},
-		{
-			name: "empty interactive endpoint",
-			out: &devicefarm.GetRemoteAccessSessionOutput{
-				RemoteAccessSession: &types.RemoteAccessSession{
-					Endpoints: &types.RemoteAccessEndpoints{InteractiveEndpoint: aws.String("")},
-				},
-			},
-		},
+func TestGivenASessionThatIsNotRunningWhenResolvedThenTheErrorCarriesItsClass(t *testing.T) {
+	withoutEndpoint := func(status types.ExecutionStatus) *types.RemoteAccessSession {
+		return &types.RemoteAccessSession{Status: status}
 	}
-
+	tests := []struct {
+		name     string
+		session  *types.RemoteAccessSession
+		want     error
+		wantText string
+	}{
+		{name: "nil session", want: ErrSessionNotFound, wantText: `remote access session "` + testSessionARN + `" not found`},
+		{name: "preparing", session: withoutEndpoint(types.ExecutionStatusPreparing), want: ErrNoEndpointYet,
+			wantText: "has no interactive endpoint yet (status PREPARING)"},
+		{name: "running with an empty endpoint", want: ErrNoEndpointYet, wantText: "(status RUNNING)",
+			session: &types.RemoteAccessSession{Status: types.ExecutionStatusRunning,
+				Endpoints: &types.RemoteAccessEndpoints{InteractiveEndpoint: aws.String("")}}},
+		{name: "completed", want: ErrSessionEnded, wantText: "has ended (status COMPLETED)",
+			session: &types.RemoteAccessSession{Status: types.ExecutionStatusCompleted,
+				Endpoints: &types.RemoteAccessEndpoints{InteractiveEndpoint: aws.String("wss://host.example/ws")}}},
+		{name: "stopping", session: withoutEndpoint(types.ExecutionStatusStopping), want: ErrSessionEnded, wantText: "has ended"},
+		{name: "completed on an Android device below the floor", want: ErrSessionEnded, wantText: "has ended (status COMPLETED)",
+			session: &types.RemoteAccessSession{Status: types.ExecutionStatusCompleted,
+				Device: &types.Device{Platform: types.DevicePlatformAndroid, Os: aws.String("8.0.0")}}},
+	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := newClient(&fakeGetter{out: tc.out}).GetSession(context.Background(), testSessionARN)
-			require.Error(t, err)
+			out := &devicefarm.GetRemoteAccessSessionOutput{RemoteAccessSession: tc.session}
+
+			_, err := newClient(&fakeGetter{out: out}).GetSession(context.Background(), testSessionARN)
+
+			assert.ErrorIs(t, err, tc.want)
+			assert.NotErrorIs(t, err, ErrUnsupportedDevice, "an ended session is ended whatever its device")
+			assert.ErrorContains(t, err, tc.wantText)
+		})
+	}
+}
+
+func TestGivenAnEndedSessionWhenResolvedThenTheErrorNamesTheStatusWord(t *testing.T) {
+	for _, status := range []types.ExecutionStatus{types.ExecutionStatusCompleted, types.ExecutionStatusStopping} {
+		t.Run(string(status), func(t *testing.T) {
+			out := &devicefarm.GetRemoteAccessSessionOutput{RemoteAccessSession: &types.RemoteAccessSession{Status: status}}
+
+			_, err := newClient(&fakeGetter{out: out}).GetSession(context.Background(), testSessionARN)
+
+			var ended *SessionEndedError
+			require.ErrorAs(t, err, &ended)
+			assert.Equal(t, string(status), ended.Status)
+			assert.Equal(t, testSessionARN, ended.SessionARN)
 		})
 	}
 }
@@ -161,10 +202,87 @@ func TestGivenAPIErrorWhenResolvedThenErrorPropagated(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestGivenAClassifiedAPIErrorWhenResolvedThenTheErrorCarriesItsSentinel(t *testing.T) {
+	tests := []struct {
+		name     string
+		apiErr   error
+		sentinel error
+	}{
+		{name: "access denied", apiErr: &smithy.GenericAPIError{Code: "AccessDeniedException", Message: "refused"}, sentinel: ErrAccessDenied},
+		{name: "not found", apiErr: &types.NotFoundException{Message: aws.String("refused")}, sentinel: ErrSessionNotFound},
+		{name: "argument", apiErr: &types.ArgumentException{Message: aws.String("refused")}, sentinel: ErrInvalidARN},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := newClient(&fakeGetter{err: apiFailure(tc.apiErr)}).GetSession(context.Background(), testSessionARN)
+
+			assert.ErrorIs(t, err, tc.sentinel)
+			assert.ErrorContains(t, err, "refused", "the SDK text stays inside the wrap")
+		})
+	}
+	throttled := apiFailure(&smithy.GenericAPIError{Code: "ThrottlingException", Message: "slow down"})
+	_, err := newClient(&fakeGetter{err: throttled}).GetSession(context.Background(), testSessionARN)
+	for _, sentinel := range []error{ErrAccessDenied, ErrSessionNotFound, ErrInvalidARN, ErrRequestRejected} {
+		assert.NotErrorIs(t, err, sentinel)
+	}
+}
+
+func TestGivenAFourHundredThatIsNoThrottleWhenResolvedThenTheErrorIsARejectedRequestWithItsCode(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		code   string
+	}{
+		{name: "expired token", status: http.StatusForbidden, code: "ExpiredTokenException"},
+		{name: "unknown key", status: http.StatusBadRequest, code: "UnrecognizedClientException"},
+		{name: "bad signature", status: http.StatusForbidden, code: "InvalidSignatureException"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			failure := apiFailureWithStatus(tc.status, &smithy.GenericAPIError{Code: tc.code, Message: "refused"})
+
+			_, err := newClient(&fakeGetter{err: failure}).GetSession(context.Background(), testSessionARN)
+
+			var rejected *RequestRejectedError
+			require.ErrorAs(t, err, &rejected)
+			assert.ErrorIs(t, err, ErrRequestRejected)
+			assert.Equal(t, tc.code, rejected.Code)
+			assert.Equal(t, failure, errors.Unwrap(rejected), "the SDK's chain stays reachable behind the class")
+			assert.ErrorContains(t, err, "request rejected ("+tc.code+"): ", "the code reads in place")
+			assert.ErrorContains(t, err, "refused", "the SDK text stays inside the wrap")
+		})
+	}
+}
+
+func TestGivenAThrottleAServerFaultOrATransportErrorWhenResolvedThenNoRejectionIsClassified(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "throttled 400", err: apiFailure(&smithy.GenericAPIError{Code: "ThrottlingException", Message: "slow down"})},
+		{name: "429 with an unknown code", err: apiFailureWithStatus(http.StatusTooManyRequests,
+			&smithy.GenericAPIError{Code: "SomethingNew", Message: "slow down"})},
+		{name: "429 with no error body", err: apiFailureWithStatus(http.StatusTooManyRequests, errors.New("too many requests"))},
+		{name: "server fault 503", err: apiFailureWithStatus(http.StatusServiceUnavailable,
+			&smithy.GenericAPIError{Code: "InternalFailure", Message: "down"})},
+		{name: "no response", err: &smithy.OperationError{ServiceID: "Device Farm", OperationName: "GetRemoteAccessSession",
+			Err: errors.New("dial tcp 127.0.0.1:1: connect: connection refused")}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := newClient(&fakeGetter{err: tc.err}).GetSession(context.Background(), testSessionARN)
+
+			require.Error(t, err)
+			assert.NotErrorIs(t, err, ErrRequestRejected, "a retry may well succeed")
+		})
+	}
+}
+
 func TestGivenSessionMissingDeviceFieldsWhenResolvedThenLabelDegradesGracefully(t *testing.T) {
 	// No device means no platform or version to check, so the device gate passes.
 	out := &devicefarm.GetRemoteAccessSessionOutput{
 		RemoteAccessSession: &types.RemoteAccessSession{
+			Status:    types.ExecutionStatusRunning,
 			Endpoints: &types.RemoteAccessEndpoints{InteractiveEndpoint: aws.String("wss://host.example/ws")},
 		},
 	}
@@ -254,7 +372,7 @@ func TestGivenUnusableARNWhenSessionFetchedThenFailsFastWithoutCallingTheAPI(t *
 
 			_, err := newClient(getter).GetSession(context.Background(), tc.arn)
 
-			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrInvalidARN)
 			assert.Zero(t, getter.calls, "an unusable ARN must be rejected before the API call")
 		})
 	}
@@ -281,6 +399,7 @@ func TestGivenAndroidDeviceBelowNineWhenSessionFetchedThenErrorNamesTheVersionAn
 			_, err := newClient(fake).GetSession(context.Background(), testSessionARN)
 
 			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrUnsupportedDevice, "the refusal must carry its class")
 			assert.Equal(t,
 				fmt.Sprintf("remote access session %q is on an Android %s device, but this client only supports Android 9 and above",
 					testSessionARN, osVersion),
@@ -382,6 +501,7 @@ func TestGivenNonAndroidDeviceWhenSessionFetchedThenErrorNamesThePlatformAndAndr
 				fmt.Sprintf("remote access session %q is on an %s device, but this client only supports Android devices",
 					testSessionARN, tc.wantName),
 				err.Error(), "the error must name the platform and that only Android is served")
+			assert.ErrorIs(t, err, ErrUnsupportedDevice, "the refusal must carry its class")
 			assert.Equal(t, 1, fake.calls, "the device is known only from the response, so the call must be made")
 		})
 	}

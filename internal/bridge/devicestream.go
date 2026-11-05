@@ -110,14 +110,14 @@ var deviceTransportRequest, _ = adbwire.EncodeRequest(deviceTransportService)
 // pipe starts. On any failure the connection is closed and nothing is returned, so the
 // caller closes the app socket with zero bytes written, as a real adb host does.
 //
-// ctx bounds the dial only; each prologue read is bounded by statusTimeout. warm is the
-// attachment's keeper; nil dials. target is the forward rule's device spec. activity is one
-// tracker per stream, never shared: a write blocked on one stream would otherwise hold every
-// sharer's refresher off its quiet window. It must not be nil, because every mark
-// dereferences it. errAdbConnClosed also covers a detach before the dial: the caller closes
-// the app socket as it does for a refusal.
+// ctx bounds the dial only; each prologue read is bounded by statusTimeout. features: the
+// attachment's parked websocket and refusal gate (see openSession); nil dials cold and asks
+// nothing. target is the forward rule's device spec. activity is one tracker per stream, never shared: a write blocked on one
+// stream would otherwise hold every sharer's refresher off its quiet window. It must not be nil,
+// because every mark dereferences it. errAdbConnClosed also covers a detach before the dial: the
+// caller closes the app socket as it does for a refusal.
 func openDeviceStream(ctx context.Context, dialer *WSDialer, device *ActiveDevice, arn string,
-	warm *warmSocketKeeper, target adbwire.AdbSpec, policy WSRefreshPolicy, statusTimeout time.Duration,
+	features *attachmentFeatures, target adbwire.AdbSpec, policy WSRefreshPolicy, statusTimeout time.Duration,
 	activity *activityTracker, logger *slog.Logger) (*adbConn, []byte, error) {
 	// target.String(), not a hardcoded "tcp:" prefix: the request the remote adb server
 	// must see is the spec the customer named, whatever its kind. The error arm is a guard,
@@ -127,25 +127,28 @@ func openDeviceStream(ctx context.Context, dialer *WSDialer, device *ActiveDevic
 		return nil, nil, fmt.Errorf("frame the device service request: %w", err)
 	}
 
-	// Read per open, never cached: the daemon renews the endpoint every few minutes and
-	// an accept lands long after the attach.
-	endpoint, ok := device.EndpointFor(arn)
-	if !ok {
-		return nil, nil, fmt.Errorf("%w: the device detached before the stream opened", errAdbConnClosed)
+	var leftover []byte
+	open := func(endpoint string, useParked bool) (*adbConn, error) {
+		var warm *warmSocketKeeper
+		if useParked {
+			warm = features.warmSockets()
+		}
+		ws, err := warm.adbSocket(ctx, dialer, endpoint)
+		if err != nil {
+			return nil, err
+		}
+		// Wrap before sending anything: the control frame must be read by this reader. The
+		// fresh-session fallback is refused; withTerminalSessionGone says why.
+		conn := newAdbConn(dialer, device, arn, RouteAdb, ws, policy, activity, logger,
+			withTerminalSessionGone(), withRefusalGate(features.refusalGate()))
+		if leftover, err = playPrologue(conn, deviceService, statusTimeout); err != nil {
+			conn.Close()
+			return nil, err
+		}
+		return conn, nil
 	}
-
-	ws, err := warm.adbSocket(ctx, dialer, endpoint)
+	conn, _, err := openSession(ctx, device, arn, features.refusalGate(), open, logger)
 	if err != nil {
-		return nil, nil, fmt.Errorf("dial device stream websocket: %w", err)
-	}
-	// Wrap before sending anything: the control frame must be read by this reader. The
-	// fresh-session fallback is refused; withTerminalSessionGone says why.
-	conn := newAdbConn(dialer, device, arn, RouteAdb, ws, policy, activity, logger,
-		withTerminalSessionGone())
-
-	leftover, err := playPrologue(conn, deviceService, statusTimeout)
-	if err != nil {
-		conn.Close()
 		return nil, nil, err
 	}
 	conn.logger.Debug("device stream open", "target", target, "session", conn.sessionUUID())

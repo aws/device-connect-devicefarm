@@ -14,12 +14,12 @@ import (
 // so a stream never reaches a device attached later, never outlives its attachment, and
 // never spends another attachment's slot.
 type deviceStreamOpener struct {
-	device *ActiveDevice
-	cfg    *featureConfig
-	arn    string
-	ctx    context.Context
-	budget *streamBudget     // the attachment's; see streamBudget
-	warm   *warmSocketKeeper // the attachment's; see warmSocketKeeper
+	device   *ActiveDevice
+	cfg      *featureConfig
+	arn      string
+	ctx      context.Context
+	budget   *streamBudget       // the attachment's; see streamBudget
+	features *attachmentFeatures // the attachment's, for its parked websocket and its refusal gate
 
 	refusals refusalThrottle
 }
@@ -56,7 +56,7 @@ func (opener *deviceStreamOpener) OpenStream(conn net.Conn, target adbwire.AdbSp
 	defer untrack()
 
 	activity := newActivityTracker(nil)
-	stream, leftover, err := openDeviceStream(streamCtx, opener.cfg.dialer, opener.device, opener.arn, opener.warm,
+	stream, leftover, err := openDeviceStream(streamCtx, opener.cfg.dialer, opener.device, opener.arn, opener.features,
 		target, opener.cfg.policy, opener.cfg.params.DeviceStreamStatusTimeout, activity, logger)
 	if err != nil {
 		// Zero bytes written either way, so the application sees a refused port rather

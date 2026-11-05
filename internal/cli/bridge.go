@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -137,7 +138,11 @@ func newBridgeStatusCommand(state *rootState) *cobra.Command {
 				return err
 			}
 			if resp.DeviceLabel == "" {
-				cmd.Printf("%s daemon is running (pid %d), no device attached\n", config.BinaryName, pid)
+				line := fmt.Sprintf("%s daemon is running (pid %d), no device attached", config.BinaryName, pid)
+				if note := lastDetachNote(resp, time.Now()); note != "" {
+					line += "; " + note
+				}
+				cmd.Println(line)
 			} else {
 				cmd.Printf("%s daemon is running (pid %d), device attached: %s\n", config.BinaryName, pid, resp.DeviceLabel)
 			}

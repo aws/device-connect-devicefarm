@@ -14,8 +14,8 @@ import (
 // deadline, so a caller that must return on time runs a probe on its own goroutine, as
 // runReverseClear does. No error carries the endpoint, so all are safe to log.
 
-// ErrSessionRefused wraps the server's ERROR to a fresh session's first frame with its reason.
-// Exported for ProbeSession's callers.
+// ErrSessionRefused is the server's ERROR to a fresh session's first frame; sessionRefusal carries
+// its reason. Exported for ProbeSession's callers.
 var ErrSessionRefused = errors.New("the remote access service refused the session")
 
 // replyWithin bounds one reply read: what is left of ctx's deadline, else the dial timeout. A
@@ -40,7 +40,7 @@ func readNewSession(ws WSConn, within time.Duration) (string, error) {
 	case armNewSession:
 		return frame.payload, nil
 	case armError:
-		return "", fmt.Errorf("%w: %s", ErrSessionRefused, frame.payload)
+		return "", &sessionRefusal{reason: frame.payload}
 	default:
 		// Only the arm: another arm's body is not this caller's to log.
 		return "", fmt.Errorf("no session was minted: unexpected control frame %s", frame.arm)

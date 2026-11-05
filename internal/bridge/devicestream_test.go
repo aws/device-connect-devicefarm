@@ -378,7 +378,7 @@ func TestGivenAnUnreachableOrSilentRemoteWhenOpenedThenTheOpenFailsWithoutAStrea
 			name: "the dial never connects",
 			// Port 1 on loopback needs root to bind, so the dial is refused at once.
 			endpoint: func(*testing.T) string { return "wss://127.0.0.1:1/adb" },
-			wantText: "dial device stream websocket",
+			wantText: "websocket dial",
 		},
 		{
 			name: "the remote takes the request and never answers",

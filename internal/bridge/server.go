@@ -217,25 +217,14 @@ func (s *AdbProxyServer) handleConn(ctx context.Context, tcp net.Conn) {
 	}
 	defer countedRequest.release()
 
-	// The attachment's parked websocket when one is live, else a dial of its own.
-	ws, err := forwarding.warmSockets().adbSocket(connCtx, s.dialer, info.Endpoint)
+	session, err := s.openClientSession(connCtx, tcp, clientOpening, info.ARN, forwarding, connLogger)
 	if err != nil {
-		connLogger.Error("failed to dial remote websocket; closing client", "error", err)
-		return
-	}
-
-	activity := newActivityTracker(nil)
-	session := newAdbConn(s.dialer, s.device, info.ARN, RouteAdb, ws, s.refresh, activity, connLogger)
-	refresher := func(done <-chan struct{}) {
-		runRefresher(connCtx, session, s.refresh, done)
-	}
-
-	if relayErr := relayRequest(connCtx, tcp, session, clientOpening.pending, clientOpening.selected); relayErr != nil {
-		connLogger.Error("failed to hand the client's request to the device; closing", "error", relayErr)
-		session.Close()
 		return
 	}
 	countedRequest.markRelayed()
+	refresher := func(done <-chan struct{}) {
+		runRefresher(connCtx, session, s.refresh, done)
+	}
 
 	// The reply's first status word settles a counted reverse request on its way to the client.
 	if pipeErr := pipeConn(connCtx, tcp, countedRequest.watching(session), refresher); pipeErr != nil {
@@ -243,4 +232,56 @@ func (s *AdbProxyServer) handleConn(ctx context.Context, tcp net.Conn) {
 		return
 	}
 	connLogger.Debug("connection closed cleanly")
+}
+
+// openClientSession dials the device (the parked websocket when live) and relays the client's
+// opening. A failed dial or a refused session goes through openSession. On a final failure a
+// client that sent a request reads the reason as its status word; bare bytes get the close alone.
+// Logs every failure; the caller only ends the connection.
+func (s *AdbProxyServer) openClientSession(ctx context.Context, tcp net.Conn, clientOpening opening, arn string,
+	forwarding *attachmentFeatures, logger *slog.Logger) (*adbConn, error) {
+	open := func(endpoint string, useParked bool) (*adbConn, error) {
+		var warm *warmSocketKeeper
+		if useParked {
+			warm = forwarding.warmSockets()
+		}
+		ws, err := warm.adbSocket(ctx, s.dialer, endpoint)
+		if err != nil {
+			return nil, err
+		}
+		session := newAdbConn(s.dialer, s.device, arn, RouteAdb, ws, s.refresh, newActivityTracker(nil), logger)
+		if err := relayRequest(ctx, tcp, session, clientOpening.pending, clientOpening.selected); err != nil {
+			session.Close()
+			return nil, fmt.Errorf("hand the client's request to the device: %w", err)
+		}
+		return session, nil
+	}
+	session, clientReason, err := openSession(ctx, s.device, arn, forwarding.refusalGate(), open, logger)
+	if err == nil {
+		return session, nil
+	}
+	// A detach by another connection's lookup, or by the refresh, cancels ctx mid-opening; its
+	// recorded reason is this client's too. A remove by the user records none.
+	if clientReason == "" && ctx.Err() != nil {
+		if last, detached := s.device.LastDetach(); detached {
+			clientReason = last.Reason
+		}
+	}
+	var deviceRefusal *statusFailure
+	switch {
+	case clientReason != "":
+		// A detach cancels ctx on its way here, so the reason goes out before any look at it.
+		logger.Warn("refused a local adb connection; answering with the reason", "reason", clientReason, "error", err)
+		if clientOpening.service != "" {
+			refuseOpening(tcp, clientReason, "could not answer a refused local adb connection", logger)
+		}
+	case errors.As(err, &deviceRefusal):
+		// sendOpening already gave the client adb's own FAIL.
+		logger.Warn("adb refused the request", "reason", deviceRefusal.reason)
+	case ctx.Err() != nil:
+		logger.Debug("the connection ended before the device session opened; closing client", "error", err)
+	default:
+		logger.Error("failed to open the device session; closing client", "error", err)
+	}
+	return nil, err
 }

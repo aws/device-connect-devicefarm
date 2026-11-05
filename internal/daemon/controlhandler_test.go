@@ -270,6 +270,8 @@ func (s *controlHandlerSuite) TestStatusReportsAttachedLabelAndARNWithReverseOff
 	s.Equal("Pixel 10 (OS 17)", resp.DeviceLabel)
 	s.Equal("arn:1", resp.ARN)
 	s.False(resp.ReverseEnabled, "the default config starts with reverse off")
+	s.Empty(resp.LastDetachReason, "an attached device reports no detach")
+	s.True(resp.LastDetachAt.IsZero())
 }
 
 func (s *controlHandlerSuite) TestStatusReportsReverseEnabledFromTheConfig() {
@@ -282,4 +284,31 @@ func (s *controlHandlerSuite) TestStatusReportsReverseEnabledFromTheConfig() {
 	s.Require().True(resp.OK)
 	s.True(resp.ReverseEnabled)
 	s.Empty(resp.ARN, "no device is attached")
+}
+
+func (s *controlHandlerSuite) TestStatusAndListCarryTheLastDetachWhileNoDeviceIsAttached() {
+	s.Require().True(s.handler(addReq("arn:1")).OK)
+	s.client.set("", errors.New("connection reset"))
+	s.False(s.mgr.refreshEndpointOnce(context.Background(), s.device), "the tick detaches")
+
+	for _, op := range []control.Op{control.OpStatus, control.OpList} {
+		resp := s.handler(control.Request{Op: op})
+
+		s.Require().True(resp.OK)
+		s.Contains(resp.LastDetachReason, "could not look up remote access session arn:1", string(op))
+		s.WithinDuration(time.Now(), resp.LastDetachAt, time.Minute, string(op))
+	}
+}
+
+func (s *controlHandlerSuite) TestStatusAndListCarryNoDetachAfterARemoveByTheUser() {
+	s.Require().True(s.handler(addReq("arn:1")).OK)
+	s.Require().True(s.handler(control.Request{Op: control.OpRemove}).OK)
+
+	for _, op := range []control.Op{control.OpStatus, control.OpList} {
+		resp := s.handler(control.Request{Op: op})
+
+		s.Require().True(resp.OK)
+		s.Empty(resp.LastDetachReason, string(op))
+		s.True(resp.LastDetachAt.IsZero(), string(op))
+	}
 }
