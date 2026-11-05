@@ -9,6 +9,7 @@ import (
 
 	"github.com/aws/device-connect-devicefarm/internal/bridge"
 	"github.com/aws/device-connect-devicefarm/internal/config"
+	"github.com/aws/device-connect-devicefarm/internal/session"
 )
 
 // refreshSuite exercises the daemon's single-tick endpoint refresh. SetupTest
@@ -61,6 +62,34 @@ func (s *refreshSuite) TestRefreshFailsDeviceDetached() {
 	s.False(refreshed)
 	_, present := s.device.Current()
 	s.False(present, "a session that can no longer be resolved must be detached")
+}
+
+func (s *refreshSuite) TestRefreshFailsTheDetachRecordsTheVerdictsReason() {
+	tests := []struct {
+		name       string
+		err        error
+		wantReason string
+	}{
+		{name: "a dead session", err: &session.SessionEndedError{SessionARN: "arn:1", Status: "COMPLETED"},
+			wantReason: "remote access session arn:1 has ended (COMPLETED); start a new session and run " +
+				"'devicefarm-connect device add --session-arn <new ARN>'"},
+		{name: "a transient failure still detaches on the tick", err: errors.New("connection reset"),
+			wantReason: "the daemon could not look up remote access session arn:1: connection reset; " +
+				"run 'devicefarm-connect device add --session-arn arn:1' to attach it again"},
+	}
+	for _, tc := range tests {
+		s.Run(tc.name, func() {
+			device := bridge.NewActiveDevice()
+			device.Set(bridge.DeviceInfo{ARN: "arn:1", Endpoint: testEndpoint, Label: "Pixel 10 (OS 17)"})
+			s.client.set("", tc.err)
+
+			s.False(s.mgr.refreshEndpointOnce(context.Background(), device))
+
+			last, detached := device.LastDetach()
+			s.Require().True(detached, "the tick records why it detached")
+			s.Equal(tc.wantReason, last.Reason)
+		})
+	}
 }
 
 func (s *refreshSuite) TestContextCancelledRefreshFailsDeviceKept() {

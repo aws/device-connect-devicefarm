@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -39,6 +40,32 @@ var sessionArnDescription = fmt.Sprintf("%s %s remote access session ARN", awsNa
 // remove) register it identically apart from the help text, so it lives here.
 func addSessionArnFlag(cmd *cobra.Command, state *rootState, help string) {
 	cmd.Flags().StringVar(&state.sessionARN, "session-arn", "", help)
+}
+
+// lastDetachNote words the daemon's record of its last detach for a no-device reply, or "" when
+// the reply carries none: "the last device detached <age> ago: <reason>".
+func lastDetachNote(response control.Response, now time.Time) string {
+	if response.LastDetachReason == "" {
+		return ""
+	}
+	return fmt.Sprintf("the last device detached %s ago: %s",
+		humanAge(now.Sub(response.LastDetachAt)), response.LastDetachReason)
+}
+
+// humanAge renders an age in its largest whole unit up to hours: "42 seconds", "1 minute".
+func humanAge(age time.Duration) string {
+	age = max(age, 0)
+	count, unit := int(age.Seconds()), "second"
+	switch {
+	case age >= time.Hour:
+		count, unit = int(age.Hours()), "hour"
+	case age >= time.Minute:
+		count, unit = int(age.Minutes()), "minute"
+	}
+	if count != 1 {
+		unit += "s"
+	}
+	return fmt.Sprintf("%d %s", count, unit)
 }
 
 // startBridge starts the bridge daemon. A package var so a test can swap in a fake

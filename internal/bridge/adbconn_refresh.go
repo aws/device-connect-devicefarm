@@ -87,7 +87,9 @@ func (c *adbConn) refresh(ctx context.Context, gate func() bool) error {
 		if errors.Is(err, ErrSessionGone) {
 			// Both take over the held lock and release it.
 			if c.terminalSessionGone {
-				return c.endOnSessionGoneLocked(refreshFailed, err)
+				err = c.endOnSessionGoneLocked(refreshFailed, err)
+				go c.lookUpGoneSession()
+				return err
 			}
 			return c.restartAsNewSessionLocked(ctx, nextReady, refreshFailed)
 		}
@@ -221,6 +223,18 @@ func (connection *adbConn) endOnSessionGoneLocked(refreshFailed chan struct{}, c
 	return cause
 }
 
+// lookUpGoneSession asks the refusal gate what became of a session the server refused to resume,
+// once the connection has ended. A dead session detaches the device; a kept one gets no redial,
+// the stream is over. On its own goroutine, so the refresher exits with the pipe.
+func (connection *adbConn) lookUpGoneSession() {
+	if connection.refusals == nil {
+		return
+	}
+	if _, reason := connection.refusals.consult(connection.arn); reason != "" {
+		connection.logger.Warn("the remote session is gone; detached the device", "reason", reason)
+	}
+}
+
 // restartAsNewSessionLocked opens a brand-new session after a refused reattach. Called
 // with the seam held; releases it. Lossy: in-flight adb stream state is gone, so it warns.
 func (c *adbConn) restartAsNewSessionLocked(ctx context.Context, nextReady, refreshFailed chan struct{}) error {
@@ -349,6 +363,11 @@ func (c *adbConn) reconnectReactively(readErr error) bool {
 			return false
 		}
 		c.failRefreshLocked(refreshFailed)
+		// The dead predecessor returns to service only to fail its next read, so the stream is
+		// over: ask about the session as refresh does.
+		if c.terminalSessionGone && errors.Is(err, ErrSessionGone) {
+			go c.lookUpGoneSession()
+		}
 		return false
 	}
 

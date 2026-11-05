@@ -260,17 +260,23 @@ func (keeper *warmSocketKeeper) take() *warmSocket {
 }
 
 // adbSocket returns the parked socket when it is usable, else dials on the adb route. A dead
-// ctx gets its error, as a dial would return it, and leaves the slot alone. Nil-safe: an
-// attachment without a keeper dials.
+// ctx gets its error, as a dial would return it, and leaves the slot alone. A failed dial, the
+// taken socket's late one too, is a dialFailure. Nil-safe: an attachment without a keeper dials.
 func (keeper *warmSocketKeeper) adbSocket(ctx context.Context, dialer *WSDialer, endpoint string) (WSConn, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	dial := func() (WSConn, error) {
+		ws, err := dialer.Dial(ctx, endpoint, RouteAdb)
+		if err != nil {
+			return nil, &dialFailure{cause: err}
+		}
+		return ws, nil
+	}
 	if keeper != nil {
 		if socket := keeper.take(); socket != nil {
-			redial := func() (WSConn, error) { return dialer.Dial(ctx, endpoint, RouteAdb) }
-			return &takenSocket{redial: redial, logger: keeper.cfg.logger, current: socket}, nil
+			return &takenSocket{redial: dial, logger: keeper.cfg.logger, current: socket}, nil
 		}
 	}
-	return dialer.Dial(ctx, endpoint, RouteAdb)
+	return dial()
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -72,6 +73,9 @@ func newDeviceListCommand(state *rootState) *cobra.Command {
 			}
 			if len(resp.Devices) == 0 {
 				cmd.Println("no device attached; use 'device add' to connect one")
+				if note := lastDetachNote(resp, time.Now()); note != "" {
+					cmd.Println(note)
+				}
 				return nil
 			}
 			for _, attached := range resp.Devices {

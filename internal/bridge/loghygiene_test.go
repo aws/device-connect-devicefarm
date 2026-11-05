@@ -46,7 +46,7 @@ func TestGivenAPresignedEndpointThatRefusesTheDialWhenEachSiteFailsThenTheLogCar
 		failureLine string
 		run         func(t *testing.T, logger *slog.Logger)
 	}{
-		{name: "local adb connection", failureLine: `msg="failed to dial remote websocket; closing client"`,
+		{name: "local adb connection", failureLine: `msg="failed to open the device session; closing client"`,
 			run: func(t *testing.T, logger *slog.Logger) {
 				server, err := NewAdbProxyServer("127.0.0.1", 0, testPolicy(), newTestDialer(testWait),
 					deviceFor(testsupport.PresignedUnreachableEndpoint), logger)

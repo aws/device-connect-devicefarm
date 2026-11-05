@@ -10,6 +10,8 @@
 // stays credential-free.
 package control
 
+import "time"
+
 // Op is the control operation a request carries.
 type Op string
 
@@ -23,10 +25,10 @@ const (
 	// none, whichever device is attached (one at a time today).
 	OpRemove Op = "remove"
 	// OpStatus reports whether a device is connected, its label, and the daemon's
-	// listen port.
+	// listen port; with no device, why and when the daemon last detached one on its own.
 	OpStatus Op = "status"
 	// OpList reports every connected device, at most one today, each with its
-	// session ARN.
+	// session ARN; with none, the last detach as OpStatus does.
 	OpList Op = "list"
 	// OpShutdown stops the daemon after replying.
 	OpShutdown Op = "shutdown"
@@ -45,15 +47,20 @@ type Request struct {
 // daemon's resulting state so the CLI can print the listening line without a
 // second round trip. Devices is the OpList reply: one entry per connected device. An
 // OpList reply carries no Port. OpStatus also fills ARN (the attached session) and
-// ReverseEnabled (--allow-adb-reverse was set).
+// ReverseEnabled (--allow-adb-reverse was set). LastDetachReason and LastDetachAt say why
+// and when the daemon last detached a device on its own (a session gone or ended); OpStatus
+// and OpList carry them while no device is attached, and a remove by the user leaves them
+// empty.
 type Response struct {
-	OK             bool             `json:"ok"`
-	Error          string           `json:"error,omitempty"`
-	DeviceLabel    string           `json:"deviceLabel,omitempty"`
-	Port           int              `json:"port,omitempty"`
-	Devices        []AttachedDevice `json:"devices,omitempty"`
-	ARN            string           `json:"arn,omitempty"`
-	ReverseEnabled bool             `json:"reverseEnabled,omitempty"`
+	OK               bool             `json:"ok"`
+	Error            string           `json:"error,omitempty"`
+	DeviceLabel      string           `json:"deviceLabel,omitempty"`
+	Port             int              `json:"port,omitempty"`
+	Devices          []AttachedDevice `json:"devices,omitempty"`
+	ARN              string           `json:"arn,omitempty"`
+	ReverseEnabled   bool             `json:"reverseEnabled,omitempty"`
+	LastDetachReason string           `json:"lastDetachReason,omitempty"`
+	LastDetachAt     time.Time        `json:"lastDetachAt,omitzero"`
 }
 
 // AttachedDevice is one connected device in an OpList reply.

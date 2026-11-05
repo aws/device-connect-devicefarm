@@ -275,3 +275,27 @@ func TestGivenAServerCloseWhenTheSessionIsReattachedThenOnlyAnEndedSessionIsRefu
 		})
 	}
 }
+
+func TestGivenRefusedNewSessionsWhenFreshSessionsOpenThenTheFirstOnesGetTheErrorAndTheRestAreAccepted(t *testing.T) {
+	mock := NewSessionMockWSS(t, SessionMockConfig{RefuseNewSessions: 1})
+	openFresh := func() []byte {
+		ws := dialTestWSS(t, mock.URL)
+		ws.PayloadType = websocket.BinaryFrame
+		require.NoError(t, websocket.Message.Send(ws, []byte("000chost:version")))
+		return firstFrame(t, ws)
+	}
+
+	assert.Equal(t, NewSessionRefusalReason, assertControlFrame(t, openFresh(), controlStatusError),
+		"the first fresh session is refused with the server's text")
+	assertControlFrame(t, openFresh(), controlStatusNew)
+	assert.Equal(t, 1, mock.NewSessionsRefused())
+	assert.Equal(t, 1, mock.SessionsOpened(), "a refused session is never minted")
+
+	// Every later fresh session, until the count is reset.
+	mock.RefuseNewSessions(-1)
+	assertControlFrame(t, openFresh(), controlStatusError)
+	assertControlFrame(t, openFresh(), controlStatusError)
+	mock.RefuseNewSessions(0)
+	assertControlFrame(t, openFresh(), controlStatusNew)
+	assert.Equal(t, 3, mock.NewSessionsRefused())
+}

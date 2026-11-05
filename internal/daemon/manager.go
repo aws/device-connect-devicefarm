@@ -255,6 +255,7 @@ func (m *DaemonManager) RunForeground(ctx context.Context) error {
 	dialer := m.newDialer()
 	device := bridge.NewActiveDevice(
 		bridge.WithAttachmentFeatures(dialer, m.refreshPolicy(), m.attachmentParams(), m.logger),
+		bridge.WithRefusalHandler(m.refusalHandler(ctx)),
 	)
 	// Detaching on the way out closes the attachment's forward listeners, severs its
 	// streams and closes its notifier, which nothing else does once the accept loop has
@@ -380,7 +381,8 @@ func runPeriodic(ctx context.Context, interval time.Duration, tick func()) {
 //
 // status reports the listen port and the attached device, when there is one. list
 // reports each attached device with its session ARN; the list is empty when none is
-// attached.
+// attached. With no device, both carry the daemon's last detach of its own, when there
+// was one since the last add.
 //
 // shutdown cancels the daemon context, then replies.
 //
@@ -445,17 +447,20 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 
 		case control.OpStatus:
 			reply := control.Response{OK: true, Port: m.config.ListenPort, ReverseEnabled: m.config.ReverseEnabled}
-			if current, present := device.Current(); present {
-				reply.DeviceLabel, reply.ARN = current.Label, current.ARN
+			current, present := device.Current()
+			if !present {
+				return withLastDetach(reply, device)
 			}
+			reply.DeviceLabel, reply.ARN = current.Label, current.ARN
 			return reply
 
 		case control.OpList:
-			resp := control.Response{OK: true}
-			if current, present := device.Current(); present {
-				resp.Devices = []control.AttachedDevice{{SessionARN: current.ARN, Label: current.Label}}
+			current, present := device.Current()
+			if !present {
+				return withLastDetach(control.Response{OK: true}, device)
 			}
-			return resp
+			return control.Response{OK: true,
+				Devices: []control.AttachedDevice{{SessionARN: current.ARN, Label: current.Label}}}
 
 		case control.OpShutdown:
 			m.logger.Info("shutdown requested over control channel")
@@ -466,6 +471,14 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 			return control.Response{OK: false, Error: fmt.Sprintf("unknown control op %q", req.Op)}
 		}
 	}
+}
+
+// withLastDetach adds the daemon's last detach of its own to a no-device reply.
+func withLastDetach(resp control.Response, device *bridge.ActiveDevice) control.Response {
+	if last, detached := device.LastDetach(); detached {
+		resp.LastDetachReason, resp.LastDetachAt = last.Reason, last.At
+	}
+	return resp
 }
 
 // resolveForAttach resolves sessionARN, then fetches the device's adb serial from the
@@ -485,6 +498,91 @@ func (m *DaemonManager) resolveForAttach(ctx context.Context, dialer *bridge.WSD
 	return resolved, serial, nil
 }
 
+// lookUpSession resolves sessionARN under resolveTimeout and judges the answer for the attached
+// device: a RUNNING session carries its renewed endpoint; a failure carries the one-line reason
+// the user gets and whether the session is gone for good (see detachReason). The refresh tick
+// and the refusal handler share it, and differ only in what they do with a kept device.
+func (m *DaemonManager) lookUpSession(ctx context.Context, sessionARN string) (bridge.SessionVerdict, error) {
+	resolveCtx, cancel := context.WithTimeout(ctx, resolveTimeout)
+	defer cancel()
+	resolved, err := m.remoteAccessClient.GetSession(resolveCtx, sessionARN)
+	if err != nil {
+		reason, detach := detachReason(sessionARN, err)
+		return bridge.SessionVerdict{Detach: detach, Reason: reason}, err
+	}
+	return bridge.SessionVerdict{Endpoint: resolved.Endpoint, Label: resolved.Label}, nil
+}
+
+// reattachCommand is how the detach reasons tell the user to attach a session again.
+const reattachCommand = "run '" + config.BinaryName + " device add --session-arn"
+
+// classifiedFailures are the lookup failures that detach beside not found and ended: the daemon
+// can no longer read the session, and a retry would not change that.
+var classifiedFailures = []error{session.ErrAccessDenied, session.ErrInvalidARN, session.ErrUnsupportedDevice,
+	session.ErrNoEndpointYet, session.ErrRequestRejected}
+
+// detachReason words one failed lookup for the user and says whether the device must go. Not
+// found, ended, or unreadable (classifiedFailures) detaches. Anything else keeps the device: the
+// next lookup may succeed.
+func detachReason(sessionARN string, err error) (reason string, detach bool) {
+	switch {
+	case errors.Is(err, session.ErrSessionNotFound):
+		return fmt.Sprintf("remote access session %s no longer exists; start a new session and %s <new ARN>'",
+			sessionARN, reattachCommand), true
+	case errors.Is(err, session.ErrSessionEnded):
+		return fmt.Sprintf("remote access session %s %s; start a new session and %s <new ARN>'",
+			sessionARN, endedState(err), reattachCommand), true
+	}
+	for _, class := range classifiedFailures {
+		if errors.Is(err, class) {
+			return fmt.Sprintf("the daemon can no longer read remote access session %s: %s; restart the bridge from a shell with working AWS credentials",
+				sessionARN, classCause(class, err)), true
+		}
+	}
+	return fmt.Sprintf("the daemon could not look up remote access session %s: %v; %s %s' to attach it again",
+		sessionARN, err, reattachCommand, sessionARN), false
+}
+
+// classCause words a classified failure for the user: the class, plus the service's error code
+// when the request was rejected.
+func classCause(class, err error) string {
+	var rejected *session.RequestRejectedError
+	if errors.As(err, &rejected) {
+		return fmt.Sprintf("%v (%s)", class, rejected.Code)
+	}
+	return class.Error()
+}
+
+// endedState words an ended session with its status word when the error carries one.
+func endedState(err error) string {
+	var ended *session.SessionEndedError
+	switch {
+	case !errors.As(err, &ended):
+		return "has ended"
+	case ended.Status == "STOPPING":
+		return "is stopping (STOPPING)"
+	}
+	return "has ended (" + ended.Status + ")"
+}
+
+// refusalHandler is the bridge's lookup after a refused fresh adb connection. It runs under the
+// daemon context, not the connection's: a detach by one refusal must not cut short the lookup
+// of another refused behind it, which gets the same reason.
+func (m *DaemonManager) refusalHandler(ctx context.Context) bridge.RefusalHandler {
+	return func(sessionARN string) bridge.SessionVerdict {
+		verdict, err := m.lookUpSession(ctx, sessionARN)
+		switch {
+		case err == nil:
+			m.logger.Info("a refused adb connection found the session running; endpoint refreshed", "arn", sessionARN)
+		case verdict.Detach:
+			m.logger.Warn("a refused adb connection found the session gone; detaching", "arn", sessionARN, "error", err)
+		default:
+			m.logger.Warn("a refused adb connection could not look the session up; keeping the device", "arn", sessionARN, "error", err)
+		}
+		return verdict
+	}
+}
+
 // refreshEndpointOnce performs a single refresh: if a device is attached, it
 // re-resolves the session and updates the stored endpoint in place. Any error the
 // SDK surfaces after its retry budget detaches the device: its session can no
@@ -494,6 +592,7 @@ func (m *DaemonManager) resolveForAttach(ctx context.Context, dialer *bridge.WSD
 // expiry mid-session, e.g. ambient temporary credentials lapsing, presents this
 // way) is the deliberate trade-off: surface a dead session promptly for a
 // single-user local tool rather than keep a device that can no longer be renewed.
+// The verdict only words the reason the detach records; it does not decide it here.
 // The ARN guards on UpdateEndpoint and ClearMatching keep a refresh that races a
 // remove or a switch to a DIFFERENT device from disturbing the newer device; a same-ARN remove-then-re-add inside
 // the refresh window is an accepted limitation (see ClearMatching). It returns
@@ -504,23 +603,21 @@ func (m *DaemonManager) refreshEndpointOnce(ctx context.Context, device *bridge.
 		return false
 	}
 
-	resolveCtx, cancel := context.WithTimeout(ctx, resolveTimeout)
-	defer cancel()
-	resolved, err := m.remoteAccessClient.GetSession(resolveCtx, current.ARN)
+	verdict, err := m.lookUpSession(ctx, current.ARN)
 	if err != nil {
 		// Do not detach on a cancelled context: that is the daemon shutting down,
 		// not a dead session, and the device state is about to be torn down anyway.
 		if ctx.Err() != nil {
 			return false
 		}
-		if _, cleared := device.ClearMatching(current.ARN); cleared {
+		if _, cleared := device.ClearMatching(current.ARN, verdict.Reason); cleared {
 			m.logger.Warn("session refresh failed; detached device", "error", err, "device", current.Label)
 		}
 		return false
 	}
 
-	if device.UpdateEndpoint(current.ARN, resolved.Endpoint, resolved.Label) {
-		m.logger.Debug("session endpoint refreshed", "device", resolved.Label)
+	if device.UpdateEndpoint(current.ARN, verdict.Endpoint, verdict.Label) {
+		m.logger.Debug("session endpoint refreshed", "device", verdict.Label)
 		return true
 	}
 	// The device changed under us (removed or replaced) between the read and the
