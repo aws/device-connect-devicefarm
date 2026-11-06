@@ -14,6 +14,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/config"
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/daemon"
+	"github.com/aws/device-connect-devicefarm/internal/failure"
 )
 
 // runRoot executes the command tree with the given args in a fresh temp runtime
@@ -31,6 +32,11 @@ func isolateRuntimeDir(t *testing.T, dir string) {
 	t.Helper()
 	t.Setenv("XDG_RUNTIME_DIR", dir)
 	t.Setenv("LocalAppData", dir)
+}
+
+// newRootCommand assembles the command tree over a fresh default configuration.
+func newRootCommand() *cobra.Command {
+	return newRootCommandWithState(&rootState{cfg: config.Default()})
 }
 
 // execRoot executes the command tree with the given args against the current
@@ -151,8 +157,11 @@ func TestGivenHelpSubcommandWhenInvokedAloneThenPrintsTheRootHelp(t *testing.T) 
 func TestGivenHelpSubcommandWhenInvokedForAnUnknownCommandThenErrors(t *testing.T) {
 	_, err := runRoot(t, "help", "bogus")
 
+	var explained *failure.Explained
+	require.ErrorAs(t, err, &explained)
 	// Literal on purpose: a changed BinaryName must fail here.
-	require.EqualError(t, err, `unknown command "bogus" for "devicefarm-connect"`)
+	assert.EqualError(t, explained.Cause, `unknown command "bogus" for "devicefarm-connect"`)
+	assert.Equal(t, "run 'devicefarm-connect --help' for usage", explained.Fix)
 }
 
 func TestGivenDaemonSubcommandWhenInspectedThenIsHidden(t *testing.T) {
@@ -311,6 +320,17 @@ func TestGivenInvalidPortWhenBridgeStartInvokedThenValidationFails(t *testing.T)
 	require.Error(t, err)
 }
 
+// pinAWSEnv makes the AWS config load behave the same on any host: static credentials, no
+// profile and no config file, so a stray AWS_PROFILE cannot make the SDK demand that profile.
+func pinAWSEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("AWS_PROFILE", "")
+	t.Setenv("AWS_CONFIG_FILE", filepath.Join(t.TempDir(), "no-config"))
+	t.Setenv("AWS_DEFAULTS_MODE", "legacy")
+}
+
 // newTestState builds a rootState with default config and real runtime paths under
 // a temp runtime dir, so the manager constructors can be exercised directly.
 func newTestState(t *testing.T) *rootState {
@@ -336,16 +356,10 @@ func TestGivenLifecycleManagerWhenRunForegroundThenRefusesWithoutRemoteAccessCli
 
 func TestGivenPinnedEnvWhenDaemonManagerBuiltThenBuildsTheAwsClientWithoutError(t *testing.T) {
 	// newDaemonManager builds the AWS client eagerly, so the daemon body starts with
-	// one already in hand rather than loading config on the attach path. The env is
-	// pinned so the config load behaves the same on any host (a stray AWS_PROFILE
-	// would otherwise make the SDK demand that profile exist).
+	// one already in hand rather than loading config on the attach path.
 	state := newTestState(t)
 	state.cfg.ListenPort = 0 // fails config validation, so RunForeground stops early
-	t.Setenv("AWS_ACCESS_KEY_ID", "test")
-	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
-	t.Setenv("AWS_PROFILE", "")
-	t.Setenv("AWS_CONFIG_FILE", filepath.Join(t.TempDir(), "no-config"))
-	t.Setenv("AWS_DEFAULTS_MODE", "legacy")
+	pinAWSEnv(t)
 
 	manager, err := state.newDaemonManager(context.Background())
 

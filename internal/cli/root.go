@@ -3,14 +3,15 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
-	"os"
 
 	"github.com/spf13/cobra"
 
 	"github.com/aws/device-connect-devicefarm/internal/config"
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/daemon"
+	"github.com/aws/device-connect-devicefarm/internal/failure"
 	"github.com/aws/device-connect-devicefarm/internal/session"
 	"github.com/aws/device-connect-devicefarm/internal/version"
 )
@@ -23,17 +24,46 @@ type rootState struct {
 	cfg        config.ProxyConfig
 	sessionARN string
 	paths      daemon.Paths
+	// commandLineAccepted flips in PersistentPreRunE, which cobra runs after it
+	// has parsed the flags and checked the arguments. A failure before that is a
+	// bad command, flag or argument.
+	commandLineAccepted bool
 }
 
-// Execute builds the command tree and runs it. It is the single entrypoint
-// called from main.
-func Execute() error {
-	return newRootCommand().Execute()
+// Execute runs the command tree on the process arguments and returns the exit
+// code for main.
+func Execute() int {
+	state := &rootState{cfg: config.Default()}
+	return execute(newRootCommandWithState(state), state)
 }
 
-// newRootCommand assembles the command tree over a fresh default configuration.
-func newRootCommand() *cobra.Command {
-	return newRootCommandWithState(&rootState{cfg: config.Default()})
+// execute runs root and writes its failure to the root's error stream as
+// problem, causes and fix. A failure before PersistentPreRunE (a bad command,
+// flag or argument) gets the command's help as its fix. The daemon body's
+// stderr is its logfile, so its failure is a timestamped log line instead.
+func execute(root *cobra.Command, state *rootState) int {
+	cmd, err := root.ExecuteC()
+	if err == nil {
+		return 0
+	}
+	if !state.commandLineAccepted {
+		err = usageError(cmd, err)
+	}
+	if cmd.Name() == daemon.DaemonSubcommand {
+		slog.Error(config.BinaryName+" daemon failed", "error", err)
+	} else {
+		failure.Write(root.ErrOrStderr(), config.BinaryName, err)
+	}
+	return 1
+}
+
+// usageError attaches the command's help to a command-line mistake. A hidden
+// command's name stays hidden: its fix names the root.
+func usageError(cmd *cobra.Command, err error) error {
+	if cmd.Hidden {
+		cmd = cmd.Root()
+	}
+	return failure.WithFix(err, fmt.Sprintf("run '%s --help' for usage", cmd.CommandPath()))
 }
 
 // newRootCommandWithState assembles the cobra command tree over state: a root that
@@ -63,11 +93,12 @@ func newRootCommandWithState(state *rootState) *cobra.Command {
 		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
 		// Initialize logging and resolve runtime paths once, before any
 		// subcommand runs.
-		PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
-			initLogging(state.cfg.Debug)
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			state.commandLineAccepted = true
+			initLogging(cmd.ErrOrStderr(), state.cfg.Debug)
 			paths, err := daemon.DefaultPaths()
 			if err != nil {
-				return err
+				return &failure.Explained{Problem: "cannot use the working directory", Cause: err}
 			}
 			// Resolve the effective logfile once: an explicit --log overrides the
 			// default runtime-dir logfile. Done here so newManager stays a pure
@@ -102,7 +133,7 @@ func hiddenHelpCommand(root *cobra.Command) *cobra.Command {
 		RunE: func(_ *cobra.Command, args []string) error {
 			target, _, err := root.Find(args)
 			if err != nil {
-				return err
+				return usageError(root, err)
 			}
 			// cobra adds --help and --version lazily; its own help command does the same.
 			target.InitDefaultHelpFlag()
@@ -153,16 +184,15 @@ func bindReverseFlag(cmd *cobra.Command, cfg *config.ProxyConfig) {
 		"allow device-originated reverse connections ('adb reverse'); off by default")
 }
 
-// initLogging installs the global slog logger, writing human-readable text to
-// stderr at debug level when debug is set and info otherwise. Stderr (not stdout)
-// is used so the detached daemon's logs land in the redirected logfile and never
-// intermix with proxied data.
-func initLogging(debug bool) {
+// initLogging installs the global slog text handler on errOut at info level,
+// debug with --debug. errOut is the command's stderr, so logs never mix with
+// command output on stdout; a test passes a buffer.
+func initLogging(errOut io.Writer, debug bool) {
 	level := slog.LevelInfo
 	if debug {
 		level = slog.LevelDebug
 	}
-	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
+	handler := slog.NewTextHandler(errOut, &slog.HandlerOptions{Level: level})
 	slog.SetDefault(slog.New(handler))
 }
 

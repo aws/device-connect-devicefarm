@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/aws/device-connect-devicefarm/internal/control"
+	"github.com/aws/device-connect-devicefarm/internal/failure"
 )
 
 // newDeviceCommand groups the device subcommands under one parent: "device add"
@@ -47,7 +48,7 @@ func newDeviceAddCommand(state *rootState) *cobra.Command {
 		Long:  short + ".\n\n" + bridgeAutoStartNote,
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return attachToDaemon(cmd, state)
+			return attachDevice(cmd, state, failure.Explained{Problem: "could not attach the device"})
 		},
 	}
 	addSessionArnFlag(cmd, state, sessionArnDescription)
@@ -71,7 +72,7 @@ func newDeviceListCommand(state *rootState) *cobra.Command {
 				return err
 			}
 			if !resp.OK {
-				return fmt.Errorf("list devices: %s", resp.Error)
+				return &failure.Explained{Problem: "could not list the devices", Cause: errors.New(resp.Error)}
 			}
 			if len(resp.Devices) == 0 {
 				cmd.Println("no device attached; use 'device add' to connect one")
@@ -132,18 +133,12 @@ func newDeviceRemoveCommand(state *rootState) *cobra.Command {
 		Long:  short + ".\n\nThis command needs a running bridge daemon.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			resp, err := state.controlClient().Send(control.Request{
-				Op:  control.OpRemove,
-				ARN: state.sessionARN,
-			})
+			resp, err := state.send(control.Request{Op: control.OpRemove, ARN: state.sessionARN})
 			if err != nil {
-				if daemonNotRunning(err) {
-					return errors.New(notListeningMessage)
-				}
 				return err
 			}
 			if !resp.OK {
-				return fmt.Errorf("remove device: %s", resp.Error)
+				return &failure.Explained{Problem: "could not detach the device", Cause: errors.New(resp.Error)}
 			}
 
 			cmd.Printf("Removed %s from the bridge\n", resp.DeviceLabel)

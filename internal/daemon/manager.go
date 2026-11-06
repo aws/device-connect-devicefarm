@@ -13,6 +13,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/bridge"
 	"github.com/aws/device-connect-devicefarm/internal/config"
 	"github.com/aws/device-connect-devicefarm/internal/control"
+	"github.com/aws/device-connect-devicefarm/internal/failure"
 	"github.com/aws/device-connect-devicefarm/internal/session"
 )
 
@@ -133,7 +134,7 @@ func (m *DaemonManager) Start() error {
 		// kill it so it cannot wedge the next start; a failure here is tolerated
 		// because the process may already be gone.
 		m.killOrphan(pid)
-		return fmt.Errorf("daemon failed to start (check %q): %w", m.paths.LogFile, err)
+		return failure.WithFix(err, "read the daemon log: "+m.paths.LogFile)
 	}
 	m.logger.Info("daemon started", "pid", pid, "logfile", m.paths.LogFile)
 	return nil
@@ -154,10 +155,11 @@ func (m *DaemonManager) Stop() error {
 		// Windows fails here for a dead pid; Unix never does. The lock decides:
 		// released means exited, held means out of reach.
 		if m.stillRunning(pid) {
+			lookupFailed := fmt.Errorf("find daemon process %d: %w", pid, err)
 			if errors.Is(err, os.ErrPermission) {
-				return fmt.Errorf("find daemon process %d: %w; stop it from an elevated shell", pid, err)
+				return failure.WithFix(lookupFailed, "stop it from an elevated shell")
 			}
-			return fmt.Errorf("find daemon process %d: %w", pid, err)
+			return lookupFailed
 		}
 		m.logger.Info("daemon exited before shutdown was sent", "pid", pid)
 		return nil

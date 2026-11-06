@@ -158,7 +158,7 @@ func TestGivenNoControlSocketWhenAddDeviceInvokedThenReturnsNotListening(t *test
 
 	_, err := execRoot(t, "device", "add", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
 
-	require.EqualError(t, err, notListeningMessage)
+	require.ErrorIs(t, err, errNotListening)
 }
 
 func TestGivenNoBridgeWhenAddDeviceInvokedThenStartsTheBridgeAndAttaches(t *testing.T) {
@@ -177,13 +177,13 @@ func TestGivenNoBridgeWhenAddDeviceInvokedThenStartsTheBridgeAndAttaches(t *test
 
 func TestGivenBridgeStartFailsWhenAddDeviceInvokedThenErrorsWithTheStartFailure(t *testing.T) {
 	shortRuntimeDir(t)
-	startFailure := errors.New(`daemon failed to start (check "/tmp/d.log")`)
+	startFailure := errors.New("spawn daemon: exec format error")
 	stubBridgeStart(t, func(*daemon.DaemonManager) error { return startFailure })
 
 	out, err := execRoot(t, "device", "add", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
 
 	require.ErrorIs(t, err, startFailure)
-	assert.ErrorContains(t, err, "start the bridge")
+	assert.ErrorContains(t, err, "could not start the bridge daemon")
 	assert.NotContains(t, out.String(), "listening on port")
 }
 
@@ -240,7 +240,7 @@ func TestGivenNoBridgeWhenRemoveDeviceInvokedThenReturnsNotListeningAndStartsNon
 
 	out, err := execRoot(t, "device", "remove", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
 
-	require.EqualError(t, err, notListeningMessage)
+	require.ErrorIs(t, err, errNotListening)
 	assert.NotContains(t, out.String(), "starting it now")
 }
 
@@ -251,7 +251,7 @@ func TestGivenNoControlSocketWhenRemoveDeviceInvokedThenReturnsNotListening(t *t
 
 	_, err := execRoot(t, "device", "remove", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
 
-	require.EqualError(t, err, notListeningMessage)
+	require.ErrorIs(t, err, errNotListening)
 }
 
 func TestGivenDaemonClosesWithoutReplyWhenRemoveDeviceInvokedThenSurfacesTransportError(t *testing.T) {
@@ -282,6 +282,7 @@ func TestGivenDaemonClosesWithoutReplyWhenRemoveDeviceInvokedThenSurfacesTranspo
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, control.ErrDaemonNotRunning)
 	assert.ErrorIs(t, err, io.EOF)
+	assert.ErrorContains(t, err, "the bridge daemon did not answer: read control response")
 }
 
 func TestGivenRunningDaemonWithDeviceWhenListDevicesInvokedThenPrintsOneLinePerDevice(t *testing.T) {
@@ -313,6 +314,16 @@ func TestGivenRunningDaemonWithoutDeviceWhenListDevicesInvokedThenSaysNoDevice(t
 
 	require.NoError(t, err)
 	assert.Equal(t, "no device attached; use 'device add' to connect one\n", out.String())
+}
+
+func TestGivenDaemonRefusesListWhenListDevicesInvokedThenErrorsWithDaemonReason(t *testing.T) {
+	fakeDaemon(t, func(control.Request) control.Response {
+		return control.Response{OK: false, Error: "unknown control op \"list\""}
+	})
+
+	_, err := execRoot(t, "device", "list")
+
+	require.ErrorContains(t, err, "could not list the devices: unknown control op \"list\"")
 }
 
 func TestGivenNoBridgeWhenListDevicesInvokedThenStartsTheBridge(t *testing.T) {
@@ -424,7 +435,7 @@ func TestGivenNoBridgeWhenStartBridgeInvokedThenStartsItAndPrintsTheListeningLin
 func TestGivenBridgeStartFailsWhenStartBridgeInvokedWithARNThenErrorsWithTheStartFailureOnly(t *testing.T) {
 	// The start error must not be dressed up as "daemon started but attaching failed".
 	shortRuntimeDir(t)
-	startFailure := errors.New(`daemon failed to start (check "/tmp/d.log")`)
+	startFailure := errors.New("spawn daemon: exec format error")
 	stubBridgeStart(t, func(*daemon.DaemonManager) error { return startFailure })
 
 	_, err := execRoot(t, "bridge", "start", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
@@ -439,8 +450,18 @@ func TestGivenPidfileButNoControlSocketWhenStartBridgeInvokedThenReturnsNotListe
 
 	out, err := execRoot(t, "bridge", "start")
 
-	require.EqualError(t, err, notListeningMessage)
+	require.ErrorIs(t, err, errNotListening)
 	assert.NotContains(t, out.String(), "listening on port")
+}
+
+func TestGivenPidfileButNoControlSocketWhenStartBridgeInvokedWithARNThenReturnsNotListeningOnly(t *testing.T) {
+	// Start no-ops on the live pidfile; the add finds no socket. Not a refused attach.
+	fakeRuntimePaths(t)
+
+	_, err := execRoot(t, "bridge", "start", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
+
+	require.ErrorIs(t, err, errNotListening)
+	assert.NotContains(t, err.Error(), "daemon started")
 }
 
 func TestGivenSessionARNWhenStartBridgeInvokedThenStartsAndAttachesDevice(t *testing.T) {

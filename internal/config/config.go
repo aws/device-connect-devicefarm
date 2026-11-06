@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/aws/device-connect-devicefarm/internal/failure"
 )
 
 // BinaryName names the executable. Runtime file names and user-facing text read
@@ -216,7 +218,10 @@ func (c ProxyConfig) Validate() error {
 	// A hostname has no colon or bracket. One in a value netip rejects means
 	// host:port or a broken IP literal.
 	if _, err := netip.ParseAddr(c.ListenAddr); err != nil && strings.ContainsAny(c.ListenAddr, ":[]") {
-		return fmt.Errorf("--listen-addr must be an IP address or hostname with no port or brackets, got %q; set the port with --port", c.ListenAddr)
+		return failure.WithFix(
+			fmt.Errorf("--listen-addr must be an IP address or hostname with no port or brackets, got %q", c.ListenAddr),
+			"set the port with --port",
+		)
 	}
 	if c.ListenPort < 1 || c.ListenPort > 65535 {
 		return fmt.Errorf("--port must be in 1..65535, got %d", c.ListenPort)

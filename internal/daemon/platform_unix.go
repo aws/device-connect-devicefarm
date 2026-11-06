@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/aws/device-connect-devicefarm/internal/config"
+	"github.com/aws/device-connect-devicefarm/internal/failure"
 )
 
 // detachedProcessAttributes puts the daemon child in its own session; a hangup
@@ -52,7 +53,10 @@ func ensureRuntimeDir(dir string, uid int) error {
 	// Sys is *syscall.Stat_t on unix.
 	owner := int(info.Sys().(*syscall.Stat_t).Uid)
 	if owner != uid {
-		return fmt.Errorf("runtime dir %q is owned by uid %d, not %d; set XDG_RUNTIME_DIR to a private directory", dir, owner, uid)
+		return failure.WithFix(
+			fmt.Errorf("runtime dir %q is owned by uid %d, not %d", dir, owner, uid),
+			"set XDG_RUNTIME_DIR to a private directory",
+		)
 	}
 	return nil
 }

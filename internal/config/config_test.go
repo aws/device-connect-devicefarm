@@ -69,7 +69,9 @@ func TestGivenNonAddressListenAddrWhenValidatedThenRejected(t *testing.T) {
 			cfg := Default()
 			cfg.ListenAddr = addr
 
-			require.ErrorContains(t, cfg.Validate(), "no port or brackets")
+			err := cfg.Validate()
+			require.ErrorContains(t, err, "no port or brackets")
+			assert.ErrorContains(t, err, "; set the port with --port")
 		})
 	}
 }
