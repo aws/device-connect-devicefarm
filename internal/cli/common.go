@@ -11,6 +11,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/config"
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/daemon"
+	"github.com/aws/device-connect-devicefarm/internal/failure"
 )
 
 // awsName is the cloud provider prefix, kept in one place so every user-facing
@@ -21,9 +22,12 @@ const awsName = "AWS"
 // user-facing message names it identically.
 const productName = "Device Farm"
 
-// notListeningMessage is what 'bridge stop' prints when no daemon runs, and the error
-// 'device remove' and a live pidfile with a dead control socket report.
+// notListeningMessage is what 'bridge stop' prints when no daemon runs.
 const notListeningMessage = config.BinaryName + " not listening"
+
+// errNotListening: no daemon answers the control socket, because none runs or
+// one holds its pidfile over a dead socket.
+var errNotListening = &failure.Explained{Problem: "the bridge daemon is not listening"}
 
 // bridgeAutoStartNote is the help paragraph of every command that starts the bridge
 // daemon itself.
@@ -95,41 +99,47 @@ func startBridgeIfNotRunning(cmd *cobra.Command, state *rootState) error {
 	}
 	cmd.PrintErrln("* bridge not running; starting it now")
 	if err := startBridge(manager); err != nil {
-		return fmt.Errorf("start the bridge: %w", err)
+		return &failure.Explained{Problem: "could not start the bridge daemon", Cause: err}
 	}
 	return nil
 }
 
-// sendToBridge starts the bridge daemon when none runs, then sends req to it. A live
-// pidfile whose socket does not answer surfaces as the "not listening" error.
-func sendToBridge(cmd *cobra.Command, state *rootState, req control.Request) (control.Response, error) {
-	if err := startBridgeIfNotRunning(cmd, state); err != nil {
-		return control.Response{}, err
-	}
-	resp, err := state.controlClient().Send(req)
+// send sends req to the daemon. A dial failure returns errNotListening and logs
+// its cause at debug; any other failure says the daemon did not answer.
+func (s *rootState) send(req control.Request) (control.Response, error) {
+	resp, err := s.controlClient().Send(req)
 	if err != nil {
-		if daemonNotRunning(err) {
-			return control.Response{}, errors.New(notListeningMessage)
+		if errors.Is(err, control.ErrDaemonNotRunning) {
+			slog.Debug("control dial failed", "error", err)
+			return control.Response{}, errNotListening
 		}
-		return control.Response{}, err
+		return control.Response{}, &failure.Explained{Problem: "the bridge daemon did not answer", Cause: err}
 	}
 	return resp, nil
 }
 
-// attachToDaemon sends an add request for the session ARN to the bridge daemon, starting
-// it when none runs, and prints the listening line. The daemon resolves the ARN itself;
-// a resolution failure surfaces as the add error.
-func attachToDaemon(cmd *cobra.Command, state *rootState) error {
-	if state.sessionARN == "" {
-		return fmt.Errorf("--session-arn is required")
+// sendToBridge starts the bridge daemon when none runs, then sends req to it.
+func sendToBridge(cmd *cobra.Command, state *rootState, req control.Request) (control.Response, error) {
+	if err := startBridgeIfNotRunning(cmd, state); err != nil {
+		return control.Response{}, err
 	}
+	return state.send(req)
+}
 
+// attachDevice sends the add for --session-arn, starting the daemon when none
+// runs, and prints the listening line. The daemon resolves the ARN; its refusal
+// becomes the cause under refused, the command's own problem and fix.
+func attachDevice(cmd *cobra.Command, state *rootState, refused failure.Explained) error {
+	if state.sessionARN == "" {
+		return usageError(cmd, errors.New("--session-arn is required"))
+	}
 	resp, err := sendToBridge(cmd, state, control.Request{Op: control.OpAdd, ARN: state.sessionARN})
 	if err != nil {
 		return err
 	}
 	if !resp.OK {
-		return fmt.Errorf("attach device: %s", resp.Error)
+		refused.Cause = errors.New(resp.Error)
+		return &refused
 	}
 	printListeningLine(cmd, resp)
 	return nil
@@ -152,15 +162,4 @@ func printListeningLine(cmd *cobra.Command, response control.Response) {
 		"%s listening on port %d with connected device: %s\n",
 		config.BinaryName, response.Port, response.DeviceLabel,
 	)
-}
-
-// daemonNotRunning reports whether err means no daemon answered the control
-// socket. The dial cause goes to the debug log; the caller prints the plain
-// not-running line.
-func daemonNotRunning(err error) bool {
-	if !errors.Is(err, control.ErrDaemonNotRunning) {
-		return false
-	}
-	slog.Debug("control dial failed", "error", err)
-	return true
 }

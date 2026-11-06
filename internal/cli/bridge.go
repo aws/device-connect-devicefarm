@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -8,6 +9,7 @@ import (
 
 	"github.com/aws/device-connect-devicefarm/internal/config"
 	"github.com/aws/device-connect-devicefarm/internal/control"
+	"github.com/aws/device-connect-devicefarm/internal/failure"
 )
 
 // newBridgeCommand groups the daemon-lifecycle subcommands under one parent:
@@ -55,20 +57,17 @@ func newBridgeStartCommand(state *rootState) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := state.cfg.Validate(); err != nil {
-				return err
+				return usageError(cmd, err)
 			}
 			if err := startBridgeIfNotRunning(cmd, state); err != nil {
 				return err
 			}
 
 			if state.sessionARN != "" {
-				if err := attachToDaemon(cmd, state); err != nil {
-					return fmt.Errorf(
-						"%s daemon started but attaching the device failed; fix the issue and retry 'device add': %w",
-						config.BinaryName, err,
-					)
-				}
-				return nil
+				return attachDevice(cmd, state, failure.Explained{
+					Problem: "the bridge daemon started but could not attach the device",
+					Fix:     "fix the issue and retry 'device add'",
+				})
 			}
 
 			// A daemon that already ran may differ from the flags in port and device,
@@ -104,7 +103,7 @@ func newBridgeStopCommand(state *rootState) *cobra.Command {
 				return nil
 			}
 			if err := state.newManager().Stop(); err != nil {
-				return err
+				return &failure.Explained{Problem: "could not stop the bridge daemon", Cause: err}
 			}
 			cmd.Println(config.BinaryName + " stopped")
 			return nil
@@ -129,9 +128,9 @@ func newBridgeStatusCommand(state *rootState) *cobra.Command {
 
 			// The daemon is up; ask it over the control channel what is attached so
 			// status reflects live state, not just liveness.
-			resp, err := state.controlClient().Send(control.Request{Op: control.OpStatus})
+			resp, err := state.send(control.Request{Op: control.OpStatus})
 			if err != nil {
-				if daemonNotRunning(err) {
+				if errors.Is(err, errNotListening) {
 					cmd.Println(config.BinaryName + " daemon is not running")
 					return nil
 				}
