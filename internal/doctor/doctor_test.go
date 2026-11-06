@@ -147,8 +147,8 @@ func TestGivenMixedResultsWhenWrittenAsTextThenOneLinePerRowPlusTheCountLine(t *
 		}},
 		constantCheck("local.daemon", Result{Status: Warn, Summary: "running (pid 42) on port 6000, not 5037",
 			Hint: "the running daemon listens on port 6000, not 5037. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 5037'."}),
-		constantCheck("local.listen-port", Result{Status: Fail, Summary: "held by an adb server (version 41)",
-			Hint: "adb kill-server"}),
+		constantCheck("local.listen-port", Result{Status: Fail, Summary: "cannot bind 127.0.0.1:5037 because another program is listening on it",
+			Hint: "stop that program, then run 'devicefarm-connect bridge start --port 5037'"}),
 		constantCheck("relay.session", Result{Status: Pass, Summary: "unused"}, "local.listen-port"),
 	}
 	var out bytes.Buffer
@@ -164,7 +164,7 @@ func TestGivenMixedResultsWhenWrittenAsTextThenOneLinePerRowPlusTheCountLine(t *
 	assert.Equal(t, 1, report.Failed())
 	assert.Equal(t, "[PASS] local.runtime-dir: /run/user/1000/devicefarm-connect (socket path 41 bytes)\n"+
 		"[WARN] local.daemon: running (pid 42) on port 6000, not 5037; fix: the running daemon listens on port 6000, not 5037. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 5037'.\n"+
-		"[FAIL] local.listen-port: held by an adb server (version 41); fix: adb kill-server\n"+
+		"[FAIL] local.listen-port: cannot bind 127.0.0.1:5037 because another program is listening on it; fix: stop that program, then run 'devicefarm-connect bridge start --port 5037'\n"+
 		"[SKIP] relay.session: needs local.listen-port\n"+
 		"doctor: 1 passed, 1 warnings, 1 failed, 1 skipped\n", out.String())
 }
@@ -182,7 +182,7 @@ func TestGivenAnEmptyTableWhenRunThenTheReportIsEmptyAndTheCountLineIsAllZero(t 
 const (
 	fixtureSessionArn         = "arn:aws:devicefarm:us-west-2:123456789012:session:11111111-2222-3333-4444-555555555555"
 	fixtureNoSessionSkip      = "pass --session-arn to check the session, the device connection and adb versions"
-	fixturePortHeldHint       = "an adb server holds the port the daemon would bind. Stop it with 'adb -P 35477 kill-server', then run 'devicefarm-connect bridge start --port 35477' before any other adb command, or adb restarts its server on that port. Or start the daemon on another port with 'devicefarm-connect bridge start --port <n>' and point adb at it with 'adb -P <n>'."
+	fixturePortHeldHint       = "an adb server is listening on 127.0.0.1:35477, so the daemon cannot bind it until that server stops. Run 'devicefarm-connect bridge start --port 35477': it stops that server first, as 'adb kill-server' would. If a program that restarts adb, such as Android Studio, takes the port back, start the daemon on another port with 'devicefarm-connect bridge start --port <n>' and point adb at it with 'adb -P <n>'."
 	fixtureReverseOffHint     = "the daemon runs with adb reverse off, so every 'adb reverse' fails. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 40775 --allow-adb-reverse --session-arn " + fixtureSessionArn + "' to start it again with reverse on. '--allow-adb-reverse' lets the device open connections to this machine, so use it only with a device you trust; a public physical device can run software you do not control."
 	fixtureVersionSkewHint    = "the local adb is 1.0.41 and the remote adb server is 1.0.39, so the first adb command would stop that server. Install platform-tools whose adb is 1.0.39, or put such an adb first on PATH, then rerun 'devicefarm-connect doctor --session-arn " + fixtureSessionArn + " --port 37537'. Until then every adb command through the daemon ends the remote adb server."
 	fixtureCredentialsSummary = `this shell has no usable AWS credentials: failed to refresh cached credentials, no EC2 IMDS role found, operation error ec2imds: GetMetadata, access disabled to EC2 IMDS via client option, or "AWS_EC2_METADATA_DISABLED" environment variable`
@@ -267,13 +267,14 @@ doctor: 2 of 4 categories passed, 2 not checked
 doctor: 4 of 4 categories passed
 `},
 		{name: "an adb server holds the listen port", results: map[string]Result{
-			"local.listen-port": {Status: Fail, Summary: "127.0.0.1:35477 is held by an adb server (version 41)", Hint: fixturePortHeldHint},
-			"session.resolve":   {Status: Skip, Summary: fixtureNoSessionSkip},
+			"local.listen-port": {Status: Warn, Summary: "an adb server (version 41) is listening on 127.0.0.1:35477",
+				Hint: fixturePortHeldHint},
+			"session.resolve": {Status: Skip, Summary: fixtureNoSessionSkip},
 		}, want: `+---------------+--------+-----------------------------------------------------+
 | Category      | Status | Details                                             |
 +---------------+--------+-----------------------------------------------------+
-| Local machine | FAIL   | listen port: 127.0.0.1:35477 is held by an adb      |
-|               |        |   server (version 41)                               |
+| Local machine | WARN   | listen port: an adb server (version 41) is          |
+|               |        |   listening on 127.0.0.1:35477                      |
 |               |        | also passed: working directory, bridge daemon, adb  |
 |               |        |   forward                                           |
 +---------------+--------+-----------------------------------------------------+
@@ -288,13 +289,14 @@ doctor: 4 of 4 categories passed
 +---------------+--------+-----------------------------------------------------+
 
 What to do
-1. Local machine, listen port: an adb server holds the port the daemon would
-   bind. Stop it with 'adb -P 35477 kill-server', then run
-   'devicefarm-connect bridge start --port 35477' before any other adb command,
-   or adb restarts its server on that port. Or start the daemon on another port
-   with 'devicefarm-connect bridge start --port <n>' and point adb at it with
+1. Local machine, listen port: an adb server is listening on 127.0.0.1:35477, so
+   the daemon cannot bind it until that server stops. Run
+   'devicefarm-connect bridge start --port 35477': it stops that server first,
+   as 'adb kill-server' would. If a program that restarts adb, such as Android
+   Studio, takes the port back, start the daemon on another port with
+   'devicefarm-connect bridge start --port <n>' and point adb at it with
    'adb -P <n>'.
-doctor: 1 of 4 categories passed, 1 failed, 2 not checked
+doctor: 1 of 4 categories passed, 1 warning, 2 not checked
 `},
 		{name: "reverse off and an adb version mismatch", results: map[string]Result{
 			"local.daemon": {Status: Warn, Summary: "running (pid 17557) on port 40775; device Google Pixel 9 (OS 16), session " + fixtureSessionArn + "; reverse off",
@@ -547,6 +549,7 @@ func TestGivenLongTokensAndSpansWhenWrappedThenTheCellCutsAndTheListKeepsThemWho
 func TestGivenQuotesInProseWhenTokenizedThenOnlySpansBetweenSpacesStayWhole(t *testing.T) {
 	assert.Equal(t, []string{"the", "server's", "adb;", "run", "'adb kill-server',", "then", "'x'."},
 		tokens("the  server's adb; run 'adb kill-server', then 'x'.", 80, false))
+	assert.Equal(t, []string{"run", "'bridge start':", "it"}, tokens("run 'bridge start': it", 80, false), "a colon closes a span too")
 	assert.Equal(t, []string{"'abc", "def", "'abc'd", "ef"}, tokens("'abc def 'abc'd ef", 80, false))
 	assert.Equal(t, []string{"'abc", "def"}, tokens("'abc def", 80, false), "an unclosed quote opens no span")
 	assert.Equal(t, []string{"run", "'--log \"/tmp/Build  Logs/b.log\"'", "now"}, tokens("run\t'--log \"/tmp/Build  Logs/b.log\"'\nnow", 80, false),
@@ -596,7 +599,7 @@ func TestGivenMixedResultsWhenWrittenAsJSONThenOneCompactObjectCarriesEveryRow(t
 				Hint: "the running daemon listens on port 6000, not 5037. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 5037'."},
 			Elapsed: 20 * time.Millisecond},
 		{ID: "local.listen-port", Title: "listen port", Category: CategoryLocal, Needs: []string{"local.daemon"},
-			Result: Result{Status: Fail, Summary: "held by an adb server (version 41)", Hint: "adb kill-server"}},
+			Result: Result{Status: Fail, Summary: "cannot bind 127.0.0.1:5037 because another program is listening on it", Hint: "stop that program, then run 'devicefarm-connect bridge start --port 5037'"}},
 		{ID: "relay.reverse", Title: "adb reverse", Category: CategoryNetwork, Needs: []string{"session.resolve", "local.daemon"},
 			Result: Result{Status: Skip, Summary: "needs session.resolve"}},
 	}}
@@ -608,7 +611,7 @@ func TestGivenMixedResultsWhenWrittenAsJSONThenOneCompactObjectCarriesEveryRow(t
 		`"checks":[`+
 		`{"id":"local.runtime-dir","title":"working directory","category":"local","status":"pass","summary":"working directory /run/user/1000/devicefarm-connect is writable","needs":[],"elapsedMs":1},`+
 		`{"id":"local.daemon","title":"bridge daemon","category":"local","status":"warn","summary":"running (pid 42) on port 6000, not 5037","hint":"the running daemon listens on port 6000, not 5037. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 5037'.","needs":["local.runtime-dir"],"elapsedMs":20},`+
-		`{"id":"local.listen-port","title":"listen port","category":"local","status":"fail","summary":"held by an adb server (version 41)","hint":"adb kill-server","needs":["local.daemon"],"elapsedMs":0},`+
+		`{"id":"local.listen-port","title":"listen port","category":"local","status":"fail","summary":"cannot bind 127.0.0.1:5037 because another program is listening on it","hint":"stop that program, then run 'devicefarm-connect bridge start --port 5037'","needs":["local.daemon"],"elapsedMs":0},`+
 		`{"id":"relay.reverse","title":"adb reverse","category":"network","status":"skip","summary":"needs session.resolve","needs":["session.resolve","local.daemon"],"elapsedMs":0}],`+
 		`"summary":{"pass":1,"warn":1,"fail":1,"skip":1}}`+"\n", out.String())
 }

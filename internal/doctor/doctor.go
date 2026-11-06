@@ -519,7 +519,7 @@ func tokens(text string, limit int, keepWhole bool) []string {
 }
 
 // quotedSpanEnd is the length of the quoted span that opens text, or 0 when text does not open
-// one: a quote, no quote inside, a closing quote with an optional . , or ; attached, then
+// one: a quote, no quote inside, a closing quote with an optional . , ; or : attached, then
 // whitespace or the end. "server's" opens none.
 func quotedSpanEnd(text string) int {
 	if text == "" || text[0] != '\'' {
@@ -530,7 +530,7 @@ func quotedSpanEnd(text string) int {
 		return 0
 	}
 	end := closing + 2
-	if end < len(text) && strings.IndexByte(".,;", text[end]) >= 0 {
+	if end < len(text) && strings.IndexByte(".,;:", text[end]) >= 0 {
 		end++
 	}
 	next, _ := utf8.DecodeRuneInString(text[end:])

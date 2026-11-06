@@ -97,8 +97,9 @@ func TestGivenRealExecutableWhenSpawnedThenReturnsLivePidAndDetaches(t *testing.
 	defer logOut.Close()
 
 	// Spawn a real short-lived process through the production spawn path.
-	pid, err := realSpawnDaemon("/bin/sh", []string{"-c", "sleep 30"}, logOut)
+	child, _, err := realSpawnDaemon("/bin/sh", []string{"-c", "sleep 30"}, logOut)
 	require.NoError(t, err)
+	pid := child.Pid
 	require.Greater(t, pid, 0)
 	t.Cleanup(func() {
 		if proc, findErr := os.FindProcess(pid); findErr == nil {
