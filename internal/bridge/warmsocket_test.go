@@ -33,7 +33,7 @@ func warmParams() AttachmentParams {
 // newWarmDevice attaches a device whose keeper runs under policy against endpoint.
 func newWarmDevice(t *testing.T, endpoint string, policy WSRefreshPolicy) *ActiveDevice {
 	t.Helper()
-	featureOption := WithAttachmentFeatures(newTestDialer(testWait), policy, warmParams(), noopLogger())
+	featureOption := testFeatures(newTestDialer(testWait), policy, warmParams(), noopLogger())
 	device := NewActiveDevice(featureOption)
 	t.Cleanup(func() { device.Clear() })
 	require.True(t, device.Set(DeviceInfo{ARN: testDeviceARN, Endpoint: endpoint, Label: "Test Device - OS 1"}))
@@ -441,7 +441,7 @@ func TestGivenATakenSocketWhenTheServerNeverAnswersThenTheRequestFailsWithinOneR
 	waitFor(t, func() bool { return parkedSocket(keeper) != nil }, "the keeper never parked a socket")
 
 	client := dialClient(t, proxyAddress)
-	writeAll(t, client, []byte("000chost:version"))
+	writeAll(t, client, []byte(relayedHostRequest))
 
 	assert.Empty(t, drainClosed(t, client), "no control frame within the round trip ends the connection")
 	time.Sleep(notifierSettle)
