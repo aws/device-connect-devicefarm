@@ -13,6 +13,12 @@ func TestGivenTheHostVersionRequestWhenFramedByTheEncoderThenTheConstantMatches(
 	assert.Equal(t, HostVersionRequest, string(framed))
 }
 
+func TestGivenTheHostKillRequestWhenFramedByTheEncoderThenTheConstantMatches(t *testing.T) {
+	framed, err := EncodeRequest("host:kill")
+	require.NoError(t, err)
+	assert.Equal(t, HostKillRequest, string(framed))
+}
+
 func TestGivenHostVersionRepliesWhenParsedThenOnlyAFourHexDigitVersionIsRead(t *testing.T) {
 	tests := []struct {
 		name      string

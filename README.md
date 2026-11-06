@@ -148,9 +148,10 @@ attach a device, then use `adb` as usual.
    devicefarm-connect device add --session-arn arn:aws:devicefarm:us-west-2:123456789012:session:11111111-2222-3333-4444-5555555abcde
    ```
 
-   If adb's own server holds port 5037, run `adb kill-server` first, or start the daemon yourself on another
-   port. `bridge start` takes `--port`, and its `--session-arn` is optional. Omit it to start with
-   no device, then attach one with `device add`.
+   If adb's own server holds port 5037, the bridge stops it first, as `adb kill-server` does. If a program such
+   as Android Studio restarts adb, quit it, run this, then open it again: it then uses the bridge as its adb
+   server. You can also start the daemon yourself on another port. `bridge start` takes `--port`, and its
+   `--session-arn` is optional. Omit it to start with no device, then attach one with `device add`.
 
    ```sh
    devicefarm-connect bridge start --port 5037 --session-arn arn:aws:devicefarm:us-west-2:123456789012:session:11111111-2222-3333-4444-5555555abcde
@@ -252,14 +253,14 @@ doctor: 2 of 4 categories passed, 2 not checked
 A `WARN` or `FAIL` check adds a numbered item to a "What to do" list under the table: the cause,
 the exact command or setting with the check's values filled in, and what the command changes.
 With an adb server holding the listen port, `devicefarm-connect doctor --port 35477` prints this
-and exits 1:
+and exits 0:
 
 ```
 +---------------+--------+-----------------------------------------------------+
 | Category      | Status | Details                                             |
 +---------------+--------+-----------------------------------------------------+
-| Local machine | FAIL   | listen port: 127.0.0.1:35477 is held by an adb      |
-|               |        |   server (version 41)                               |
+| Local machine | WARN   | listen port: an adb server (version 41) is          |
+|               |        |   listening on 127.0.0.1:35477                      |
 |               |        | also passed: working directory, bridge daemon, adb  |
 |               |        |   forward                                           |
 +---------------+--------+-----------------------------------------------------+
@@ -274,13 +275,14 @@ and exits 1:
 +---------------+--------+-----------------------------------------------------+
 
 What to do
-1. Local machine, listen port: an adb server holds the port the daemon would
-   bind. Stop it with 'adb -P 35477 kill-server', then run
-   'devicefarm-connect bridge start --port 35477' before any other adb command,
-   or adb restarts its server on that port. Or start the daemon on another port
-   with 'devicefarm-connect bridge start --port <n>' and point adb at it with
+1. Local machine, listen port: an adb server is listening on 127.0.0.1:35477, so
+   the daemon cannot bind it until that server stops. Run
+   'devicefarm-connect bridge start --port 35477': it stops that server first,
+   as 'adb kill-server' would. If a program that restarts adb, such as Android
+   Studio, takes the port back, start the daemon on another port with
+   'devicefarm-connect bridge start --port <n>' and point adb at it with
    'adb -P <n>'.
-doctor: 1 of 4 categories passed, 1 failed, 2 not checked
+doctor: 1 of 4 categories passed, 1 warning, 2 not checked
 ```
 
 Exit code 0 unless a check is `FAIL`; a `WARN` leaves it 0. The table follows the terminal width,
