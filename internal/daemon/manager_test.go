@@ -357,6 +357,8 @@ func TestGivenChildSpawnsButNeverReportsReadyWhenStartedThenErrorsAndKillsOrphan
 	err := mgr.Start()
 
 	require.Error(t, err, "a child that never reports ready must fail Start")
+	assert.ErrorContains(t, err, "timed out after")
+	assert.ErrorContains(t, err, "; read the daemon log: "+mgr.paths.LogFile)
 	assert.Eventually(t, func() bool { return !processAlive(orphanPid) }, 5*time.Second, 20*time.Millisecond,
 		"the orphaned child must be killed on the startup-timeout path")
 }
