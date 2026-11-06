@@ -73,8 +73,8 @@ const (
 
 	// Device streams open at once per attachment: local adb connections, forwarded
 	// connections and reverse connectors together. The /adb admission ceiling less
-	// a reserve for the reverse notifier, the serial fetch, the parked warm
-	// websocket and swap overlaps.
+	// a reserve for the reverse notifier, the serial fetch, the host reply fetches,
+	// the parked warm websocket and swap overlaps.
 	DefaultMaxDeviceStreams = adbAdmissionCeiling - 8
 
 	// Forward rules per attachment. A rule costs a listener, no websocket; its

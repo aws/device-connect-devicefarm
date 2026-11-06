@@ -39,7 +39,7 @@ func attachDeviceAt(t *testing.T, sessions *testsupport.SessionMockWSS, reverse 
 	params := notifierParams(parkedKeepAlive, backoff)
 	params.MaxForwardRules = testMaxForwardRules
 	params.MaxReverseRules = testMaxReverseRules
-	device := NewActiveDevice(WithAttachmentFeatures(newTestDialer(testWait), testPolicy(), params, logger))
+	device := NewActiveDevice(testFeatures(newTestDialer(testWait), testPolicy(), params, logger))
 	t.Cleanup(func() { device.Clear() })
 	require.True(t, device.Set(DeviceInfo{ARN: testDeviceARN, Endpoint: reverse.URL, Label: "test-device"}))
 	return &clearingDevice{device: device, sessions: sessions, reverse: reverse}

@@ -145,7 +145,8 @@ func (s *AdbProxyServer) Run(ctx context.Context) error {
 //
 // Nothing is dialed until the client's service request has been read (readOpening), so a
 // client that only selects a transport, or says nothing, mints no session. A forward-family
-// request is answered from the local table and never dials at all; while reverse is off, a
+// request is answered from the local table and never dials at all; host:version, the device
+// lists and the device trackers are answered from cached server replies; while reverse is off, a
 // reverse-family request gets a local FAIL and never dials either. With reverse on, a
 // reverse-family request gets a local FAIL at once while the server's notifier slot is held
 // elsewhere; else it waits until the attachment's clear of the server's reverse rules settles,
@@ -183,6 +184,10 @@ func (s *AdbProxyServer) handleConn(ctx context.Context, tcp net.Conn) {
 
 	if respondForwardLocally(tcp, clientOpening, forwarding, info.Serial, connLogger) {
 		connLogger.Debug("answered the forward request locally", "service", clientOpening.service)
+		return
+	}
+	if answerHostQuery(connCtx, tcp, clientOpening, forwarding, connLogger) {
+		connLogger.Debug("answered the host request locally", "service", clientOpening.service)
 		return
 	}
 	if refuseReverseFamily(tcp, clientOpening, forwarding, connLogger) {

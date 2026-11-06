@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"strconv"
 	"testing"
@@ -260,6 +261,17 @@ func forwardingParams() AttachmentParams {
 	}
 }
 
+// testFeatures is WithAttachmentFeatures with the attach prefetch off, so a test's mock
+// sees only the dials the test is about.
+func testFeatures(dialer *WSDialer, policy WSRefreshPolicy, params AttachmentParams,
+	logger *slog.Logger) ActiveDeviceOption {
+	withFeatures := WithAttachmentFeatures(dialer, policy, params, logger)
+	return func(device *ActiveDevice) {
+		withFeatures(device)
+		device.featureConfig.skipHostPrefetch = true
+	}
+}
+
 // newForwardingDevice builds an ActiveDevice whose attachments forward, each through
 // a stream opener of its own.
 func newForwardingDevice(t *testing.T, opts ...ActiveDeviceOption) *ActiveDevice {
@@ -270,7 +282,7 @@ func newForwardingDevice(t *testing.T, opts ...ActiveDeviceOption) *ActiveDevice
 // newAttachedDevice builds an ActiveDevice whose attachments run under params.
 func newAttachedDevice(t *testing.T, params AttachmentParams, opts ...ActiveDeviceOption) *ActiveDevice {
 	t.Helper()
-	featureOption := WithAttachmentFeatures(newTestDialer(testWait), testPolicy(), params, noopLogger())
+	featureOption := testFeatures(newTestDialer(testWait), testPolicy(), params, noopLogger())
 	device := NewActiveDevice(append([]ActiveDeviceOption{featureOption}, opts...)...)
 	t.Cleanup(func() { device.Clear() })
 	return device
@@ -423,7 +435,7 @@ func TestGivenNoDialerWhenFeaturesAreConfiguredThenTheAttachmentCarriesNone(t *t
 // cleanup detaches, so no test leaves a redial loop running.
 func newNotifierDevice(t *testing.T, mock *testsupport.ReverseMockWSS) *ActiveDevice {
 	t.Helper()
-	device := NewActiveDevice(WithAttachmentFeatures(newTestDialer(testWait), testPolicy(),
+	device := NewActiveDevice(testFeatures(newTestDialer(testWait), testPolicy(),
 		notifierParams(parkedKeepAlive, notifierPoll), noopLogger()))
 	t.Cleanup(func() { device.Clear() })
 	require.True(t, device.Set(DeviceInfo{ARN: testDeviceARN, Endpoint: mock.URL}))
