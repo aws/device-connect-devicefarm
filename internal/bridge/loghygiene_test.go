@@ -27,10 +27,11 @@ func assertDialLoggedWithoutCredential(t *testing.T, logs *lockedBuffer) {
 }
 
 // attachPresigned binds a device with attachment features at the presigned endpoint, so its
-// opener, notifier and connectors log to logger.
+// opener, notifier and connectors log to logger. The attach prefetch is off, so its dial line
+// cannot stand in for the site's.
 func attachPresigned(t *testing.T, params AttachmentParams, logger *slog.Logger) *ActiveDevice {
 	t.Helper()
-	device := NewActiveDevice(WithAttachmentFeatures(newTestDialer(testWait), testPolicy(), params, logger))
+	device := NewActiveDevice(testFeatures(newTestDialer(testWait), testPolicy(), params, logger))
 	t.Cleanup(func() { device.Clear() })
 	require.True(t, device.Set(DeviceInfo{ARN: testDeviceARN, Endpoint: testsupport.PresignedUnreachableEndpoint,
 		Label: "test-device"}))
@@ -94,9 +95,25 @@ func TestGivenAPresignedEndpointThatRefusesTheDialWhenEachSiteFailsThenTheLogCar
 				features.notifier.announce(context.Background(), testReverseToken, target.port)
 				target.requireNoDial(t)
 			}},
+		{name: "host reply prefetch", failureLine: `msg="could not prefetch a host reply"`,
+			run: func(t *testing.T, logger *slog.Logger) {
+				attachPrefetching(t, newTestDialer(testWait), testsupport.PresignedUnreachableEndpoint, logger)
+			}},
+		{name: "host reply fetch on first use", failureLine: `msg="failed to fetch a host reply; closing client"`,
+			run: func(t *testing.T, logger *slog.Logger) {
+				device := attachPresigned(t, forwardingParams(), logger)
+				server, err := NewAdbProxyServer("127.0.0.1", 0, testPolicy(), newTestDialer(testWait), device, logger)
+				require.NoError(t, err)
+				ctx, cancel := context.WithCancel(context.Background())
+				stopped := make(chan error, 1)
+				go func() { stopped <- server.Run(ctx) }()
+				t.Cleanup(func() { cancel(); <-stopped })
+				assertClosed(t, sendOnly(t, waitForAddr(t, server), hostVersionRequest),
+					"a failed fetch must close the client with nothing written")
+			}},
 		{name: "warm socket keeper", failureLine: `msg="could not dial a warm websocket; retrying"`,
 			run: func(t *testing.T, logger *slog.Logger) {
-				device := NewActiveDevice(WithAttachmentFeatures(newTestDialer(testWait), warmPolicy(warmInterval), warmParams(),
+				device := NewActiveDevice(testFeatures(newTestDialer(testWait), warmPolicy(warmInterval), warmParams(),
 					logger))
 				t.Cleanup(func() { device.Clear() })
 				require.True(t, device.Set(DeviceInfo{ARN: testDeviceARN,

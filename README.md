@@ -7,7 +7,8 @@ and tested with platform-tools 37. Because both ends terminate at a genuine adb 
 proxy is a byte pipe once a connection is running. It speaks adb in two
 places only. At the accept seam, where it reads a client's first requests before dialing the
 device, it answers the forward family (`adb forward` and its list and remove forms) and the
-transport select, and refuses the reverse family while reverse is off. And it writes a
+transport select, serves `host:version` and the device lists from cached server replies, and
+refuses the reverse family while reverse is off. And it writes a
 forwarded connection's opening requests itself.
 
 ## Install
@@ -138,6 +139,10 @@ These limits may change in later releases:
   admits, less a reserve. One more local connection prints
   `error: too many adb connections (limit <n>)`; one more forwarded connection closes with no bytes;
   one more reverse connection is refused and closes when the remote access service reaps it.
+- `adb devices`, `adb devices -l` and device trackers answer from a copy of the server's reply.
+  The copy does not change while the device stays attached, and a tracker gets no updates.
+  During an `adb reconnect`, a device crash or a dropped connection, it still lists the device
+  as `device` while commands fail.
 - No websocket-level ping on a proxied connection: `x/net/websocket` cannot send one. Liveness comes
   from TCP keepalive, the refresh cycle and a reactive reconnect. The reverse notifier, the websocket
   on which the remote access service announces device-originated connections, is the exception: an

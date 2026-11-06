@@ -88,10 +88,19 @@ func startAttachedProxyWithSerial(t *testing.T, policy WSRefreshPolicy, serial s
 	mock *testsupport.SessionMockWSS, device *ActiveDevice) {
 	t.Helper()
 	mock = switchReplyMock(t, "OKAY")
+	proxyAddress, device = attachProxyTo(t, mock, policy, serial)
+	return proxyAddress, mock, device
+}
+
+// attachProxyTo runs a proxy in front of a device with attachment features, bound to mock under
+// serial.
+func attachProxyTo(t *testing.T, mock *testsupport.SessionMockWSS, policy WSRefreshPolicy, serial string) (
+	proxyAddress string, device *ActiveDevice) {
+	t.Helper()
 	device = newForwardingDevice(t)
 	require.True(t, device.Set(DeviceInfo{ARN: "arn:test", Endpoint: mock.URL, Label: "Test Device - OS 1", Serial: serial}))
 	proxyAddress, _ = runProxy(t, device, policy)
-	return proxyAddress, mock, device
+	return proxyAddress, device
 }
 
 func waitForAddr(t *testing.T, server *AdbProxyServer) string {
@@ -333,12 +342,15 @@ func spendBudget(t *testing.T, device *ActiveDevice) {
 	}
 }
 
+// relayedHostRequest is a whole host request the daemon relays rather than answers itself.
+const relayedHostRequest = "000dhost:features"
+
 // openPipedConnection opens one local adb connection and waits for the mock to echo its
 // request, so it holds a slot on return.
 func openPipedConnection(t *testing.T, proxyAddress string) net.Conn {
 	t.Helper()
 	client := dialClient(t, proxyAddress)
-	request := []byte("000chost:devices")
+	request := []byte(relayedHostRequest)
 	writeAll(t, client, request)
 	require.Equal(t, request, readN(t, client, len(request)), "an admitted connection is piped to the session")
 	return client
@@ -359,7 +371,7 @@ func TestGivenASpentBudgetWhenALocalAdbClientConnectsThenItGetsTheLimitFailAndNo
 	spendBudget(t, device)
 	client := dialClient(t, proxyAddress)
 
-	writeAll(t, client, []byte("000chost:devices"))
+	writeAll(t, client, []byte(relayedHostRequest))
 
 	assertRefusedOverBudget(t, client)
 	assertNoWebsocketDialed(t, mock)
@@ -411,7 +423,7 @@ func TestGivenLocalConnectionsFillingTheBudgetWhenOneEndsThenItsSlotAdmitsTheNex
 		openPipedConnection(t, proxyAddress)
 	}
 	refused := dialClient(t, proxyAddress)
-	writeAll(t, refused, []byte("000chost:devices"))
+	writeAll(t, refused, []byte(relayedHostRequest))
 	assertRefusedOverBudget(t, refused)
 	require.Equal(t, testMaxDeviceStreams, mock.ConnectionsAccepted(), "the refused connection must not dial")
 
@@ -445,7 +457,7 @@ func TestGivenADialThatFailsWhenTheConnectionEndsThenItsSlotReturns(t *testing.T
 	proxyAddress, _ := runProxy(t, device, testPolicy())
 	failed := dialClient(t, proxyAddress)
 
-	writeAll(t, failed, []byte("000chost:devices"))
+	writeAll(t, failed, []byte(relayedHostRequest))
 
 	assert.Empty(t, drainClosed(t, failed), "a failed dial closes the client with no bytes")
 	assert.Zero(t, budget.inUse.Load(), "a failed dial must free its slot")
@@ -484,7 +496,7 @@ func TestGivenRepeatedRefusalsWhenLoggedThenOneWarnNamesTheLimit(t *testing.T) {
 
 // The proxy server must mint no session a proxied connection did not ask for: each spends a
 // per-host slot that a refresh's transient second socket also needs. No attachment features
-// here, so no serial fetch or parked socket runs.
+// here, so no host reply fetch or parked socket runs.
 
 func TestGivenAttachedDeviceWithNoProxiedConnectionWhenIdleThenTheBridgeMintsNoSession(t *testing.T) {
 	mock := testsupport.NewSessionEchoWSS(t)

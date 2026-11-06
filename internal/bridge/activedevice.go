@@ -68,11 +68,13 @@ type featureConfig struct {
 	policy WSRefreshPolicy
 	params AttachmentParams
 	logger *slog.Logger
+	// skipHostPrefetch turns the attach's host reply prefetch off. Tests only.
+	skipHostPrefetch bool
 }
 
 // attachmentFeatures is one attachment's live features. ctx ends with the attachment, so
-// the detach that closes the listeners also severs the table's streams, the notifier and
-// the warm socket.
+// the detach that closes the listeners also severs the table's streams, the notifier, the
+// warm socket and the host reply fetches.
 type attachmentFeatures struct {
 	table    *forward.ForwardRulesTable
 	notifier *notifierSupervisor
@@ -83,6 +85,7 @@ type attachmentFeatures struct {
 	reverseRules *reverseRules
 	// reverseEnabled off: the seam refuses the reverse family; see refuseReverseFamily
 	reverseEnabled bool
+	hostReplies    *hostReplyCache // the server's host replies the seam answers from; see answerHostQuery
 	ctx            context.Context
 	cancel         context.CancelFunc
 }
@@ -113,9 +116,10 @@ type ActiveDeviceOption func(*ActiveDevice)
 
 // WithAttachmentFeatures turns on the features beside the adb stream: a forward table per
 // device whose accepted connections become device streams, one warm adb websocket parked
-// for the next dial, and, with reverse on, a reverse notifier held for the whole attachment.
-// All dial with dialer. A detach closes the table's listeners, severs its streams and closes
-// the notifier and the warm socket. A nil dialer leaves them off rather than dead.
+// for the next dial, a host reply cache prefetched at attach, and, with reverse on, a reverse
+// notifier held for the whole attachment. All dial with dialer. A detach closes the table's
+// listeners, severs its streams, cancels the fetches and closes the notifier and the warm
+// socket. A nil dialer leaves them off rather than dead.
 func WithAttachmentFeatures(dialer *WSDialer, policy WSRefreshPolicy,
 	params AttachmentParams, logger *slog.Logger) ActiveDeviceOption {
 	if dialer == nil {
@@ -157,9 +161,9 @@ func (a *ActiveDevice) Set(info DeviceInfo) bool {
 // streams belong to.
 // Caller holds device.mu and has filled device.info, so this must not bind, dial, wait or call
 // any ActiveDevice method: the opener and forward.NewForwardRulesTable only store their
-// arguments, the table binds nothing until a rule is installed, and the notifier and the warm
-// socket keeper dial on their own goroutines, parked on device.mu inside EndpointFor until Set
-// returns.
+// arguments, the table binds nothing until a rule is installed, and the notifier, the warm
+// socket keeper and the host reply fetches dial on their own goroutines, parked on device.mu
+// inside EndpointFor until Set returns.
 // Overwriting device.features is safe because Set refuses while a device is present and only
 // clearLocked drops it.
 func (device *ActiveDevice) buildFeaturesLocked() {
@@ -172,6 +176,8 @@ func (device *ActiveDevice) buildFeaturesLocked() {
 	features := &attachmentFeatures{ctx: ctx, cancel: cancel, budget: budget,
 		reverseRules:   newReverseRules(config.params.MaxReverseRules),
 		reverseEnabled: config.params.ReverseEnabled}
+	fetcher := &hostReplyFetcher{device: device, dialer: config.dialer, arn: device.info.ARN}
+	features.hostReplies = newHostReplyCache(fetcher.fetch)
 	features.warm = newWarmSocketKeeper(device, config, device.info.ARN)
 	opener := &deviceStreamOpener{device: device, cfg: config, arn: device.info.ARN, ctx: ctx, budget: budget,
 		warm: features.warm}
@@ -179,6 +185,9 @@ func (device *ActiveDevice) buildFeaturesLocked() {
 	features.notifier = newNotifierSupervisor(device, config, device.info.ARN, features.table, features.reverseRules, budget)
 	go features.notifier.run(features.ctx)
 	go features.warm.run(features.ctx)
+	if !config.skipHostPrefetch {
+		features.hostReplies.prefetch(features.ctx, config.logger)
+	}
 	device.features = features
 }
 
@@ -186,7 +195,7 @@ func (device *ActiveDevice) buildFeaturesLocked() {
 // listeners and the tunnel legs end now, not at their own timeouts. Call it before Clear: the
 // server refuses a reverse request with no notifier registered. Best effort, bounded by
 // reverseClearTimeout; on failure the server keeps the rules. The dial is the daemon's own, like
-// the add's serial fetch: no budget slot, no rule counted.
+// the add's serial fetch and the host reply fetches: no budget slot, no rule counted.
 func (device *ActiveDevice) ClearReverseRulesAtServer(ctx context.Context) {
 	device.mu.Lock()
 	info, features, present := device.info, device.features, device.present

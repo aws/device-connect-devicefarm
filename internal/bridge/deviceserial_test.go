@@ -119,7 +119,7 @@ func TestGivenADevicesReplyWhenTheSerialIsFetchedThenTheFirstRowSerialIsReturned
 func TestGivenAReplyThatIsNoDeviceListWhenTheSerialIsFetchedThenTheErrorNamesTheProblem(t *testing.T) {
 	// A length the server never satisfies must stop accumulating at the byte cap.
 	neverCompletes := []byte("OKAYffff")
-	filler := bytes.Repeat([]byte("x"), maxDevicesReplyBytes+1-len(neverCompletes))
+	filler := bytes.Repeat([]byte("x"), maxHostReplyBytes+1-len(neverCompletes))
 	testCases := []struct {
 		name     string
 		frames   [][]byte
@@ -133,7 +133,7 @@ func TestGivenAReplyThatIsNoDeviceListWhenTheSerialIsFetchedThenTheErrorNamesThe
 		{name: "no device row", frames: [][]byte{controlFrameNew(), okayDevicesReply("no devices attached\n")},
 			wantErr: errNoDeviceSerial},
 		{name: "a length never satisfied", frames: [][]byte{controlFrameNew(), neverCompletes, filler},
-			wantErr: errDevicesReplyTooLong},
+			wantText: "the devices reply runs past its byte cap"},
 		// Fixture vector v1-magic-new-frame: a byte-protocol server's first frame.
 		{name: "a control frame on another wire version", frames: [][]byte{decodeHex(t, frameVector(t, "v1-magic-new-frame").Hex)},
 			wantErr: errNotControlFrame, wantText: "wire version 0x00"},
@@ -143,7 +143,7 @@ func TestGivenAReplyThatIsNoDeviceListWhenTheSerialIsFetchedThenTheErrorNamesThe
 		t.Run(testCase.name, func(t *testing.T) {
 			wsURL := probeReplyServer(t, testCase.frames...)
 			dialer := newTestDialer(testWait)
-			dialer.serialReplyTimeout = time.Hour // only the reply may end this read
+			dialer.hostReplyTimeout = time.Hour // only the reply may end this read
 
 			_, err := dialer.FetchDeviceSerial(context.Background(), wsURL)
 
@@ -170,7 +170,7 @@ func TestGivenAWriteDeadlineAlreadyPastWhenTheSerialIsFetchedThenTheSendErrorIsR
 func TestGivenASilentServerWhenTheSerialIsFetchedThenTheReplyTimeoutEndsIt(t *testing.T) {
 	wsURL := probeReplyServer(t) // consumes the request, sends nothing back
 	dialer := newTestDialer(testWait)
-	dialer.serialReplyTimeout = 100 * time.Millisecond
+	dialer.hostReplyTimeout = 100 * time.Millisecond
 
 	_, err := dialer.FetchDeviceSerial(context.Background(), wsURL)
 
@@ -192,7 +192,7 @@ func TestGivenAFetchAwaitingItsReplyWhenTheContextEndsThenTheFetchReturnsAndClos
 		close(closed)
 	})
 	dialer := newTestDialer(testWait)
-	dialer.serialReplyTimeout = time.Hour
+	dialer.hostReplyTimeout = time.Hour
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		<-requested

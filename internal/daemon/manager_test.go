@@ -704,8 +704,16 @@ func (buffer *lockedBuffer) String() string {
 	return buffer.contents.String()
 }
 
-// hostDevicesRequest is the add's serial fetch, framed.
-const hostDevicesRequest = "000chost:devices"
+// The add's serial fetch and the attach's host reply prefetch, framed.
+const (
+	hostVersionRequest     = "000chost:version"
+	hostDevicesRequest     = "000chost:devices"
+	hostDevicesLongRequest = "000ehost:devices-l"
+)
+
+// attachFetches is what an add sends, one session per request, in byte order: the serial
+// fetch's host:devices, then one fetch of each cached host reply.
+var attachFetches = []string{hostDevicesRequest, hostDevicesRequest, hostVersionRequest, hostDevicesLongRequest}
 
 // attachSerial is the serial the mocks' one device row names.
 const attachSerial = "R3CN30ABCDE"
@@ -713,8 +721,8 @@ const attachSerial = "R3CN30ABCDE"
 // hostDevicesReply is the host:devices reply naming attachSerial, framed.
 var hostDevicesReply = fmt.Sprintf("OKAY%04x%s", len(attachSerial+"\tdevice\n"), attachSerial+"\tdevice\n")
 
-// answerAttach plays the server for an attach and a relayed command: one device row to the
-// serial fetch, OKAY to a select, echo for the rest.
+// answerAttach plays the server for an attach and a relayed command: one device row to
+// host:devices, OKAY to a select, echo for the rest.
 func answerAttach(_ *testsupport.MockSession, data []byte) []byte {
 	switch string(data) {
 	case hostDevicesRequest:
@@ -751,8 +759,9 @@ func sortedInbounds(mock *testsupport.SessionMockWSS) []string {
 
 func TestGivenARunningDaemonWhenADeviceIsAddedThenANotifierOpensAndFollowsTheAttachment(t *testing.T) {
 	// The whole wiring in one test: the daemon body hands the dialer to the attachment, the
-	// add fetches the serial, opens a notifier on the reverse route and clears the server's
-	// reverse rules once it is ready, and the shutdown detach closes the notifier.
+	// add fetches the serial, the attach fetches the host replies, opens a notifier on the
+	// reverse route and clears the server's reverse rules once it is ready, and the shutdown
+	// detach closes the notifier.
 	sessions, mock := testsupport.NewServerMockWSS(t, testsupport.SessionMockConfig{OnMessage: answerReverseClear})
 	cfg := config.Default()
 	cfg.ListenPort = freePort(t)
@@ -769,8 +778,8 @@ func TestGivenARunningDaemonWhenADeviceIsAddedThenANotifierOpensAndFollowsTheAtt
 	// The clear's kill follows its select's reply, so wait for the whole of both sessions.
 	require.Eventually(t, func() bool {
 		return slices.Equal(sortedInbounds(sessions),
-			[]string{hostDevicesRequest, "0012host:transport-any0017reverse:killforward-all"})
-	}, testTimeout, testPollInterval, "the attach must fetch the serial once and clear the server's reverse rules once")
+			append(slices.Clone(attachFetches), "0012host:transport-any0017reverse:killforward-all"))
+	}, testTimeout, testPollInterval, "the add must fetch each host reply once and clear the server's reverse rules once")
 
 	cancel()
 
@@ -785,8 +794,9 @@ func TestGivenARunningDaemonWhenADeviceIsAddedThenANotifierOpensAndFollowsTheAtt
 	assert.Empty(t, mock.Refusals(), "the daemon's hello must satisfy the server")
 }
 
-func TestGivenAnAttachedDeviceWhenIdleThenTheSerialFetchIsItsOnlySession(t *testing.T) {
-	// After the add's fetch, an idle attachment holds only its parked websocket.
+func TestGivenAnAttachedDeviceWhenIdleThenTheAddsHostFetchesAreItsOnlySessions(t *testing.T) {
+	// After the add's serial fetch and the attach's host reply fetches, an idle attachment holds
+	// only its parked websocket.
 	mock := testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{OnMessage: answerAttach})
 	cfg := config.Default()
 	cfg.ListenPort = freePort(t)
@@ -797,12 +807,14 @@ func TestGivenAnAttachedDeviceWhenIdleThenTheSerialFetchIsItsOnlySession(t *test
 	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: "arn:1"})
 	require.NoError(t, err)
 	require.True(t, addResp.OK, "add over the live control socket must succeed: %s", addResp.Error)
-	require.Eventually(t, func() bool { return mock.SessionsOpened() == 1 && mock.ConnectionsAccepted() == 2 },
-		testTimeout, testPollInterval, "the attach must fetch the serial and park a websocket")
+	fetches := len(attachFetches)
+	require.Eventually(t, func() bool {
+		return mock.SessionsOpened() == fetches && mock.ConnectionsAccepted() == fetches+1
+	}, testTimeout, testPollInterval, "the add must fetch each host reply and park a websocket")
 
-	assert.Never(t, func() bool { return mock.SessionsOpened() > 1 || mock.ConnectionsAccepted() > 2 },
+	assert.Never(t, func() bool { return mock.SessionsOpened() > fetches || mock.ConnectionsAccepted() > fetches+1 },
 		500*time.Millisecond, testPollInterval, "an idle attachment dials nothing more")
-	assert.Equal(t, []string{hostDevicesRequest}, sessionInbounds(mock), "the fetch sends host:devices alone")
+	assert.Equal(t, attachFetches, sortedInbounds(mock), "each fetch sends its request alone")
 
 	cancel()
 
@@ -826,9 +838,11 @@ func TestGivenAnAttachedDeviceWhenAnAdbCommandArrivesThenItRidesTheWebsocketPark
 	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: "arn:1"})
 	require.NoError(t, err)
 	require.True(t, addResp.OK, "add over the live control socket must succeed: %s", addResp.Error)
-	// The serial fetch is the one session; the other websocket is parked.
-	require.Eventually(t, func() bool { return mock.ConnectionsAccepted() == 2 && mock.SessionsOpened() == 1 },
-		testTimeout, testPollInterval, "attaching a device must park one adb websocket ahead of any command")
+	// The attach fetches are the sessions; the other websocket is parked.
+	fetches := len(attachFetches)
+	require.Eventually(t, func() bool {
+		return mock.ConnectionsAccepted() == fetches+1 && mock.SessionsOpened() == fetches
+	}, testTimeout, testPollInterval, "attaching a device must park one adb websocket ahead of any command")
 
 	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.ListenPort)))
 	require.NoError(t, err)
@@ -844,8 +858,9 @@ func TestGivenAnAttachedDeviceWhenAnAdbCommandArrivesThenItRidesTheWebsocketPark
 	_, err = io.ReadFull(conn, echoed)
 	require.NoError(t, err, "the relayed command comes back through the parked websocket")
 	assert.Equal(t, service, string(echoed))
-	assert.Equal(t, 2, mock.SessionsOpened(), "the command's first frame minted its session on the parked websocket")
-	require.Eventually(t, func() bool { return mock.ConnectionsAccepted() == 3 }, testTimeout,
+	assert.Equal(t, fetches+1, mock.SessionsOpened(),
+		"the command's first frame minted its session on the parked websocket")
+	require.Eventually(t, func() bool { return mock.ConnectionsAccepted() == fetches+2 }, testTimeout,
 		testPollInterval, "the slot must refill behind the take")
 
 	cancel()
@@ -856,7 +871,7 @@ func TestGivenAnAttachedDeviceWhenAnAdbCommandArrivesThenItRidesTheWebsocketPark
 	case <-time.After(testTimeout):
 		t.Fatal("RunForeground did not return after context cancellation")
 	}
-	assert.Equal(t, 2, mock.SessionsOpened(), "the replacement websocket sent nothing")
+	assert.Equal(t, fetches+1, mock.SessionsOpened(), "the replacement websocket sent nothing")
 }
 
 // reverseOffFail is the framed FAIL a reverse request reads from a daemon that did not opt in.
