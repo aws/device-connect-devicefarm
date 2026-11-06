@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -320,21 +321,23 @@ func TestGivenTheListenPortWhenCheckedThenTheRowNamesItsOccupant(t *testing.T) {
 		setup       func(t *testing.T, inputs *Inputs, state *runState)
 		wantStatus  Status
 		wantSummary string
-		wantHint    func(port int) string
+		wantHint    func(listenAddr string, port int) string
+		// summaryNamesNoAddress: the summary names bare ports, no host:port.
+		summaryNamesNoAddress bool
 	}{
 		{name: "free", setup: func(*testing.T, *Inputs, *runState) {}, wantStatus: Pass, wantSummary: "is free"},
 		{name: "an adb server", setup: func(t *testing.T, inputs *Inputs, _ *runState) {
 			occupyPort(t, inputs.Config.ListenPort, answering("OKAY00040029"))
-		}, wantStatus: Fail, wantSummary: "is held by an adb server (version 41)", wantHint: adbServerHint},
+		}, wantStatus: Warn, wantSummary: "an adb server (version 41) is listening on", wantHint: adbServerHint},
 		{name: "an occupant with a malformed version", setup: func(t *testing.T, inputs *Inputs, _ *runState) {
 			occupyPort(t, inputs.Config.ListenPort, answering("OKAY0004zz29"))
-		}, wantStatus: Fail, wantSummary: "address already in use", wantHint: heldPortHint},
+		}, wantStatus: Fail, wantSummary: "because another program is listening on it", wantHint: daemon.HeldPortText},
 		{name: "a silent occupant", setup: func(t *testing.T, inputs *Inputs, _ *runState) {
 			occupyPort(t, inputs.Config.ListenPort, silentOccupant)
-		}, wantStatus: Fail, wantSummary: "address already in use", wantHint: heldPortHint},
+		}, wantStatus: Fail, wantSummary: "because another program is listening on it", wantHint: daemon.HeldPortText},
 		{name: "an address nobody answers", setup: func(_ *testing.T, inputs *Inputs, _ *runState) {
 			inputs.Config.ListenAddr = "203.0.113.1" // TEST-NET-3: not this machine, never routed
-		}, wantStatus: Fail, wantSummary: "assign requested address", wantHint: func(port int) string { return listenAddrHint("203.0.113.1", port) }},
+		}, wantStatus: Fail, wantSummary: "assign requested address", wantHint: func(_ string, port int) string { return listenAddrHint("203.0.113.1", port) }},
 		{name: "a privileged port", setup: func(t *testing.T, inputs *Inputs, _ *runState) {
 			inputs.Config.ListenPort = 1
 			if listener, err := net.Listen("tcp", "127.0.0.1:1"); !errors.Is(err, os.ErrPermission) {
@@ -343,7 +346,7 @@ func TestGivenTheListenPortWhenCheckedThenTheRowNamesItsOccupant(t *testing.T) {
 				}
 				t.Skip("this user may bind privileged ports")
 			}
-		}, wantStatus: Fail, wantSummary: "permission denied", wantHint: lowPortHint},
+		}, wantStatus: Fail, wantSummary: "permission denied", wantHint: func(_ string, port int) string { return lowPortHint(port) }},
 		{name: "the running daemon on this port", setup: func(t *testing.T, inputs *Inputs, state *runState) {
 			occupyPort(t, inputs.Config.ListenPort, silentOccupant) // a bind attempt would fail
 			state.daemonStatus, state.daemonPID = control.Response{OK: true, Port: inputs.Config.ListenPort}, 4242
@@ -351,9 +354,9 @@ func TestGivenTheListenPortWhenCheckedThenTheRowNamesItsOccupant(t *testing.T) {
 		{name: "the running daemon on another port", setup: func(_ *testing.T, inputs *Inputs, state *runState) {
 			state.daemonStatus = control.Response{OK: true, Port: inputs.Config.ListenPort + 1, ARN: "arn:1", ReverseEnabled: true}
 			state.daemonPID = 4242
-		}, wantStatus: Warn, wantSummary: "the running daemon (pid 4242) listens on port", wantHint: func(port int) string {
+		}, wantStatus: Warn, wantSummary: "the running daemon (pid 4242) listens on port", wantHint: func(_ string, port int) string {
 			return otherPortDaemonHint(control.Response{OK: true, Port: port + 1, ARN: "arn:1", ReverseEnabled: true}, port)
-		}},
+		}, summaryNamesNoAddress: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -365,11 +368,11 @@ func TestGivenTheListenPortWhenCheckedThenTheRowNamesItsOccupant(t *testing.T) {
 
 			assert.Equal(t, tc.wantStatus, result.Status)
 			assert.Contains(t, result.Summary, tc.wantSummary)
-			if tc.wantStatus != Warn {
+			if !tc.summaryNamesNoAddress {
 				assert.Contains(t, result.Summary, net.JoinHostPort(inputs.Config.ListenAddr, strconv.Itoa(inputs.Config.ListenPort)))
 			}
 			if tc.wantHint != nil {
-				assert.Equal(t, tc.wantHint(inputs.Config.ListenPort), result.Hint)
+				assert.Equal(t, tc.wantHint(inputs.Config.ListenAddr, inputs.Config.ListenPort), result.Hint)
 			} else {
 				assert.Empty(t, result.Hint)
 			}
@@ -389,6 +392,14 @@ func TestGivenAListenAddressWithControlCharactersWhenCheckedThenTheSummaryStaysO
 	assert.NotContains(t, result.Hint, "\n")
 }
 
+func TestGivenAnAdbServerOnTheDefaultPortWhenItsHintIsBuiltThenTheFixQuitsTheProgramThatRestartsAdb(t *testing.T) {
+	assert.Equal(t, "an adb server is listening on 127.0.0.1:5037, so the daemon cannot bind it until that server stops. Run "+
+		"'devicefarm-connect bridge start --port 5037': it stops that server first, as 'adb kill-server' would. If a program that "+
+		"restarts adb, such as Android Studio, takes the port back, quit that program, run 'devicefarm-connect bridge start --port 5037' "+
+		"again, then open it: it then uses the bridge as its adb server on port 5037.",
+		adbServerHint(config.DefaultListenAddr, config.DefaultListenPort))
+}
+
 func TestGivenAPortProblemWhenItsHintIsBuiltThenEveryCommandCarriesTheRealPortOnOneLine(t *testing.T) {
 	const port = 5555
 	reverseDaemon := control.Response{OK: true, Port: 6000, ARN: "arn:1", ReverseEnabled: true}
@@ -398,13 +409,17 @@ func TestGivenAPortProblemWhenItsHintIsBuiltThenEveryCommandCarriesTheRealPortOn
 		wantQuoted []string
 		wantAbsent string
 	}{
-		{name: "an adb server", hint: adbServerHint(port),
-			wantQuoted: []string{"'adb -P 5555 kill-server'", "'" + bridgeStartCommand + " --port 5555'", otherPortHint}},
+		{name: "an adb server", hint: adbServerHint("127.0.0.1", port), wantQuoted: []string{"127.0.0.1:5555",
+			"'" + bridgeStartCommand + " --port 5555':", "'adb kill-server'", "'" + bridgeStartCommand + " --port <n>'", "'adb -P <n>'"},
+			wantAbsent: "--listen-addr"},
+		{name: "an adb server on another address", hint: adbServerHint("127.0.0.2", port), wantQuoted: []string{"127.0.0.2:5555",
+			"'" + bridgeStartCommand + " --port 5555 --listen-addr 127.0.0.2':"}},
 		{name: "an invalid listen config on the default address", hint: listenConfigHint(config.DefaultListenAddr),
 			wantQuoted: []string{"'--port' a number from 1 to 65535", "'" + bridgeStartCommand + " --port 5037'"}, wantAbsent: "--listen-addr"},
 		{name: "an invalid listen config on another address", hint: listenConfigHint("0.0.0.0"), wantQuoted: []string{"'--port' a number from 1 to 65535",
 			"'--listen-addr' a non-empty address with no port or brackets", "'" + bridgeStartCommand + " --port 5037 --listen-addr 127.0.0.1'"}},
-		{name: "another occupant", hint: heldPortHint(port), wantQuoted: []string{"'" + bridgeStartCommand + " --port 5555'", otherPortHint}},
+		{name: "another occupant", hint: daemon.HeldPortText("127.0.0.1", port), wantQuoted: []string{"127.0.0.1:5555",
+			"'" + bridgeStartCommand + " --port 5555'", "'" + bridgeStartCommand + " --port <n>'", "'adb -P <n>'"}, wantAbsent: "--listen-addr"},
 		{name: "a privileged port", hint: lowPortHint(port), wantQuoted: []string{"'" + bridgeStartCommand + " --port <n>'", "'adb -P <n>'"}},
 		{name: "a Windows reserved port", hint: reservedPortHint(port), wantQuoted: []string{"port 5555",
 			"'netsh int ipv4 show excludedportrange protocol=tcp'", "'" + bridgeStartCommand + " --port <n>'", "'adb -P <n>'"}, wantAbsent: "--listen-addr"},
@@ -430,36 +445,38 @@ func TestGivenAPortProblemWhenItsHintIsBuiltThenEveryCommandCarriesTheRealPortOn
 	}
 }
 
-func TestGivenABindErrorNobodyAnswersWhenTheHintIsPickedThenOnlyAddrNotAvailBlamesTheAddress(t *testing.T) {
+func TestGivenABindErrorNobodyAnswersWhenTheHintIsPickedThenOnlyAnInUseErrorBlamesAnotherProgram(t *testing.T) {
 	bindError := func(errno syscall.Errno) error {
 		return &net.OpError{Op: "listen", Net: "tcp", Err: os.NewSyscallError("bind", errno)}
 	}
+	const heldSummary = "cannot bind 203.0.113.1:5037 because another program is listening on it"
+	heldHint := daemon.HeldPortText("203.0.113.1", 5037)
 	tests := []struct {
-		name     string
-		err      error
-		goos     string
-		wantHint string
+		name        string
+		err         error
+		goos        string
+		wantSummary string
+		wantHint    string
 	}{
 		{name: "EADDRNOTAVAIL", err: bindError(syscall.EADDRNOTAVAIL), goos: "linux", wantHint: listenAddrHint("203.0.113.1", 5037)},
-		{name: "EADDRINUSE", err: bindError(syscall.EADDRINUSE), goos: "linux", wantHint: heldPortHint(5037)},
-		{name: "another error", err: errors.New("boom"), goos: "linux", wantHint: heldPortHint(5037)},
-		{name: "WSAEADDRNOTAVAIL on Windows", err: bindError(winsockAddrNotAvail), goos: "windows", wantHint: listenAddrHint("203.0.113.1", 5037)},
+		{name: "EADDRINUSE", err: bindError(syscall.EADDRINUSE), goos: "linux", wantSummary: heldSummary, wantHint: heldHint},
+		{name: "a name that does not resolve", err: &net.DNSError{Err: "no such host", Name: "devbox.invalid", IsNotFound: true},
+			goos: "linux", wantHint: listenAddrHint("203.0.113.1", 5037)},
+		{name: "another error", err: errors.New("boom"), goos: "linux", wantHint: listenAddrHint("203.0.113.1", 5037)},
+		{name: "WSAEADDRNOTAVAIL on Windows", err: bindError(syscall.Errno(10049)), goos: "windows", wantHint: listenAddrHint("203.0.113.1", 5037)},
 		{name: "WSAEACCES on Windows", err: bindError(winsockAccessDenied), goos: "windows", wantHint: reservedPortHint(5037)},
-		{name: "WSAEACCES on Linux", err: bindError(winsockAccessDenied), goos: "linux", wantHint: heldPortHint(5037)},
-		{name: "WSAEADDRINUSE on Windows", err: bindError(syscall.Errno(10048)), goos: "windows", wantHint: heldPortHint(5037)},
+		{name: "WSAEACCES on Linux", err: bindError(winsockAccessDenied), goos: "linux", wantHint: listenAddrHint("203.0.113.1", 5037)},
+		{name: "WSAEADDRINUSE on Windows", err: bindError(syscall.Errno(10048)), goos: "windows", wantSummary: heldSummary, wantHint: heldHint},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.wantHint, bindErrorHint(tc.err, tc.goos, "203.0.113.1", 5037))
+			summary, hint := bindErrorHint(tc.err, tc.goos, "203.0.113.1", 5037)
+
+			// Only the held-port arm replaces the bind error as the summary.
+			assert.Equal(t, cmp.Or(tc.wantSummary, tc.err.Error()), summary)
+			assert.Equal(t, tc.wantHint, hint)
 		})
 	}
-}
-
-func TestGivenAnUnspecifiedListenAddressWhenTheOccupantIsDialedThenLoopbackIsUsed(t *testing.T) {
-	assert.Equal(t, "127.0.0.1:5037", occupantAddress("0.0.0.0", 5037))
-	assert.Equal(t, "[::1]:5037", occupantAddress("::", 5037))
-	assert.Equal(t, "[::1]:5037", occupantAddress("::1", 5037))
-	assert.Equal(t, "localhost:5037", occupantAddress("localhost", 5037))
 }
 
 func TestGivenAnInvalidListenConfigWhenCheckedThenItFailsWithTheValidateText(t *testing.T) {
@@ -532,24 +549,39 @@ func TestGivenTheClosingOpenerWhenAConnectionArrivesThenItIsClosedAtOnce(t *test
 	listener.Close()
 }
 
-func TestGivenAFreshMachineAndNoSessionArnWhenTheTableRunsThenNothingFails(t *testing.T) {
-	shortRuntimeDir(t)
-	inputs := localInputs(t)
-	inputs.Logger = nil
-	inputs.Credentials = func(context.Context) (session.CredentialSummary, error) {
-		return session.CredentialSummary{Source: "StaticCredentials"}, nil
+func TestGivenNoSessionArnWhenTheTableRunsThenNothingFailsEvenWithAnAdbServerOnTheListenPort(t *testing.T) {
+	tests := []struct {
+		name           string
+		occupyPortWith func(net.Conn)
+		wantListenPort Status
+	}{
+		{name: "a free listen port", wantListenPort: Pass},
+		{name: "an adb server on the listen port", occupyPortWith: answering("OKAY00040029"), wantListenPort: Warn},
 	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			shortRuntimeDir(t)
+			inputs := localInputs(t)
+			inputs.Logger = nil
+			inputs.Credentials = func(context.Context) (session.CredentialSummary, error) {
+				return session.CredentialSummary{Source: "StaticCredentials"}, nil
+			}
+			if tc.occupyPortWith != nil {
+				occupyPort(t, inputs.Config.ListenPort, tc.occupyPortWith)
+			}
 
-	report := Run(context.Background(), Checks(inputs))
+			report := Run(context.Background(), Checks(inputs))
 
-	ids := make([]string, 0, len(report.Rows))
-	statuses := make([]Status, 0, len(report.Rows))
-	for _, row := range report.Rows {
-		ids = append(ids, row.ID)
-		statuses = append(statuses, row.Status)
+			ids := make([]string, 0, len(report.Rows))
+			statuses := make([]Status, 0, len(report.Rows))
+			for _, row := range report.Rows {
+				ids = append(ids, row.ID)
+				statuses = append(statuses, row.Status)
+			}
+			assert.Equal(t, []string{checkRuntimeDir, checkDaemon, checkListenPort, checkForwardTable, checkCredentials, checkSession,
+				checkRelaySession, checkReattach, checkReverse, checkAdbVersion}, ids)
+			assert.Equal(t, []Status{Pass, Pass, tc.wantListenPort, Pass, Pass, Skip, Skip, Skip, Skip, Skip}, statuses, "%v", report.Rows)
+			assert.Equal(t, 0, report.Failed(), "exit code 0")
+		})
 	}
-	assert.Equal(t, []string{checkRuntimeDir, checkDaemon, checkListenPort, checkForwardTable, checkCredentials, checkSession,
-		checkRelaySession, checkReattach, checkReverse, checkAdbVersion}, ids)
-	assert.Equal(t, []Status{Pass, Pass, Pass, Pass, Pass, Skip, Skip, Skip, Skip, Skip}, statuses, "%v", report.Rows)
-	assert.Equal(t, 0, report.Failed())
 }

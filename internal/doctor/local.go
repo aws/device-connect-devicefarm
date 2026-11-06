@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"runtime"
@@ -115,8 +114,6 @@ const (
 		config.BinaryName + "' to listen on 127.0.0.1 in the sandbox, container or firewall rules, then rerun '" + doctorCommand +
 		"'. Each 'adb forward' rule opens one port on 127.0.0.1, and every forwarded connection enters through it."
 	adbPointHint = "point adb at it with 'adb -P <n>'"
-	// otherPortHint ends every held-port hint: the daemon on a port of the user's choice.
-	otherPortHint = "Or start the daemon on another port with '" + bridgeStartCommand + " --port <n>' and " + adbPointHint + "."
 )
 
 // listenConfigHint names the listen flags to fix. On the default address only --port can be at
@@ -131,18 +128,13 @@ func listenConfigHint(listenAddr string) string {
 		"binds exactly that address, so point adb at the same port."
 }
 
-// adbServerHint stops the adb server on the probed port and starts the daemon there before adb
-// can restart its server. -P targets that port, not adb's default.
-func adbServerHint(port int) string {
-	return fmt.Sprintf("an adb server holds the port the daemon would bind. Stop it with 'adb -P %d kill-server', then run "+
-		"'%s --port %d' before any other adb command, or adb restarts its server on that port. %s",
-		port, bridgeStartCommand, port, otherPortHint)
-}
-
-// heldPortHint covers an occupant that is not an adb server, answering or not.
-func heldPortHint(port int) string {
-	return fmt.Sprintf("another program holds port %d, so the daemon cannot bind it. Stop that program, then run '%s --port %d'. %s",
-		port, bridgeStartCommand, port, otherPortHint)
+// adbServerHint: bridge start stops the adb server on the probed address before it starts the daemon;
+// a program that takes the port back gets AdbServerKeepsPortFix.
+func adbServerHint(listenAddr string, port int) string {
+	return fmt.Sprintf("an adb server is listening on %s, so the daemon cannot bind it until that server stops. Run '%s': it stops that "+
+		"server first, as 'adb kill-server' would. If a program that restarts adb, such as Android Studio, takes the port back, %s",
+		net.JoinHostPort(listenAddr, strconv.Itoa(port)), daemon.StartCommand(listenAddr, port),
+		daemon.AdbServerKeepsPortFix(listenAddr, port, daemon.LeadQuotesStart))
 }
 
 // lowPortHint: the bind was refused for want of permission.
@@ -168,27 +160,31 @@ func listenAddrHint(address string, port int) string {
 		"reach it there.", safeValue(address), bridgeStartCommand, port)
 }
 
-// Winsock codes a Windows bind error carries; syscall.EADDRNOTAVAIL and os.ErrPermission do not
-// match them there. 10048 (WSAEADDRINUSE) needs no arm: the held-port hint is the default.
-const (
-	winsockAccessDenied = syscall.Errno(10013) // WSAEACCES: an excluded range or an exclusive holder
-	winsockAddrNotAvail = syscall.Errno(10049) // WSAEADDRNOTAVAIL
-)
+// winsockAccessDenied is WSAEACCES, which a Windows bind error carries for an excluded range or an
+// exclusive holder; os.ErrPermission does not match it there.
+const winsockAccessDenied = syscall.Errno(10013)
 
-// bindErrorHint picks the fix for a bind error whose port nobody answered; goos is a parameter so
-// one OS can test every arm. Address-not-available blames the address; Windows access denied
-// blames a reserved range; the rest blame the port, whose occupant may listen on another
-// interface the loopback probe cannot reach.
-func bindErrorHint(err error, goos string, address string, port int) string {
-	windows := goos == "windows"
+// bindErrorHint picks the summary and fix for a bind error nobody answered; goos is a parameter so
+// one OS tests every arm. Windows access denied blames a reserved range; in use blames another
+// program, which may listen on an interface the loopback probe cannot reach; any other error (a
+// name that does not resolve, an address not on this machine) blames the address.
+func bindErrorHint(err error, goos string, listenAddr string, port int) (summary, hint string) {
 	switch {
-	case errors.Is(err, syscall.EADDRNOTAVAIL) || (windows && errors.Is(err, winsockAddrNotAvail)):
-		return listenAddrHint(address, port)
-	case windows && errors.Is(err, winsockAccessDenied):
-		return reservedPortHint(port)
+	case goos == "windows" && errors.Is(err, winsockAccessDenied):
+		return safeValue(err.Error()), reservedPortHint(port)
+	case daemon.HolderMayAnswer(err, goos):
+		return heldPortPair(listenAddr, port)
 	default:
-		return heldPortHint(port)
+		return safeValue(err.Error()), listenAddrHint(listenAddr, port)
 	}
+}
+
+// heldPortPair is the summary and fix when another program holds the port; the fix is the text
+// bridge start prints.
+func heldPortPair(listenAddr string, port int) (summary, hint string) {
+	listenAddr = safeValue(listenAddr)
+	return fmt.Sprintf("cannot bind %s because another program is listening on it", net.JoinHostPort(listenAddr, strconv.Itoa(port))),
+		daemon.HeldPortText(listenAddr, port)
 }
 
 // otherPortDaemonHint moves the running daemon to the probed port, its flags and device kept, or
@@ -312,9 +308,10 @@ func checkRunningDaemon(inputs Inputs, state *runState) Result {
 }
 
 // checkListenPortFree binds the listen address once and frees it; a running daemon on the port
-// passes with no bind. A bind refused for want of permission fails at once; on any other bind
-// error, one host:version tells an adb server from any other occupant, and with no answer the
-// bind error itself picks the hint.
+// passes with no bind. A bind refused for want of permission fails at once. When a local socket
+// holds the port (daemon.HolderMayAnswer), one host:version tells an adb server from any other
+// occupant; otherwise, or with no answer, the bind error itself picks the hint. An adb server is
+// a WARN: bridge start stops it, the doctor never does.
 func checkListenPortFree(inputs Inputs, state *runState) Result {
 	cfg := inputs.Config
 	if err := cfg.Validate(); err != nil {
@@ -337,52 +334,18 @@ func checkListenPortFree(inputs Inputs, state *runState) Result {
 	if errors.Is(err, os.ErrPermission) {
 		return Result{Status: Fail, Summary: safeValue(err.Error()), Hint: lowPortHint(cfg.ListenPort)}
 	}
-	version, connected, adbServer := probeOccupant(occupantAddress(cfg.ListenAddr, cfg.ListenPort))
-	switch {
-	case adbServer:
-		return Result{Status: Fail, Summary: fmt.Sprintf("%s is held by an adb server (version %d)", address, version),
-			Hint: adbServerHint(cfg.ListenPort)}
-	case connected:
-		return Result{Status: Fail, Summary: safeValue(err.Error()), Hint: heldPortHint(cfg.ListenPort)}
-	default:
-		return Result{Status: Fail, Summary: safeValue(err.Error()), Hint: bindErrorHint(err, runtime.GOOS, cfg.ListenAddr, cfg.ListenPort)}
-	}
-}
-
-// occupantAddress is where to dial the port's occupant: the loopback of the family when the
-// listen address is unspecified, which Windows refuses to dial.
-func occupantAddress(listenAddr string, port int) string {
-	host := listenAddr
-	if ip := net.ParseIP(listenAddr); ip != nil && ip.IsUnspecified() {
-		host = "127.0.0.1"
-		if ip.To4() == nil {
-			host = "::1"
+	summary, hint := bindErrorHint(err, runtime.GOOS, cfg.ListenAddr, cfg.ListenPort)
+	if daemon.HolderMayAnswer(err, runtime.GOOS) {
+		version, connected, adbServer := daemon.ProbeOccupant(daemon.OccupantAddress(cfg.ListenAddr, cfg.ListenPort), occupantReplyTimeout)
+		if adbServer {
+			return Result{Status: Warn, Summary: fmt.Sprintf("an adb server (version %d) is listening on %s", version, safeValue(address)),
+				Hint: adbServerHint(safeValue(cfg.ListenAddr), cfg.ListenPort)}
+		}
+		if connected {
+			summary, hint = heldPortPair(cfg.ListenAddr, cfg.ListenPort)
 		}
 	}
-	return net.JoinHostPort(host, strconv.Itoa(port))
-}
-
-// probeOccupant asks the port's occupant host:version. adbServer is true only for a reply of
-// OKAY, 0004 and four hex digits; connected says whether anything answered the dial at all.
-func probeOccupant(address string) (version int, connected bool, adbServer bool) {
-	conn, err := net.DialTimeout("tcp", address, occupantReplyTimeout)
-	if err != nil {
-		return 0, false, false
-	}
-	defer conn.Close()
-	if err = conn.SetDeadline(time.Now().Add(occupantReplyTimeout)); err != nil {
-		return 0, true, false
-	}
-	const okay = "OKAY"
-	reply := make([]byte, len(okay)+adbwire.HostVersionReplyLen)
-	if _, err = conn.Write([]byte(adbwire.HostVersionRequest)); err == nil {
-		_, err = io.ReadFull(conn, reply)
-	}
-	if err != nil || string(reply[:len(okay)]) != okay {
-		return 0, true, false
-	}
-	parsed, err := adbwire.ParseHostVersionReply(reply[len(okay):])
-	return parsed, true, err == nil
+	return Result{Status: Fail, Summary: summary, Hint: hint}
 }
 
 // closingOpener stands in for the device-stream opener: it closes every accepted connection.

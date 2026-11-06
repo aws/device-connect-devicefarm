@@ -1,13 +1,19 @@
 package daemon
 
 import (
+	"bufio"
 	"context"
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"math"
+	"net"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aws/device-connect-devicefarm/internal/bridge"
@@ -41,9 +47,10 @@ const (
 // step surfaces as an add error to the CLI, not a dead socket. A var so tests can shrink it.
 var resolveTimeout = 8 * time.Second
 
-// spawnDaemon launches the detached daemon child and returns its pid. It is a
-// package var so tests can substitute a fake that simulates the child (writing
-// the pidfile) without forking the real binary.
+// spawnDaemon launches the detached daemon child and returns its process handle and
+// a channel that closes when the child exits. A package var: a test fake can play
+// the child (write the pidfile) with no fork. A fake that spawns nothing returns a
+// nil handle and a nil channel, which never closes.
 var spawnDaemon = realSpawnDaemon
 
 // findProcess returns the handle Stop kills through. Package var: a test
@@ -94,7 +101,9 @@ func NewManager(
 
 // Start launches the daemon as a detached background process and waits for it to
 // report ready (by writing its pidfile). If a daemon is already running it is a
-// no-op, matching adb's start-server behavior.
+// no-op, matching adb's start-server behavior. Before the spawn it clears the
+// listen port (clearListenPort). A child that exits or never reports ready is
+// reported with the last error line it logged.
 func (m *DaemonManager) Start() error {
 	if pid, running := m.pidFile.RunningPID(); running {
 		m.logger.Info("daemon already running", "pid", pid)
@@ -115,29 +124,97 @@ func (m *DaemonManager) Start() error {
 	// the spawn does not affect the child's logging.
 	defer logOut.Close()
 
+	if err := m.clearListenPort(); err != nil {
+		return m.unlessRunning(err)
+	}
+	// The child appends after this offset, so an older run's error line is never read.
+	offset, _ := logOut.Seek(0, io.SeekEnd)
 	args := append([]string{DaemonSubcommand}, m.config.AsDaemonArgs()...)
-	pid, err := spawnDaemon(self, args, logOut)
+	child, exited, err := spawnDaemon(self, args, logOut)
 	if err != nil {
-		// spawnDaemon can return a live pid alongside an error (the child forked but
-		// a post-fork step like Process.Release failed), which would otherwise leak
-		// a detached child that reports failure to the user. Best-effort kill it,
-		// mirroring the startup-timeout path; killOrphan is a no-op for pid <= 0, so
-		// this also safely covers the plain cmd.Start() failure.
-		m.killOrphan(pid)
 		return fmt.Errorf("spawn daemon: %w", err)
 	}
 
-	if err := m.waitUntilRunning(startupTimeout); err != nil {
-		// The child was spawned and detached (Release means we hold no handle to
-		// it) but never reported ready: it may have crashed before writing the
-		// pidfile, or it may be hung and still holding the listen port. Best-effort
-		// kill it so it cannot wedge the next start; a failure here is tolerated
-		// because the process may already be gone.
-		m.killOrphan(pid)
-		return failure.WithFix(err, "read the daemon log: "+m.paths.LogFile)
+	if err := m.waitUntilRunning(startupTimeout, exited); err != nil {
+		// A hung child may still hold the listen port: kill it, best-effort, so the
+		// next start is not wedged.
+		killOrphan(child)
+		return m.unlessRunning(m.startupError(err, offset))
 	}
-	m.logger.Info("daemon started", "pid", pid, "logfile", m.paths.LogFile)
+	m.logger.Info("daemon started", "pid", child.Pid, "logfile", m.paths.LogFile)
 	return nil
+}
+
+// unlessRunning returns nil when a daemon runs by now, else err. Two starts can pass
+// the pidfile check together; the loser's failure then means the winner serves.
+func (m *DaemonManager) unlessRunning(err error) error {
+	if pid, running := m.pidFile.RunningPID(); running {
+		m.logger.Info("daemon already running", "pid", pid)
+		return nil
+	}
+	return err
+}
+
+// listenErrorPrefix starts the child's error when its TCP bind fails (bridge.AdbProxyServer.Listen).
+// The address tells it from the control socket's own "listen on" error.
+func listenErrorPrefix(listenAddr string, port int) string {
+	return "listen on " + net.JoinHostPort(listenAddr, strconv.Itoa(port)) + ": "
+}
+
+// startupError words a child that did not report ready from the last error line it logged
+// after offset. A failed bind is probed again.
+func (m *DaemonManager) startupError(waitErr error, offset int64) error {
+	port, logPath := m.config.ListenPort, m.paths.LogFile
+	start := StartCommand(m.config.ListenAddr, port)
+	childError := lastChildError(logPath, offset)
+	switch {
+	case strings.HasPrefix(childError, listenErrorPrefix(m.config.ListenAddr, port)):
+		return lostBindError(m.config.ListenAddr, port)
+	case childError != "":
+		return fmt.Errorf("the daemon exited while starting: %s. Fix what it reports, then run '%s'. Its log is \"%s\".",
+			childError, start, logPath)
+	case errors.Is(waitErr, errChildExited):
+		return fmt.Errorf("the daemon exited while starting and logged no error. Check \"%s\", then run '%s'.", logPath, start)
+	}
+	return fmt.Errorf("the daemon did not report ready within %s and logged no error, so it was stopped. Check \"%s\", "+
+		"then run '%s'.", startupTimeout, logPath, start)
+}
+
+// lastChildError is the error value of the last level=ERROR line after offset in the log, or
+// "" when there is none. slog's text handler quotes a value only when it must.
+func lastChildError(logPath string, offset int64) string {
+	logFile, err := os.Open(logPath)
+	if err != nil {
+		return ""
+	}
+	defer logFile.Close()
+	last := ""
+	scanner := bufio.NewScanner(io.NewSectionReader(logFile, offset, math.MaxInt64))
+	for scanner.Scan() {
+		if value, found := errorValue(scanner.Text()); found {
+			last = value
+		}
+	}
+	return last
+}
+
+// errorValue reads the error= value of a level=ERROR slog text line: unquoted when quoted, else
+// up to the next space.
+func errorValue(line string) (string, bool) {
+	_, value, found := strings.Cut(line, " error=")
+	if !found || !strings.Contains(line, "level=ERROR") {
+		return "", false
+	}
+	if !strings.HasPrefix(value, `"`) {
+		bare, _, _ := strings.Cut(value, " ")
+		return bare, true
+	}
+	quoted, err := strconv.QuotedPrefix(value)
+	if err != nil {
+		return "", false
+	}
+	unquoted, err := strconv.Unquote(quoted)
+	return unquoted, err == nil
 }
 
 // Stop sends shutdown over the control socket, waits up to the stop timeout for
@@ -634,18 +711,25 @@ func (m *DaemonManager) refreshEndpointOnce(ctx context.Context, device *bridge.
 	return false
 }
 
+// errChildExited is waitUntilRunning's error when the child exits before it reports ready.
+var errChildExited = errors.New("the daemon exited before it reported ready")
+
 // waitUntilRunning polls until the daemon reports ready (pidfile present and
-// live) or the timeout elapses.
-func (m *DaemonManager) waitUntilRunning(timeout time.Duration) error {
+// live), the child exits (exited closes) or the timeout elapses.
+func (m *DaemonManager) waitUntilRunning(timeout time.Duration, exited <-chan struct{}) error {
 	deadline := time.Now().Add(timeout)
 	for {
 		if _, running := m.pidFile.RunningPID(); running {
 			return nil
 		}
 		if !time.Now().Before(deadline) {
-			return fmt.Errorf("timed out after %s waiting for pidfile %q", timeout, m.paths.PidFile)
+			return fmt.Errorf("the daemon did not report ready within %s", timeout)
 		}
-		time.Sleep(startupPollInterval)
+		select {
+		case <-exited:
+			return errChildExited
+		case <-time.After(startupPollInterval):
+		}
 	}
 }
 
@@ -672,38 +756,35 @@ func (m *DaemonManager) waitUntilStopped(pid int, timeout time.Duration) bool {
 	}
 }
 
-// killOrphan best-effort terminates a spawned-but-not-ready daemon child by pid.
-// Start calls it on the startup-timeout path, where the parent holds no process
-// handle (the child was Released on spawn). Every error is intentionally
-// swallowed: the process may already have exited, and a failure to kill it must
-// not mask the startup error the caller is about to return.
-func (m *DaemonManager) killOrphan(pid int) {
-	if pid <= 0 {
-		return
+// killOrphan best-effort terminates a spawned-but-not-ready daemon child. It kills
+// through the handle the exit watcher waits on: once that watcher has reaped the
+// child, the handle reports done and signals nothing, so a reused pid is never hit.
+// Every error is intentionally swallowed: the process may already have exited, and
+// a failure to kill it must not mask the startup error the caller is about to
+// return.
+func killOrphan(child *os.Process) {
+	if child != nil {
+		_ = child.Kill()
 	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return
-	}
-	defer proc.Release()
-	_ = proc.Kill()
 }
 
 // realSpawnDaemon starts the binary at self with the given args as a detached
-// background process, redirecting its stdout/stderr to logOut.
-// It returns the child's pid after fully releasing it (the parent never reaps
-// it), mirroring adb's fork-server detachment.
-func realSpawnDaemon(self string, args []string, logOut *os.File) (int, error) {
+// background process, redirecting its stdout/stderr to logOut. A goroutine waits
+// on the child and closes exited when Wait returns clean, so a child that dies
+// while starting ends the readiness wait at once. The daemon outlives the CLI.
+func realSpawnDaemon(self string, args []string, logOut *os.File) (*os.Process, <-chan struct{}, error) {
 	cmd := exec.Command(self, args...)
 	cmd.Stdout = logOut
 	cmd.Stderr = logOut
 	cmd.SysProcAttr = detachedProcessAttributes
 	if err := cmd.Start(); err != nil {
-		return 0, err
+		return nil, nil, err
 	}
-	pid := cmd.Process.Pid
-	if err := cmd.Process.Release(); err != nil {
-		return pid, err
-	}
-	return pid, nil
+	exited := make(chan struct{})
+	go func() {
+		if _, err := cmd.Process.Wait(); err == nil {
+			close(exited)
+		}
+	}()
+	return cmd.Process, exited, nil
 }

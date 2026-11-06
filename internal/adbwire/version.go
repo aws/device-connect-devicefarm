@@ -9,6 +9,11 @@ import (
 // (adb.cpp handle_host_request), as EncodeRequest frames it; a test pins the two.
 const HostVersionRequest = "000chost:version"
 
+// HostKillRequest is the framed host:kill service 'adb kill-server' sends, as EncodeRequest frames
+// it; a test pins the two. The server answers OKAY and exits, or FAIL when started to reject kills
+// (adb.cpp handle_host_request).
+const HostKillRequest = "0009host:kill"
+
 // HostVersionReplyLen is the byte count after OKAY in the reply: a length prefix of 0004 and
 // four hex digits.
 const HostVersionReplyLen = 8

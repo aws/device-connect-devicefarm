@@ -3,6 +3,7 @@ package daemon
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -37,10 +38,13 @@ const testPollInterval = 10 * time.Millisecond
 // newTestManager builds a DaemonManager backed by a temp runtime dir so tests
 // never touch the real per-user runtime location. Its remote-access client is a
 // default fake; lifecycle tests (Start/Stop/Status) never resolve, so its return
-// is irrelevant to them.
+// is irrelevant to them. It uses a free port, not 5037: Start stops an adb server
+// on its port, and a developer's machine may run a real one.
 func newTestManager(t *testing.T) *DaemonManager {
 	t.Helper()
-	return newTestManagerWithConfig(t, config.Default())
+	cfg := config.Default()
+	cfg.ListenPort = freePort(t)
+	return newTestManagerWithConfig(t, cfg)
 }
 
 // newTestManagerWithConfig is newTestManager with a caller-supplied config, used
@@ -238,7 +242,7 @@ func startForeground(t *testing.T, mgr *DaemonManager) (done <-chan error, cance
 // stubSpawn replaces the package spawnDaemon var for the duration of a test,
 // restoring it on cleanup. The provided function stands in for the detached
 // child.
-func stubSpawn(t *testing.T, fn func(self string, args []string, logOut *os.File) (int, error)) {
+func stubSpawn(t *testing.T, fn func(self string, args []string, logOut *os.File) (*os.Process, <-chan struct{}, error)) {
 	t.Helper()
 	original := spawnDaemon
 	spawnDaemon = fn
@@ -266,9 +270,9 @@ func TestGivenNoDaemonRunningWhenStartedThenSpawnsChildAndReportsRunning(t *test
 	mgr := newTestManager(t)
 	// Stand in for the child: write and lock the pidfile from this process, as
 	// the daemon does on boot.
-	stubSpawn(t, func(_ string, _ []string, _ *os.File) (int, error) {
+	stubSpawn(t, func(_ string, _ []string, _ *os.File) (*os.Process, <-chan struct{}, error) {
 		require.NoError(t, mgr.pidFile.Write())
-		return os.Getpid(), nil
+		return processOf(t, os.Getpid()), nil, nil
 	})
 
 	require.NoError(t, mgr.Start())
@@ -283,9 +287,9 @@ func TestGivenDaemonAlreadyRunningWhenStartedAgainThenIsNoOpAndDoesNotSpawn(t *t
 	require.NoError(t, mgr.pidFile.Write())
 
 	spawnCalled := false
-	stubSpawn(t, func(_ string, _ []string, _ *os.File) (int, error) {
+	stubSpawn(t, func(_ string, _ []string, _ *os.File) (*os.Process, <-chan struct{}, error) {
 		spawnCalled = true
-		return 0, nil
+		return nil, nil, nil
 	})
 
 	require.NoError(t, mgr.Start())
@@ -296,10 +300,10 @@ func TestGivenDaemonAlreadyRunningWhenStartedAgainThenIsNoOpAndDoesNotSpawn(t *t
 func TestGivenChildForwardedArgsWhenStartedThenDaemonSubcommandLeadsArgs(t *testing.T) {
 	mgr := newTestManager(t)
 	var capturedArgs []string
-	stubSpawn(t, func(_ string, args []string, _ *os.File) (int, error) {
+	stubSpawn(t, func(_ string, args []string, _ *os.File) (*os.Process, <-chan struct{}, error) {
 		capturedArgs = args
 		require.NoError(t, mgr.pidFile.Write())
-		return os.Getpid(), nil
+		return processOf(t, os.Getpid()), nil, nil
 	})
 
 	require.NoError(t, mgr.Start())
@@ -311,27 +315,11 @@ func TestGivenChildForwardedArgsWhenStartedThenDaemonSubcommandLeadsArgs(t *test
 
 func TestGivenSpawnFailsWhenStartedThenErrorReturned(t *testing.T) {
 	mgr := newTestManager(t)
-	stubSpawn(t, func(_ string, _ []string, _ *os.File) (int, error) {
-		return 0, assert.AnError
+	stubSpawn(t, func(_ string, _ []string, _ *os.File) (*os.Process, <-chan struct{}, error) {
+		return nil, nil, assert.AnError
 	})
 
 	require.Error(t, mgr.Start())
-}
-
-func TestGivenSpawnReturnsLivePidWithErrorWhenStartedThenErrorsAndKillsOrphan(t *testing.T) {
-	mgr := newTestManager(t)
-
-	// realSpawnDaemon can fork a live child and still return an error (e.g. a
-	// post-fork Process.Release failure), yielding a non-zero pid alongside err.
-	// Start must reap that child rather than leak it as an untracked orphan.
-	orphanPid := startRealChild(t, "exec sleep 60")
-	stubSpawn(t, func(_ string, _ []string, _ *os.File) (int, error) {
-		return orphanPid, assert.AnError
-	})
-
-	require.Error(t, mgr.Start())
-	assert.Eventually(t, func() bool { return !processAlive(orphanPid) }, 5*time.Second, 20*time.Millisecond,
-		"a child spawned alongside a spawn error must be killed, not orphaned")
 }
 
 // shortStartupTimeout shrinks the package startup timeout for the duration of a
@@ -350,26 +338,354 @@ func TestGivenChildSpawnsButNeverReportsReadyWhenStartedThenErrorsAndKillsOrphan
 	// The "child" is a real, long-lived process whose pid Start will try to clean
 	// up. It never writes the pidfile, so the readiness wait times out.
 	orphanPid := startRealChild(t, "exec sleep 60")
-	stubSpawn(t, func(_ string, _ []string, _ *os.File) (int, error) {
-		return orphanPid, nil
+	stubSpawn(t, func(_ string, _ []string, _ *os.File) (*os.Process, <-chan struct{}, error) {
+		return processOf(t, orphanPid), nil, nil
 	})
 
 	err := mgr.Start()
 
 	require.Error(t, err, "a child that never reports ready must fail Start")
-	assert.ErrorContains(t, err, "timed out after")
-	assert.ErrorContains(t, err, "; read the daemon log: "+mgr.paths.LogFile)
+	assert.ErrorContains(t, err, "did not report ready within")
+	assert.ErrorContains(t, err, `Check "`+mgr.paths.LogFile+`"`)
 	assert.Eventually(t, func() bool { return !processAlive(orphanPid) }, 5*time.Second, 20*time.Millisecond,
 		"the orphaned child must be killed on the startup-timeout path")
 }
 
-func TestGivenAlreadyDeadOrphanWhenKillOrphanThenDoesNotPanic(t *testing.T) {
-	mgr := newTestManager(t)
+// stopRefusedText is what Start returns when the adb server on 127.0.0.1:port did not stop.
+func stopRefusedText(port int, cause string) string {
+	return fmt.Sprintf("an adb server on 127.0.0.1:%d was asked to stop, as 'adb kill-server' asks, and did not (%s). Start the "+
+		"daemon on another port with 'devicefarm-connect bridge start --port <n>' and point adb at it with 'adb -P <n>'. That adb "+
+		"server keeps port %d and the daemon serves adb on the port you pass.", port, cause, port)
+}
 
-	// A pid that is already dead (and a non-positive pid) must be handled silently:
-	// the process may have exited on its own before cleanup runs.
-	mgr.killOrphan(deadPID(t))
-	mgr.killOrphan(0)
+// heldPortText is what Start returns when another program holds 127.0.0.1:port.
+func heldPortText(port int) string {
+	return fmt.Sprintf("another program is listening on 127.0.0.1:%d, so the daemon cannot bind it. Start the daemon on another "+
+		"port with 'devicefarm-connect bridge start --port <n>' and point adb at it with 'adb -P <n>', or stop that program and run "+
+		"'devicefarm-connect bridge start --port %d'. The daemon listens on exactly the port you pass.", port, port)
+}
+
+// closingOccupant closes at once, so a probe does not wait out its timeout.
+func closingOccupant(conn net.Conn) { conn.Close() }
+
+// stubNoSpawn records whether Start spawned; the test asserts it did not.
+func stubNoSpawn(t *testing.T) *bool {
+	t.Helper()
+	spawned := false
+	stubSpawn(t, func(_ string, _ []string, _ *os.File) (*os.Process, <-chan struct{}, error) {
+		spawned = true
+		return nil, nil, assert.AnError
+	})
+	return &spawned
+}
+
+func TestGivenAnAdbServerOnThePortWhenStartedThenItIsStoppedBeforeTheChildSpawns(t *testing.T) {
+	mgr := newTestManager(t)
+	port := mgr.config.ListenPort
+	logs := &lockedBuffer{}
+	mgr.logger = slog.New(slog.NewTextHandler(logs, nil))
+	server := startFakeAdbServer(t, port, killExits)
+	// Stand in for the child: its own bind proves the stop freed the port.
+	stubSpawn(t, func(_ string, _ []string, _ *os.File) (*os.Process, <-chan struct{}, error) {
+		listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		require.NoError(t, err, "the adb server must be gone before the spawn")
+		t.Cleanup(func() { listener.Close() })
+		require.NoError(t, mgr.pidFile.Write())
+		return processOf(t, os.Getpid()), nil, nil
+	})
+
+	require.NoError(t, mgr.Start())
+
+	assert.Len(t, server.killFrames, 1, "one host:kill, as 'adb kill-server' sends")
+	assert.Contains(t, logs.String(), fmt.Sprintf(`level=INFO msg="an adb server is listening on 127.0.0.1:%d; stopping it `+
+		`before the daemon starts, as 'adb kill-server' would"`, port))
+	_, running := mgr.Status()
+	assert.True(t, running)
+}
+
+func TestGivenAnAdbServerThatRefusesToStopWhenStartedThenNoSpawnAndTheTextNamesAnotherPort(t *testing.T) {
+	tests := []struct {
+		name      string
+		answer    killAnswer
+		wantCause string
+	}{
+		{name: "a server that rejects kills", answer: killRefused, wantCause: "it answered FAIL: " + adbRejectsKill},
+		{name: "a server a program restarts at once", answer: killRestarted, wantCause: "it answered OKAY but port <port> is " +
+			"still held after 1s; a program that restarts adb, such as Android Studio, can take it back at once"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := newTestManager(t)
+			port := mgr.config.ListenPort
+			server := startFakeAdbServer(t, port, tc.answer)
+			spawned := stubNoSpawn(t)
+
+			err := mgr.Start()
+
+			require.Error(t, err)
+			assert.Equal(t, stopRefusedText(port, strings.ReplaceAll(tc.wantCause, "<port>", strconv.Itoa(port))), err.Error())
+			assert.False(t, *spawned, "no child may spawn onto a held port")
+			assert.Len(t, server.killFrames, 1)
+		})
+	}
+}
+
+func TestGivenAnotherProgramOnThePortWhenStartedThenNoSpawnAndTheTextNamesAnotherPort(t *testing.T) {
+	mgr := newTestManager(t)
+	occupyPort(t, mgr.config.ListenPort, closingOccupant)
+	spawned := stubNoSpawn(t)
+
+	err := mgr.Start()
+
+	require.Error(t, err)
+	assert.Equal(t, heldPortText(mgr.config.ListenPort), err.Error())
+	assert.False(t, *spawned, "no child may spawn onto a held port")
+}
+
+func TestGivenAnUnbindablePortWhenStartedThenNoSpawnAndTheTextQuotesTheDoctor(t *testing.T) {
+	tests := []struct {
+		name       string
+		listenAddr string
+		port       int
+		// wantDoctor is the doctor command the text quotes, <port> for the port.
+		wantDoctor string
+	}{
+		{name: "a privileged port", listenAddr: "127.0.0.1", port: 1, wantDoctor: "devicefarm-connect doctor --port 1"},
+		{name: "an address not on this machine", listenAddr: "203.0.113.1", // TEST-NET-3: not this machine, never routed
+			wantDoctor: "devicefarm-connect doctor --port <port> --listen-addr 203.0.113.1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.ListenAddr, cfg.ListenPort = tc.listenAddr, cmp.Or(tc.port, freePort(t))
+			address := net.JoinHostPort(cfg.ListenAddr, strconv.Itoa(cfg.ListenPort))
+			bindErr := bindListenPort(cfg.ListenAddr, cfg.ListenPort)
+			if bindErr == nil {
+				t.Skip("this user may bind " + address)
+			}
+			mgr := newTestManagerWithConfig(t, cfg)
+			spawned := stubNoSpawn(t)
+
+			err := mgr.Start()
+
+			require.Error(t, err)
+			assert.Equal(t, fmt.Sprintf("the daemon cannot bind %s: %v. Run '%s' for the fix, or start the daemon on another port "+
+				"with 'devicefarm-connect bridge start --port <n>' and point adb at it with 'adb -P <n>'. The daemon listens on "+
+				"exactly the port you pass.", address, bindErr, strings.ReplaceAll(tc.wantDoctor, "<port>", strconv.Itoa(cfg.ListenPort))),
+				err.Error())
+			assert.False(t, *spawned)
+		})
+	}
+}
+
+func TestGivenAConcurrentStartThatWinsWhileThePortIsHeldWhenStartedThenStartReportsSuccess(t *testing.T) {
+	tests := []struct {
+		name string
+		// occupy holds the port as the winner's daemon and calls writePidFile when the probe reaches it.
+		occupy func(t *testing.T, port int, writePidFile func()) *fakeAdbServer
+	}{
+		{name: "a winner with no device", occupy: func(t *testing.T, port int, writePidFile func()) *fakeAdbServer {
+			occupyPort(t, port, func(conn net.Conn) {
+				writePidFile()
+				conn.Close()
+			})
+			return nil
+		}},
+		{name: "a winner whose device answers host:version", occupy: func(t *testing.T, port int, writePidFile func()) *fakeAdbServer {
+			server := startFakeAdbServer(t, port, killExits)
+			server.onVersion = writePidFile
+			return server
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := newTestManager(t)
+			winner := NewPidFile(mgr.paths.PidFile, nil)
+			written := make(chan error, 1)
+			server := tc.occupy(t, mgr.config.ListenPort, func() { written <- winner.Write() })
+			spawned := stubNoSpawn(t)
+
+			err := mgr.Start()
+
+			require.NoError(t, <-written)
+			t.Cleanup(func() { _ = winner.Remove() })
+			assert.NoError(t, err, "the pidfile re-read must find the winner")
+			assert.False(t, *spawned)
+			if server != nil {
+				assert.Empty(t, server.killFrames, "the winner's daemon must never get host:kill")
+			}
+		})
+	}
+}
+
+// childErrorLine is the line the child's entrypoint logs as it exits on err, through the same
+// handler and call.
+func childErrorLine(err string) string {
+	var line bytes.Buffer
+	slog.New(slog.NewTextHandler(&line, nil)).Error(config.BinaryName+" failed", "error", errors.New(err))
+	return strings.TrimSuffix(line.String(), "\n")
+}
+
+// stubChildExit stands in for a child that logs line and exits before it reports ready.
+// occupy runs first, so a test can take the port as a racer would.
+func stubChildExit(t *testing.T, occupy func(), line string) {
+	t.Helper()
+	stubSpawn(t, func(_ string, _ []string, logOut *os.File) (*os.Process, <-chan struct{}, error) {
+		occupy()
+		_, err := fmt.Fprintln(logOut, line)
+		require.NoError(t, err)
+		exited := make(chan struct{})
+		close(exited)
+		return nil, exited, nil
+	})
+}
+
+func TestGivenAChildThatExitsWithABindErrorWhenStartedThenThePortIsProbedAgainAndNamed(t *testing.T) {
+	tests := []struct {
+		name     string
+		occupy   func(t *testing.T, port int) *fakeAdbServer
+		wantText func(port int) string
+	}{
+		{name: "an adb server took the port", occupy: func(t *testing.T, port int) *fakeAdbServer {
+			return startFakeAdbServer(t, port, killExits)
+		}, wantText: func(port int) string {
+			return fmt.Sprintf("an adb server took 127.0.0.1:%d before the daemon could bind it; a program that restarts adb, such "+
+				"as Android Studio, does this. Start the daemon on another port with 'devicefarm-connect bridge start --port <n>' "+
+				"and point adb at it with 'adb -P <n>'. That adb server keeps port %d and the daemon serves adb on the port you pass.",
+				port, port)
+		}},
+		{name: "another program took the port", occupy: func(t *testing.T, port int) *fakeAdbServer {
+			occupyPort(t, port, closingOccupant)
+			return nil
+		}, wantText: heldPortText},
+		{name: "the port is free again", occupy: func(*testing.T, int) *fakeAdbServer { return nil }, wantText: func(port int) string {
+			return fmt.Sprintf("another program held 127.0.0.1:%d while the daemon started and has released it. Run "+
+				"'devicefarm-connect bridge start --port %d'. The daemon binds the port on that start.", port, port)
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := newTestManager(t)
+			port := mgr.config.ListenPort
+			var racer *fakeAdbServer
+			stubChildExit(t, func() { racer = tc.occupy(t, port) },
+				childErrorLine(fmt.Sprintf("listen on 127.0.0.1:%d: listen tcp 127.0.0.1:%d: bind: address already in use", port, port)))
+
+			err := mgr.Start()
+
+			require.Error(t, err)
+			assert.Equal(t, tc.wantText(port), err.Error())
+			if racer != nil {
+				assert.Empty(t, racer.killFrames, "an adb server that took the port back is named, not stopped again")
+			}
+		})
+	}
+}
+
+func TestGivenAChildThatExitsWithAnotherErrorWhenStartedThenThatErrorIsTheTextAtOnce(t *testing.T) {
+	mgr := newTestManager(t)
+	// An older run's error stays in the log; only what this child logs counts.
+	require.NoError(t, os.WriteFile(mgr.paths.LogFile, []byte(childErrorLine("an older run's error")+"\n"), 0o600))
+	const childError = "invalid configuration: max device streams 999 must stay under the remote access service's admission ceiling 32"
+	// A real child through the real spawn: the exit watcher must end the wait.
+	stubSpawn(t, func(_ string, _ []string, logOut *os.File) (*os.Process, <-chan struct{}, error) {
+		return realSpawnDaemon("/bin/sh", []string{"-c", "echo '" + strings.ReplaceAll(childErrorLine(childError), "'", `'\''`) + "'; exit 1"}, logOut)
+	})
+
+	started := time.Now()
+	err := mgr.Start()
+
+	require.Error(t, err)
+	assert.Less(t, time.Since(started), startupTimeout, "a child that exits ends the wait at once")
+	assert.Equal(t, fmt.Sprintf("the daemon exited while starting: %s. Fix what it reports, then run 'devicefarm-connect bridge "+
+		"start --port %d'. Its log is \"%s\".", childError, mgr.config.ListenPort, mgr.paths.LogFile), err.Error())
+}
+
+func TestGivenAChildWhoseControlSocketFailsWhenStartedThenItsErrorIsNotTakenForALostPort(t *testing.T) {
+	mgr := newTestManager(t)
+	// The control socket's bind error starts with "listen on" too; only the TCP address marks a lost port.
+	controlError := fmt.Sprintf("listen on control socket %q: bind: address already in use", mgr.paths.ControlSocket)
+	stubChildExit(t, func() {}, childErrorLine(controlError))
+
+	err := mgr.Start()
+
+	require.Error(t, err)
+	assert.Equal(t, fmt.Sprintf("the daemon exited while starting: %s. Fix what it reports, then run 'devicefarm-connect bridge "+
+		"start --port %d'. Its log is \"%s\".", controlError, mgr.config.ListenPort, mgr.paths.LogFile), err.Error())
+}
+
+func TestGivenAChildThatLogsNoErrorWhenItExitsOrTimesOutThenTheLogPathIsNamed(t *testing.T) {
+	t.Run("the child exits", func(t *testing.T) {
+		mgr := newTestManager(t)
+		// A real child through the real spawn that logs only an INFO line and exits.
+		stubSpawn(t, func(_ string, _ []string, logOut *os.File) (*os.Process, <-chan struct{}, error) {
+			return realSpawnDaemon("/bin/sh", []string{"-c", `echo 'level=INFO msg="starting"'; exit 1`}, logOut)
+		})
+
+		err := mgr.Start()
+
+		require.Error(t, err)
+		assert.Equal(t, fmt.Sprintf("the daemon exited while starting and logged no error. Check \"%s\", then run "+
+			"'devicefarm-connect bridge start --port %d'.", mgr.paths.LogFile, mgr.config.ListenPort), err.Error())
+	})
+	t.Run("the child never reports ready", func(t *testing.T) {
+		mgr := newTestManager(t)
+		shortStartupTimeout(t, 100*time.Millisecond)
+		// No handle: the timeout's kill is a no-op, so no reused pid is signaled.
+		stubSpawn(t, func(_ string, _ []string, _ *os.File) (*os.Process, <-chan struct{}, error) {
+			return nil, nil, nil
+		})
+
+		err := mgr.Start()
+
+		require.Error(t, err)
+		assert.Equal(t, fmt.Sprintf("the daemon did not report ready within 100ms and logged no error, so it was stopped. Check "+
+			"\"%s\", then run 'devicefarm-connect bridge start --port %d'.", mgr.paths.LogFile, mgr.config.ListenPort), err.Error())
+	})
+}
+
+func TestGivenASlogErrorLineWhenParsedThenQuotedAndBareValuesBothRead(t *testing.T) {
+	tests := []struct {
+		name      string
+		line      string
+		wantValue string
+		wantFound bool
+	}{
+		{name: "a quoted value", line: `level=ERROR msg="x failed" error="listen on 127.0.0.1:1: \"busy\""`,
+			wantValue: `listen on 127.0.0.1:1: "busy"`, wantFound: true},
+		{name: "a bare value", line: `level=ERROR msg=failed error=boom pid=4`, wantValue: "boom", wantFound: true},
+		{name: "an INFO line", line: `level=INFO msg="daemon started" error=boom`},
+		{name: "no error value", line: `level=ERROR msg="control server stopped"`},
+		{name: "a broken quote", line: `level=ERROR msg=failed error="unterminated`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			value, found := errorValue(tc.line)
+
+			assert.Equal(t, tc.wantFound, found)
+			assert.Equal(t, tc.wantValue, value)
+		})
+	}
+}
+
+func TestGivenALogWithErrorLinesWhenReadFromAnOffsetThenTheLastLaterOneIsTheChildsError(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "daemon.log")
+	older := childErrorLine("an older run's error") + "\n"
+	content := older + childErrorLine("first") + "\nlevel=INFO msg=next\n" + childErrorLine("second") + "\n"
+	require.NoError(t, os.WriteFile(logPath, []byte(content), 0o600))
+	assert.Equal(t, "second", lastChildError(logPath, int64(len(older))), "the last error after the offset wins")
+	assert.Empty(t, lastChildError(logPath, int64(len(content))), "nothing was logged after the offset")
+	assert.Empty(t, lastChildError(filepath.Join(t.TempDir(), "missing.log"), 0))
+}
+
+func TestGivenAlreadyDeadOrphanWhenKillOrphanThenDoesNotPanic(t *testing.T) {
+	// A child already reaped (and no child at all) must be handled silently: the
+	// process may have exited on its own before cleanup runs, and its handle then
+	// signals nothing.
+	reaped := exec.Command("true")
+	require.NoError(t, reaped.Run())
+	killOrphan(reaped.Process)
+	killOrphan(nil)
 }
 
 func TestGivenDetachedChildWhenSpawnedThenLogfileIsItsStdoutAndStderr(t *testing.T) {
@@ -379,9 +695,14 @@ func TestGivenDetachedChildWhenSpawnedThenLogfileIsItsStdoutAndStderr(t *testing
 	defer logOut.Close()
 
 	// The child writes one line per stream through the production spawn path.
-	pid, err := realSpawnDaemon("/bin/sh", []string{"-c", "echo out-marker; echo err-marker >&2"}, logOut)
+	child, exited, err := realSpawnDaemon("/bin/sh", []string{"-c", "echo out-marker; echo err-marker >&2"}, logOut)
 	require.NoError(t, err)
-	require.Greater(t, pid, 0)
+	require.Greater(t, child.Pid, 0)
+	select {
+	case <-exited:
+	case <-time.After(testTimeout):
+		t.Fatal("the exit channel must close when the child exits")
+	}
 
 	require.Eventually(t, func() bool {
 		content, readErr := os.ReadFile(logPath)
@@ -396,7 +717,7 @@ func TestGivenMissingExecutableWhenSpawnedThenErrors(t *testing.T) {
 	require.NoError(t, err)
 	defer logOut.Close()
 
-	_, err = realSpawnDaemon(filepath.Join(t.TempDir(), "does-not-exist"), nil, logOut)
+	_, _, err = realSpawnDaemon(filepath.Join(t.TempDir(), "does-not-exist"), nil, logOut)
 
 	require.Error(t, err)
 }
@@ -407,7 +728,7 @@ func TestGivenChildNeverWritesPidFileWhenWaitedForThenTimesOut(t *testing.T) {
 	// The child never writes the pidfile, so the readiness wait must time out.
 	// Call waitUntilRunning directly with a tiny timeout to avoid the multi-second
 	// production startup wait.
-	err := mgr.waitUntilRunning(time.Millisecond)
+	err := mgr.waitUntilRunning(time.Millisecond, nil)
 
 	require.Error(t, err)
 }
@@ -533,6 +854,8 @@ func TestGivenListenPortAlreadyInUseWhenRunForegroundThenErrorsWithoutTouchingPi
 	err = mgr.RunForeground(context.Background())
 
 	require.Error(t, err, "binding an in-use listen port must fail RunForeground")
+	assert.True(t, strings.HasPrefix(err.Error(), listenErrorPrefix("127.0.0.1", cfg.ListenPort)),
+		"Start reads a failed bind by this prefix: %v", err)
 	got, readErr := os.ReadFile(mgr.paths.PidFile)
 	require.NoError(t, readErr, "the fix must leave the pidfile untouched, not rewrite then remove it")
 	assert.Equal(t, sentinelRecord, string(got), "RunForeground must not have written its own pid before the listener bound")
@@ -1110,11 +1433,10 @@ func TestGivenProcessHandleUnavailableAndRecordHeldWhenStoppedThenErrorReturnedA
 	}
 }
 
-// deadPID returns a pid that is guaranteed not to be alive: it starts a trivial
-// child, waits for it to fully exit and be reaped, then returns its now-dead pid.
-func deadPID(t *testing.T) int {
+// processOf is a handle on pid, for a stub child.
+func processOf(t *testing.T, pid int) *os.Process {
 	t.Helper()
-	cmd := exec.Command("true")
-	require.NoError(t, cmd.Run())
-	return cmd.Process.Pid
+	process, err := os.FindProcess(pid)
+	require.NoError(t, err)
+	return process
 }

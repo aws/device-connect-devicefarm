@@ -25,6 +25,8 @@
 //     handle_host_request; adb.h TransportId).
 //   - host:version: the framed request and the reply parser, for a caller that
 //     asks an adb server its protocol version (adb.cpp handle_host_request).
+//   - host:kill: the framed request 'adb kill-server' sends (client/adb_client.cpp
+//     adb_kill_server).
 //
 // Two markers run through adbwire, forward and bridge. "adb's model": adb
 // defines it and the Go code mirrors it, under adb's name where it has one,
