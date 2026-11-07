@@ -21,18 +21,22 @@ import (
 // StreamOpener carries an accepted local connection onto the transport as one
 // forwarded stream. Implementations take ownership of conn and must close it.
 // Each call runs on its own goroutine, so an implementation may block for the
-// stream's whole lifetime; the accept loop is never held up.
+// stream's whole lifetime; the accept loop is never held up. An implementation
+// sends the device service only after turn.Ready closes, and calls turn.Done
+// once that service's status word is read or the open ends.
 type StreamOpener interface {
-	OpenStream(conn net.Conn, target adbwire.AdbSpec)
+	OpenStream(conn net.Conn, target adbwire.AdbSpec, turn OpenTurn)
 }
 
 // rule is one installed forward. The listener and its accept goroutine live as
 // long as the rule; remote is re-pointed in place by a rebind, so the accept
-// loop re-reads it under the table mutex at every accept.
+// loop re-reads it under the table mutex at every accept. turns outlives a
+// rebind and is read only for a remote that is not tcp.
 type rule struct {
 	local    adbwire.AdbSpec
 	remote   adbwire.AdbSpec
 	listener net.Listener
+	turns    openOrder
 }
 
 // ForwardRulesTable owns the forward rules and their listening sockets, the
@@ -222,7 +226,9 @@ const (
 // acceptLoop serves one rule's listener until it closes. Every accepted
 // connection copies the rule's current destination under the table mutex (a
 // rebind re-points future accepts, never past ones) and is handed off on its
-// own goroutine so a slow open never stalls the door.
+// own goroutine so a slow open never stalls the door. A remote that is not tcp
+// also takes the rule's next turn under the same lock, because a device server
+// may tell its sockets apart only by accept order. A tcp remote never waits.
 func (table *ForwardRulesTable) acceptLoop(forwardRule *rule) {
 	var delay time.Duration
 	for {
@@ -239,8 +245,12 @@ func (table *ForwardRulesTable) acceptLoop(forwardRule *rule) {
 		delay = 0
 		table.rulesMutex.Lock()
 		target := forwardRule.remote
+		turn := ImmediateTurn()
+		if target.Kind != "tcp" {
+			turn = forwardRule.turns.next()
+		}
 		table.rulesMutex.Unlock()
-		go table.opener.OpenStream(conn, target)
+		go table.opener.OpenStream(conn, target, turn)
 	}
 }
 

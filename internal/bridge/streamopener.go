@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aws/device-connect-devicefarm/internal/adbwire"
+	"github.com/aws/device-connect-devicefarm/internal/forward"
 )
 
 // deviceStreamOpener turns each connection a forward listener accepts into its own adb
@@ -29,8 +30,11 @@ type deviceStreamOpener struct {
 
 // OpenStream carries one accepted forward connection onto its own adb session. It owns
 // conn and closes it, and it runs on the accept loop's per-connection goroutine, so it
-// blocks for the life of the stream.
-func (opener *deviceStreamOpener) OpenStream(conn net.Conn, target adbwire.AdbSpec) {
+// blocks for the life of the stream. turn is released once the open ends, so the next
+// accept on the rule never waits for this stream's pipe.
+func (opener *deviceStreamOpener) OpenStream(conn net.Conn, target adbwire.AdbSpec, turn forward.OpenTurn) {
+	// Deferred before any return, so a refused or canceled open also releases the next accept.
+	defer turn.Done()
 	defer conn.Close()
 	logger := opener.cfg.logger.With("client", conn.RemoteAddr().String(), "target", target.String())
 
@@ -60,7 +64,8 @@ func (opener *deviceStreamOpener) OpenStream(conn net.Conn, target adbwire.AdbSp
 
 	activity := newActivityTracker(nil)
 	stream, leftover, err := openDeviceStream(streamCtx, opener.cfg.dialer, opener.device, opener.arn, opener.features,
-		target, opener.cfg.policy, opener.cfg.params.DeviceStreamStatusTimeout, activity, logger)
+		target, turn.Ready, opener.cfg.policy, opener.cfg.params.DeviceStreamStatusTimeout, activity, logger)
+	turn.Done()
 	if err != nil {
 		// Zero bytes written either way, so the application sees a refused port rather
 		// than a peer that hung up mid-conversation.

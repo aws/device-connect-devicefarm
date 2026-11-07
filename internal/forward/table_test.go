@@ -30,7 +30,8 @@ import (
 // test can prove an accepted connection outlives its rule's destination).
 type servingOpener struct{}
 
-func (servingOpener) OpenStream(conn net.Conn, target adbwire.AdbSpec) {
+func (servingOpener) OpenStream(conn net.Conn, target adbwire.AdbSpec, turn OpenTurn) {
+	turn.Done()
 	defer conn.Close()
 	if _, err := fmt.Fprintln(conn, target); err != nil {
 		return
@@ -611,13 +612,82 @@ func (listener *scriptedListener) Accept() (net.Conn, error) {
 func (*scriptedListener) Close() error   { return nil }
 func (*scriptedListener) Addr() net.Addr { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)} }
 
-// recordingOpener hands every accepted connection to the test.
+// recordingOpener hands every accepted connection and its turn to the test.
 type recordingOpener struct {
-	opened chan net.Conn
+	opened chan handoff
 }
 
-func (opener *recordingOpener) OpenStream(conn net.Conn, _ adbwire.AdbSpec) {
-	opener.opened <- conn
+// handoff is one OpenStream call as the opener got it.
+type handoff struct {
+	conn net.Conn
+	turn OpenTurn
+}
+
+func (opener *recordingOpener) OpenStream(conn net.Conn, _ adbwire.AdbSpec, turn OpenTurn) {
+	opener.opened <- handoff{conn: conn, turn: turn}
+}
+
+// acceptTurn dials the rule's port and returns the turn the accept handed off.
+func acceptTurn(t *testing.T, opener *recordingOpener, port int) OpenTurn {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), testTimeout)
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+	select {
+	case handed := <-opener.opened:
+		t.Cleanup(func() { handed.conn.Close() })
+		return handed.turn
+	case <-time.After(testTimeout):
+		t.Fatal("the accepted connection never reached the opener")
+		return OpenTurn{}
+	}
+}
+
+// newRecordingTable builds a table whose accepts reach the returned opener.
+func newRecordingTable(t *testing.T) (*ForwardRulesTable, *recordingOpener) {
+	t.Helper()
+	opener := &recordingOpener{opened: make(chan handoff, 1)}
+	table := NewForwardRulesTable(opener, testMaxRules, nil)
+	t.Cleanup(table.RemoveAll)
+	return table, opener
+}
+
+func TestGivenTwoAcceptsOnOneRuleWhenHandedOffThenTheSecondTurnWaitsForTheFirst(t *testing.T) {
+	table, opener := newRecordingTable(t)
+	port := installResolved(t, table, "localabstract:scrcpy")
+
+	first := acceptTurn(t, opener, port)
+	second := acceptTurn(t, opener, port)
+
+	assert.True(t, isReady(first.Ready), "a rule's first accept must not wait")
+	assert.False(t, isReady(second.Ready), "the second accept must wait for the first")
+	first.Done()
+	assert.True(t, isReady(second.Ready), "the first accept's Done must release the second")
+}
+
+func TestGivenTwoAcceptsOnATcpRuleWhenHandedOffThenNeitherWaits(t *testing.T) {
+	// A turn would add head-of-line blocking, and the servers known to need accept order
+	// listen on abstract sockets.
+	table, opener := newRecordingTable(t)
+	port := installResolved(t, table, "tcp:9090")
+
+	acceptTurn(t, opener, port)
+	second := acceptTurn(t, opener, port)
+
+	assert.True(t, isReady(second.Ready), "a tcp rule's accept must never wait")
+}
+
+func TestGivenATcpRuleReboundToASocketKindWhenTwoAcceptsArriveThenOnlyTheSecondWaits(t *testing.T) {
+	table, opener := newRecordingTable(t)
+	port := installResolved(t, table, "tcp:9090")
+	acceptTurn(t, opener, port)
+	require.Equal(t, AdbInstallOK, table.Install(tcpSpec(port), "localabstract:scrcpy", false).Status)
+
+	first := acceptTurn(t, opener, port)
+	second := acceptTurn(t, opener, port)
+
+	assert.True(t, isReady(first.Ready), "the rebind's first socket accept must not wait for a tcp accept")
+	assert.False(t, isReady(second.Ready), "the rebound rule must order its socket accepts")
 }
 
 func TestGivenAnAcceptErrorThatIsNotACloseWhenServingThenTheLoopRetries(t *testing.T) {
@@ -628,7 +698,7 @@ func TestGivenAnAcceptErrorThatIsNotACloseWhenServingThenTheLoopRetries(t *testi
 		{err: errors.New("accept: too many open files")},
 		{conn: server},
 	}}
-	opener := &recordingOpener{opened: make(chan net.Conn, 1)}
+	opener := &recordingOpener{opened: make(chan handoff, 1)}
 	table := NewForwardRulesTable(opener, testMaxRules, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	returned := make(chan struct{})
@@ -638,8 +708,8 @@ func TestGivenAnAcceptErrorThatIsNotACloseWhenServingThenTheLoopRetries(t *testi
 	}()
 
 	select {
-	case conn := <-opener.opened:
-		assert.Same(t, server, conn)
+	case handed := <-opener.opened:
+		assert.Same(t, server, handed.conn)
 	case <-time.After(testTimeout):
 		t.Fatal("the connection accepted after the transient error never reached the opener")
 	}
