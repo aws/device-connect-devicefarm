@@ -719,6 +719,12 @@ const (
 var attachFetches = []string{hostDevicesRequest, hostDevicesRequest, hostVersionRequest, hostFeaturesRequest,
 	hostDevicesLongRequest}
 
+// transportSelectRequest is the framed select the park and the reverse clear send first.
+const transportSelectRequest = "0012host:transport-any"
+
+// attachSessions is attachFetches plus the park's session, in byte order.
+var attachSessions = append(slices.Clone(attachFetches), transportSelectRequest)
+
 // attachSerial is the serial the mocks' one device row names.
 const attachSerial = "R3CN30ABCDE"
 
@@ -731,7 +737,7 @@ func answerAttach(_ *testsupport.MockSession, data []byte) []byte {
 	switch string(data) {
 	case hostDevicesRequest:
 		return []byte(hostDevicesReply)
-	case "0012host:transport-any":
+	case transportSelectRequest:
 		return []byte("OKAY")
 	}
 	return data
@@ -782,8 +788,9 @@ func TestGivenARunningDaemonWhenADeviceIsAddedThenANotifierOpensAndFollowsTheAtt
 	// The clear's kill follows its select's reply, so wait for the whole of both sessions.
 	require.Eventually(t, func() bool {
 		return slices.Equal(sortedInbounds(sessions),
-			append(slices.Clone(attachFetches), "0012host:transport-any0017reverse:killforward-all"))
-	}, testTimeout, testPollInterval, "the add must fetch each host reply once and clear the server's reverse rules once")
+			append(slices.Clone(attachSessions), transportSelectRequest+"0017reverse:killforward-all"))
+	}, testTimeout, testPollInterval,
+		"the add must fetch each host reply once, park one pre-selected websocket and clear the server's reverse rules once")
 
 	cancel()
 
@@ -798,9 +805,9 @@ func TestGivenARunningDaemonWhenADeviceIsAddedThenANotifierOpensAndFollowsTheAtt
 	assert.Empty(t, mock.Refusals(), "the daemon's hello must satisfy the server")
 }
 
-func TestGivenAnAttachedDeviceWhenIdleThenTheAddsHostFetchesAreItsOnlySessions(t *testing.T) {
+func TestGivenAnAttachedDeviceWhenIdleThenItsOnlySessionsAreTheHostFetchesAndThePark(t *testing.T) {
 	// After the add's serial fetch and the attach's host reply fetches, an idle attachment holds
-	// only its parked websocket.
+	// only its parked websocket, pre-selected.
 	mock := testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{OnMessage: answerAttach})
 	cfg := config.Default()
 	cfg.ListenPort = freePort(t)
@@ -811,14 +818,14 @@ func TestGivenAnAttachedDeviceWhenIdleThenTheAddsHostFetchesAreItsOnlySessions(t
 	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: "arn:1"})
 	require.NoError(t, err)
 	require.True(t, addResp.OK, "add over the live control socket must succeed: %s", addResp.Error)
-	fetches := len(attachFetches)
+	sessions := len(attachSessions)
 	require.Eventually(t, func() bool {
-		return mock.SessionsOpened() == fetches && mock.ConnectionsAccepted() == fetches+1
+		return mock.SessionsOpened() == sessions && mock.ConnectionsAccepted() == sessions
 	}, testTimeout, testPollInterval, "the add must fetch each host reply and park a websocket")
 
-	assert.Never(t, func() bool { return mock.SessionsOpened() > fetches || mock.ConnectionsAccepted() > fetches+1 },
+	assert.Never(t, func() bool { return mock.SessionsOpened() > sessions || mock.ConnectionsAccepted() > sessions },
 		500*time.Millisecond, testPollInterval, "an idle attachment dials nothing more")
-	assert.Equal(t, attachFetches, sortedInbounds(mock), "each fetch sends its request alone")
+	assert.Equal(t, attachSessions, sortedInbounds(mock), "each fetch sends its request alone, the park its select")
 
 	cancel()
 
@@ -831,7 +838,8 @@ func TestGivenAnAttachedDeviceWhenIdleThenTheAddsHostFetchesAreItsOnlySessions(t
 }
 
 func TestGivenAnAttachedDeviceWhenAnAdbCommandArrivesThenItRidesTheWebsocketParkedAhead(t *testing.T) {
-	// Full wiring: attach parks a websocket, the first command takes it, the slot refills.
+	// Full wiring: attach parks a pre-selected websocket, the first command takes it, the slot
+	// refills.
 	mock := testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{OnMessage: answerAttach})
 	cfg := config.Default()
 	cfg.ListenPort = freePort(t)
@@ -842,10 +850,9 @@ func TestGivenAnAttachedDeviceWhenAnAdbCommandArrivesThenItRidesTheWebsocketPark
 	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: "arn:1"})
 	require.NoError(t, err)
 	require.True(t, addResp.OK, "add over the live control socket must succeed: %s", addResp.Error)
-	// The attach fetches are the sessions; the other websocket is parked.
-	fetches := len(attachFetches)
+	sessions := len(attachSessions)
 	require.Eventually(t, func() bool {
-		return mock.ConnectionsAccepted() == fetches+1 && mock.SessionsOpened() == fetches
+		return mock.ConnectionsAccepted() == sessions && mock.SessionsOpened() == sessions
 	}, testTimeout, testPollInterval, "attaching a device must park one adb websocket ahead of any command")
 
 	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.ListenPort)))
@@ -862,10 +869,11 @@ func TestGivenAnAttachedDeviceWhenAnAdbCommandArrivesThenItRidesTheWebsocketPark
 	_, err = io.ReadFull(conn, echoed)
 	require.NoError(t, err, "the relayed command comes back through the parked websocket")
 	assert.Equal(t, service, string(echoed))
-	assert.Equal(t, fetches+1, mock.SessionsOpened(),
-		"the command's first frame minted its session on the parked websocket")
-	require.Eventually(t, func() bool { return mock.ConnectionsAccepted() == fetches+2 }, testTimeout,
-		testPollInterval, "the slot must refill behind the take")
+	assert.Contains(t, sessionInbounds(mock), transportSelectRequest+service,
+		"the command rides the parked session behind its select, with no select of its own")
+	require.Eventually(t, func() bool {
+		return mock.ConnectionsAccepted() == sessions+1 && mock.SessionsOpened() == sessions+1
+	}, testTimeout, testPollInterval, "the slot must refill behind the take, pre-selected on a session of its own")
 
 	cancel()
 
@@ -875,7 +883,6 @@ func TestGivenAnAttachedDeviceWhenAnAdbCommandArrivesThenItRidesTheWebsocketPark
 	case <-time.After(testTimeout):
 		t.Fatal("RunForeground did not return after context cancellation")
 	}
-	assert.Equal(t, fetches+1, mock.SessionsOpened(), "the replacement websocket sent nothing")
 }
 
 // reverseOffFail is the framed FAIL a reverse request reads from a daemon that did not opt in.

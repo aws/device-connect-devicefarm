@@ -249,27 +249,26 @@ func (s *AdbProxyServer) handleConn(ctx context.Context, tcp net.Conn) {
 	connLogger.Debug("connection closed cleanly")
 }
 
-// openClientSession dials the device (the parked websocket when live) and relays the client's
-// opening. A failed dial or a refused session goes through openSession. On a final failure a
-// client that sent a request reads the reason as its status word; bare bytes get the close alone.
-// Logs every failure; the caller only ends the connection.
+// openClientSession dials the device (the parked pre-selected websocket when the opening may ride
+// it) and relays the client's opening. A failed dial or a refused session goes through
+// openSession. On a final failure a client that sent a request reads the reason as its status
+// word; bare bytes get the close alone. Logs every failure; the caller only ends the connection.
 func (s *AdbProxyServer) openClientSession(ctx context.Context, tcp net.Conn, clientOpening opening, arn string,
 	forwarding *attachmentFeatures, logger *slog.Logger) (*adbConn, error) {
 	open := func(endpoint string, useParked bool) (*adbConn, error) {
 		var warm *warmSocketKeeper
-		if useParked {
+		if useParked && clientOpening.ridesPreSelected() {
 			warm = forwarding.warmSockets()
 		}
-		ws, err := warm.adbSocket(ctx, s.dialer, endpoint)
-		if err != nil {
-			return nil, err
-		}
-		session := newAdbConn(s.dialer, s.device, arn, RouteAdb, ws, s.refresh, newActivityTracker(nil), logger)
-		if err := relayRequest(ctx, tcp, session, clientOpening.pending, clientOpening.selected); err != nil {
-			session.Close()
-			return nil, fmt.Errorf("hand the client's request to the device: %w", err)
-		}
-		return session, nil
+		return warm.openConn(ctx, s.dialer, endpoint, func(ws WSConn, sessionUUID string) (*adbConn, error) {
+			session := newAdbConn(s.dialer, s.device, arn, RouteAdb, ws, s.refresh, newActivityTracker(nil), logger,
+				withSelectedSession(sessionUUID))
+			if err := relayRequest(ctx, tcp, session, clientOpening.pending, clientOpening.selected); err != nil {
+				session.Close()
+				return nil, fmt.Errorf("hand the client's request to the device: %w", err)
+			}
+			return session, nil
+		})
 	}
 	session, clientReason, err := openSession(ctx, s.device, arn, forwarding.refusalGate(), open, logger)
 	if err == nil {

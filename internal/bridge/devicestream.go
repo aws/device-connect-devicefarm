@@ -133,19 +133,18 @@ func openDeviceStream(ctx context.Context, dialer *WSDialer, device *ActiveDevic
 		if useParked {
 			warm = features.warmSockets()
 		}
-		ws, err := warm.adbSocket(ctx, dialer, endpoint)
-		if err != nil {
-			return nil, err
-		}
-		// Wrap before sending anything: the control frame must be read by this reader. The
-		// fresh-session fallback is refused; withTerminalSessionGone says why.
-		conn := newAdbConn(dialer, device, arn, RouteAdb, ws, policy, activity, logger,
-			withTerminalSessionGone(), withRefusalGate(features.refusalGate()))
-		if leftover, err = playPrologue(conn, deviceService, statusTimeout); err != nil {
-			conn.Close()
-			return nil, err
-		}
-		return conn, nil
+		return warm.openConn(ctx, dialer, endpoint, func(ws WSConn, sessionUUID string) (*adbConn, error) {
+			// Wrap before sending anything: the control frame must be read by this reader. The
+			// fresh-session fallback is refused; withTerminalSessionGone says why.
+			conn := newAdbConn(dialer, device, arn, RouteAdb, ws, policy, activity, logger,
+				withTerminalSessionGone(), withRefusalGate(features.refusalGate()), withSelectedSession(sessionUUID))
+			var err error
+			if leftover, err = playPrologue(conn, deviceService, statusTimeout); err != nil {
+				conn.Close()
+				return nil, err
+			}
+			return conn, nil
+		})
 	}
 	conn, _, err := openSession(ctx, device, arn, features.refusalGate(), open, logger)
 	if err != nil {
@@ -178,12 +177,16 @@ func selectTransport(conn *adbConn, within time.Duration) ([]byte, error) {
 	return leftover, nil
 }
 
-// playPrologue plays the transport select and then the device service, consuming a status
-// word for each, and returns the bytes left after the second word.
+// playPrologue plays the transport select, unless the park already did, then the device service,
+// consuming each one's status word, and returns the bytes left after the last word. within bounds
+// each word, so a taken socket that died unseen fails the stream instead of hanging it.
 func playPrologue(conn *adbConn, deviceService []byte, within time.Duration) ([]byte, error) {
-	leftover, err := selectTransport(conn, within)
-	if err != nil {
-		return nil, err
+	var leftover []byte
+	var err error
+	if !conn.preSelected {
+		if leftover, err = selectTransport(conn, within); err != nil {
+			return nil, err
+		}
 	}
 
 	// A second frame, never pipelined into the first: the real adb server strands the
