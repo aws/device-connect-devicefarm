@@ -37,7 +37,7 @@ func (c *adbConn) startRefreshLocked() (sessionUUID string, nextReady, refreshFa
 }
 
 // enterDrainingLocked publishes successor as the write target and starts the
-// predecessor's drain; reads move over at EOF (commitSwap). Caller holds the seam;
+// predecessor's drain; reads move over when it ends (commitSwap). Caller holds the seam;
 // releases it.
 func (c *adbConn) enterDrainingLocked(successor WSConn, nextReady chan struct{}) {
 	c.next = successor
@@ -57,6 +57,15 @@ func (c *adbConn) enterDrainingLocked(successor WSConn, nextReady chan struct{})
 // Keep the seam held across the whole dial and ack. A shorter span lets a Send land in a
 // websocket the server stopped listening to; it returns nil and the bytes vanish.
 func (c *adbConn) refresh(ctx context.Context, gate func() bool) error {
+	// Check the phase under the read lock first. Outside phaseSteady there is nothing to do,
+	// and a Lock queued behind a parked Send blocks the reader (see enforceWSDeadline).
+	c.seam.RLock()
+	steady := c.phase == phaseSteady
+	c.seam.RUnlock()
+	if !steady {
+		return nil
+	}
+
 	c.seam.Lock()
 	if c.phase != phaseSteady {
 		c.seam.Unlock()

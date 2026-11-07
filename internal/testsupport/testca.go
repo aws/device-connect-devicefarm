@@ -1,6 +1,7 @@
 package testsupport
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -83,10 +84,17 @@ func NewMockWSSForName(t *testing.T, handler func(*websocket.Conn), name string)
 	return startTLSWSS(t, handler, loadAuthority().issue([]string{name}, nil))
 }
 
+// acceptedConnKey keys a websocket's accepted TLS connection in its request context, so a mock
+// can drop it with no close frame (see dropWithoutCloseFrame).
+type acceptedConnKey struct{}
+
 func startTLSWSS(t *testing.T, handler func(*websocket.Conn), leaf tls.Certificate) string {
 	t.Helper()
 	server := httptest.NewUnstartedServer(websocket.Handler(handler))
 	server.TLS = &tls.Config{Certificates: []tls.Certificate{leaf}}
+	server.Config.ConnContext = func(ctx context.Context, conn net.Conn) context.Context {
+		return context.WithValue(ctx, acceptedConnKey{}, conn)
+	}
 	server.StartTLS()
 	t.Cleanup(server.Close)
 	return fmt.Sprintf("wss://%s/adb", server.Listener.Addr())

@@ -10,20 +10,34 @@ import (
 	"golang.org/x/net/websocket"
 )
 
-// sessionEndedCloseCode is the server's close once a session can no longer be resumed, for
-// example when the device side of the adb stream closes. A superseded websocket gets 1000.
-const sessionEndedCloseCode = 4000
+// Close codes the server sends on /adb that change what the client does.
+const (
+	// supersededCloseCode is the server's close of a reattach's predecessor, sent after its
+	// last write there.
+	supersededCloseCode = 1000
+	// sessionEndedCloseCode is the server's close once a session can no longer be resumed, for
+	// example when the device side of the adb stream closes.
+	sessionEndedCloseCode = 4000
+)
 
-// isSessionEnded reports whether err is the server's close of an ended session.
-func isSessionEnded(err error) bool {
+// isCloseWithCode reports whether err is a peer close frame that carries code.
+func isCloseWithCode(err error, code int) bool {
 	var closeError *wsCloseError
-	return errors.As(err, &closeError) && closeError.code == sessionEndedCloseCode
+	return errors.As(err, &closeError) && closeError.code == code
 }
+
+// errSwapCut means a reattach's predecessor ended without supersededCloseCode. The server writes
+// there until that close, so some bytes may be lost.
+var errSwapCut = errors.New("the old websocket of a swap did not end with a clean close, so data may have been lost")
+
+// errClosedAfterCut is errAdbConnClosed after a swap cut. It wraps errSwapCut, so the pipe does
+// not log the cut a second time.
+var errClosedAfterCut = fmt.Errorf("%w: %w", errAdbConnClosed, errSwapCut)
 
 // refreshPhase is the state of one proxied connection's websocket-refresh machine.
 //
-// A cut can come with no close frame, so the phase, not a close code, is the only signal that an
-// inbound EOF is an expected clean cut rather than a failure.
+// The phase says if an inbound end is expected. In a reattach's drain, the close code also says
+// if the end is clean.
 type refreshPhase int
 
 const (
@@ -35,12 +49,12 @@ const (
 	phaseFreshHandshake
 	// phaseSteady means inbound messages are raw ADB bytes for the local adb client.
 	phaseSteady
-	// phaseRefreshing means a successor is being established, so an EOF on the current
-	// websocket is expected: the server cuts it as a consequence of the reattach, which
-	// can land before the client has read the ack.
+	// phaseRefreshing means a successor is being established, so an end of the current
+	// websocket is expected: the server closes it on the reattach, and the close can arrive
+	// before the client reads the ack.
 	phaseRefreshing
 	// phaseDraining means the successor is acked and live for writes; the predecessor
-	// is being drained to EOF before reads move over.
+	// is being drained to its end before reads move over.
 	phaseDraining
 	// phaseClosed means the connection is torn down.
 	phaseClosed
@@ -53,7 +67,7 @@ const (
 //  1. Single reader. Only pipeConn's inbound pump calls Receive; a second reader would
 //     reorder the drain.
 //  2. Two pointers. writeTo moves at ack time: the server drops writes to a superseded
-//     websocket. readFrom waits for the predecessor's EOF.
+//     websocket. readFrom waits for the predecessor's end.
 //
 // The zero value is not usable; construct with newAdbConn.
 type adbConn struct {
@@ -95,10 +109,12 @@ type adbConn struct {
 	// nextNeedsHandshake marks a successor that owes its own control frame (the
 	// fresh-session fallback). commitSwap consults it to pick the resume phase.
 	nextNeedsHandshake bool
+	// endedOnCut marks a connection endOnSwapCutLocked closed; see closedErrLocked.
+	endedOnCut bool
 	// readSince is when the current read target entered service: what wsDeadline
 	// measures.
 	readSince time.Time
-	// drainingSince bounds a predecessor's time to EOF. A drain that never ends
+	// drainingSince bounds how long a predecessor may take to end. A drain that never ends
 	// leaves the connection half-duplex.
 	drainingSince time.Time
 	// nextReady and refreshFailed are recreated per refresh; which one closes is the
@@ -169,8 +185,9 @@ func (c *adbConn) Send(data []byte) error {
 	target := c.writeTo
 	phase := c.phase
 	if phase == phaseClosed || target == nil {
+		closedErr := c.closedErrLocked()
 		c.seam.RUnlock()
-		return errAdbConnClosed
+		return closedErr
 	}
 	c.activity.beginWrite()
 	// Deferred, so the counted span covers the mark below too: a poll landing between the
@@ -196,10 +213,11 @@ func (c *adbConn) Receive() ([]byte, error) {
 		source := c.readFrom
 		phase := c.phase
 		sessionUUID := c.uuid
+		closedErr := c.closedErrLocked()
 		c.seam.RUnlock()
 
 		if phase == phaseClosed || source == nil {
-			return nil, errAdbConnClosed
+			return nil, closedErr
 		}
 
 		// Read with no lock held: this parks forever on an idle connection.
@@ -212,13 +230,17 @@ func (c *adbConn) Receive() ([]byte, error) {
 			}
 			// Any phase: no successor or resume can reach an ended session. Close latches the
 			// teardown so the refresher dials nothing; it never waits on the seam a refresh holds.
-			if isSessionEnded(err) {
+			if isCloseWithCode(err, sessionEndedCloseCode) {
 				c.logger.Debug("the server ended the adb session", "session", sessionUUID, "error", err)
 				c.Close()
 				return nil, err
 			}
-			// An expected clean cut: wait for the successor and read it instead.
-			if c.awaitSuccessor(err) {
+			// A refresh's predecessor may have ended: read the successor, or end on errSwapCut.
+			swapped, swapErr := c.awaitSuccessor(err)
+			if swapErr != nil {
+				return nil, swapErr
+			}
+			if swapped {
 				continue
 			}
 			// An unexpected failure with a session to resume: one best-effort attempt.
@@ -305,11 +327,12 @@ func (c *adbConn) consumeControlFrame(message []byte) error {
 	}
 }
 
-// awaitSuccessor reports whether readErr is the expected end of a websocket a refresh is
-// replacing, blocking until the successor is published. The RLock cannot be taken until
-// refresh releases the fence, so an early reader blocks instead of reading the cut as a
-// failure: the old websocket's close can overtake the ack sent on the new one.
-func (c *adbConn) awaitSuccessor(readErr error) bool {
+// awaitSuccessor reports whether reads moved to the successor after readErr ended a websocket a
+// refresh is replacing. It blocks until the refresh outcome is known; commitSwap judges the end.
+// The RLock waits for refresh to release the fence, so an early reader blocks and does not read
+// the end as a failure: the old websocket's close can overtake the ack on the new one. A cut
+// swap returns errSwapCut.
+func (c *adbConn) awaitSuccessor(readErr error) (swapped bool, cutErr error) {
 	c.seam.RLock()
 	phase := c.phase
 	nextReady := c.nextReady
@@ -317,32 +340,42 @@ func (c *adbConn) awaitSuccessor(readErr error) bool {
 	c.seam.RUnlock()
 
 	if phase != phaseRefreshing && phase != phaseDraining {
-		return false
-	}
-	if !isBenignCloseError(readErr) {
-		return false
+		return false, nil
 	}
 	if nextReady == nil || refreshFailed == nil {
-		return false
+		return false, nil
 	}
 
 	select {
 	case <-nextReady:
-		return c.commitSwap()
+		return c.commitSwap(readErr)
 	case <-refreshFailed:
 		// No successor is coming, so this really is the end of the connection.
-		return false
+		return false, nil
 	}
 }
 
-// commitSwap advances reads onto the successor once the predecessor has drained to EOF,
-// closes the predecessor, and returns to steady state. Reports whether the swap happened;
-// a Close that landed first makes it a no-op.
-func (c *adbConn) commitSwap() bool {
+// commitSwap moves reads to the successor after the predecessor ended with readErr, closes the
+// predecessor, and enters phaseSteady, or phaseFreshHandshake for the fresh-session fallback.
+// Reports whether the swap happened; a Close that landed first makes it a no-op.
+//
+// A reattach's predecessor must end with supersededCloseCode. Any other end may have cut bytes
+// short, so the connection ends with errSwapCut. The client closes the fallback's predecessor
+// itself, so any benign end commits.
+func (c *adbConn) commitSwap(readErr error) (swapped bool, cutErr error) {
 	c.seam.Lock()
-	if c.phase != phaseDraining || c.next == nil {
+	// No drain left, or teardown closed the predecessor: not a cut.
+	if c.phase != phaseDraining || c.next == nil || c.isClosed() {
 		c.seam.Unlock()
-		return false
+		return false, nil
+	}
+	switch {
+	case !c.nextNeedsHandshake && !isCloseWithCode(readErr, supersededCloseCode):
+		return false, c.endOnSwapCutLocked(readErr)
+	case c.nextNeedsHandshake && !isBenignCloseError(readErr):
+		// A reset may have cut the fallback's predecessor short: no swap, the read error ends the pipe.
+		c.seam.Unlock()
+		return false, nil
 	}
 	drained := c.readFrom
 	c.readFrom = c.next
@@ -361,7 +394,20 @@ func (c *adbConn) commitSwap() bool {
 
 	c.sockets.forget(drained)
 	c.logger.Debug("adb session websocket refreshed", "session", c.sessionUUID())
-	return true
+	return true, nil
+}
+
+// endOnSwapCutLocked ends the connection with errSwapCut wrapping cause, logged at Warn. Caller
+// holds the seam; this releases it.
+func (c *adbConn) endOnSwapCutLocked(cause error) error {
+	sessionUUID := c.uuid
+	err := fmt.Errorf("%w: %w", errSwapCut, cause)
+	c.phase = phaseClosed
+	c.endedOnCut = true
+	c.seam.Unlock()
+	c.logger.Warn("ending the adb connection", "session", sessionUUID, "error", err)
+	c.Close()
+	return err
 }
 
 // Close closes every websocket the connection opened, which unblocks parked pumps.
@@ -377,6 +423,15 @@ func (c *adbConn) Close() error {
 	return err
 }
 
+// closedErrLocked is what Send and Receive return once the connection is closed. Caller holds
+// the seam.
+func (c *adbConn) closedErrLocked() error {
+	if c.endedOnCut {
+		return errClosedAfterCut
+	}
+	return errAdbConnClosed
+}
+
 // sessionUUID returns the current session's UUID, or "" before one is announced.
 func (c *adbConn) sessionUUID() string {
 	c.seam.RLock()
@@ -384,36 +439,43 @@ func (c *adbConn) sessionUUID() string {
 	return c.uuid
 }
 
-// enforceWSDeadline closes the current websocket if it outlived deadline, reporting
-// whether it did. Zero or negative disables it. An anomaly guard, not a cap.
+// enforceWSDeadline closes the current websocket if it outlived deadline, or ends the
+// connection if a drain never ended, reporting whether it fired. Zero or negative disables
+// it. An anomaly guard, not a cap.
 //
-// The lock is exclusive: deciding and re-arming the clock must be one step, or every later
-// poll re-decides the same expiry.
+// Decides under the read lock and takes the exclusive lock only to act. During a drain a Send
+// can park on the successor while it holds the read lock. A Lock on every poll would queue
+// behind that Send, RWMutex would block the reader's next RLock, and the predecessor would stop
+// draining. Decides again under the exclusive lock and re-arms the clock in the same step: the
+// reader can commit a swap between the two locks.
 func (c *adbConn) enforceWSDeadline(deadline time.Duration) bool {
 	if deadline <= 0 {
 		return false
 	}
 
-	c.seam.Lock()
-	phase := c.phase
-	stale := c.readFrom
-	age := time.Since(c.readSince)
-	// commitSwap re-arms readSince, so a fresh handshake's age is its own websocket's.
-	staleRead := (phase == phaseSteady || phase == phaseFreshHandshake) && age >= deadline
-	// drainingSince is zero until the first refresh, so the IsZero guard is load-bearing.
-	stalledDrain := phase == phaseDraining && !c.drainingSince.IsZero() &&
-		time.Since(c.drainingSince) >= drainStallMultiple*deadline
+	c.seam.RLock()
+	staleRead, stalledDrain := c.deadlinePassedLocked(deadline)
+	c.seam.RUnlock()
+	if !staleRead && !stalledDrain {
+		return false
+	}
 
+	c.seam.Lock()
+	staleRead, stalledDrain = c.deadlinePassedLocked(deadline)
 	if !staleRead && !stalledDrain {
 		c.seam.Unlock()
 		return false
 	}
-	// Re-arm whichever clock justified this firing. The reader owns advancing readFrom.
+	phase := c.phase
+	stale := c.readFrom
+	age := time.Since(c.readSince)
+	// The drain may have lost bytes, so end the connection, as for any unclean end.
 	if stalledDrain {
-		c.drainingSince = time.Now()
-	} else {
-		c.readSince = time.Now()
+		c.endOnSwapCutLocked(fmt.Errorf("no clean close within %s", drainStallMultiple*deadline))
+		return true
 	}
+	// Re-arm the clock that justified this firing. The reader owns advancing readFrom.
+	c.readSince = time.Now()
 	// No uuid left to re-attach to, so the reader cannot recover. Close the phase here or
 	// every later poll re-fires on a dead socket.
 	if phase == phaseFreshHandshake {
@@ -424,9 +486,6 @@ func (c *adbConn) enforceWSDeadline(deadline time.Duration) bool {
 	// Keep every log below the unlock: sessionUUID takes seam.RLock and RWMutex is not
 	// reentrant.
 	switch {
-	case stalledDrain:
-		c.logger.Warn("predecessor websocket never reached EOF after a refresh; dropping it",
-			"deadline", drainStallMultiple*deadline, "session", c.sessionUUID())
 	case phase == phaseFreshHandshake:
 		c.logger.Warn("fresh session never sent its control frame; dropping the connection",
 			"age", age, "deadline", deadline)
@@ -437,6 +496,18 @@ func (c *adbConn) enforceWSDeadline(deadline time.Duration) bool {
 	// Close, do not swap: the parked reader owns resuming the session.
 	c.sockets.forget(stale)
 	return true
+}
+
+// deadlinePassedLocked reports whether the read target outlived deadline (staleRead) or a drain
+// outlived drainStallMultiple times deadline (stalledDrain). Caller holds the seam, shared or
+// exclusive.
+func (c *adbConn) deadlinePassedLocked(deadline time.Duration) (staleRead, stalledDrain bool) {
+	// commitSwap re-arms readSince, so a fresh handshake's age is its own websocket's.
+	staleRead = (c.phase == phaseSteady || c.phase == phaseFreshHandshake) && time.Since(c.readSince) >= deadline
+	// drainingSince is zero until the first refresh, so the IsZero guard is load-bearing.
+	stalledDrain = c.phase == phaseDraining && !c.drainingSince.IsZero() &&
+		time.Since(c.drainingSince) >= drainStallMultiple*deadline
+	return staleRead, stalledDrain
 }
 
 // failureCount returns how many refreshes have failed consecutively; a success resets it.

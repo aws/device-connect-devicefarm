@@ -22,6 +22,13 @@ import (
 // neverCleanCutDelay outlives every test, so the mock keeps a predecessor open and writable.
 const neverCleanCutDelay = time.Minute
 
+// refreshCyclesToSpan is how many refresh cycles a test waits through.
+const refreshCyclesToSpan = 20
+
+// abnormalCloseCode is what a websocket API reports for a connection lost with no close frame.
+// A peer must not send it, but one that does gets no special case.
+const abnormalCloseCode = 1006
+
 // fastPolicy has production's shape with millisecond durations, so a test drives
 // several full cycles in well under a second.
 func fastPolicy() WSRefreshPolicy {
@@ -1236,44 +1243,166 @@ func senderMarker(sender int) byte {
 }
 
 func TestGivenBenignErrorOutsideRefreshWhenAwaitingSuccessorThenNotTreatedAsCleanCut(t *testing.T) {
-	// A cut can come with no close frame, so the phase is the ONLY clean-cut signal.
+	// Outside a refresh no end is expected, whatever its close code.
 	mock := testsupport.NewSessionEchoWSS(t)
 	conn := newTestAdbConn(t, mock.URL, fastPolicy())
 	handshake(t, conn)
 
-	assert.False(t, conn.awaitSuccessor(net.ErrClosed),
-		"outside a refresh, a benign close is a real end of connection")
+	swapped, err := conn.awaitSuccessor(&wsCloseError{code: supersededCloseCode})
+
+	assert.False(t, swapped, "outside a refresh, a clean close is a real end of connection")
+	assert.NoError(t, err, "the reactive path, not the swap, owns that end")
 }
 
-func TestGivenNonBenignErrorDuringRefreshWhenAwaitingSuccessorThenNotTreatedAsCleanCut(t *testing.T) {
-	mock := testsupport.NewSessionEchoWSS(t)
-	conn := newTestAdbConn(t, mock.URL, fastPolicy())
-	handshake(t, conn)
-
-	conn.seam.Lock()
-	conn.phase = phaseRefreshing
-	conn.nextReady = make(chan struct{})
-	conn.refreshFailed = make(chan struct{})
-	conn.seam.Unlock()
-
-	assert.False(t, conn.awaitSuccessor(websocket.ErrFrameTooLarge),
-		"a protocol fault is never a clean cut")
-}
-
-func TestGivenPeerResetDuringRefreshWhenAwaitingSuccessorThenNotTreatedAsCleanCut(t *testing.T) {
-	mock := testsupport.NewSessionEchoWSS(t)
-	conn := newTestAdbConn(t, mock.URL, fastPolicy())
-	handshake(t, conn)
-
-	conn.seam.Lock()
-	conn.phase = phaseDraining
-	conn.nextReady = make(chan struct{})
-	conn.refreshFailed = make(chan struct{})
-	conn.seam.Unlock()
-
+func TestGivenADrainingSwapWhenThePredecessorEndsThenOnlyTheEndItsKindExpectsCommits(t *testing.T) {
 	resetRead := &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", errPeerReset)}
-	assert.False(t, conn.awaitSuccessor(resetRead),
-		"a reset may have cut the old websocket short, so the swap must not go ahead")
+	tests := []struct {
+		name string
+		// freshSession drains the fresh-session fallback's predecessor, which the client closes
+		// itself; otherwise a reattach's, which the server closes.
+		freshSession bool
+		readErr      error
+		wantSwapped  bool
+		wantSwapCut  bool
+	}{
+		{name: "a reattach's predecessor closed by the server", readErr: &wsCloseError{code: supersededCloseCode}, wantSwapped: true},
+		{name: "a reattach's predecessor ended with no close frame", readErr: io.EOF, wantSwapCut: true},
+		{name: "a reattach's predecessor closed abnormally", readErr: &wsCloseError{code: abnormalCloseCode}, wantSwapCut: true},
+		{name: "a reattach's predecessor reset", readErr: resetRead, wantSwapCut: true},
+		{name: "a reattach's predecessor closed locally", readErr: net.ErrClosed, wantSwapCut: true},
+		{name: "the fallback's predecessor closed by the client", freshSession: true, readErr: net.ErrClosed, wantSwapped: true},
+		{name: "the fallback's predecessor reset", freshSession: true, readErr: resetRead},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			// The mock never closes the predecessor, so only readErr ends it.
+			mock := testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{
+				CleanCutDelay:  neverCleanCutDelay,
+				RejectReattach: testCase.freshSession,
+			})
+			conn := newTestAdbConn(t, mock.URL, fastPolicy())
+			handshake(t, conn)
+			require.NoError(t, conn.refresh(context.Background(), nil))
+
+			swapped, err := conn.awaitSuccessor(testCase.readErr)
+
+			assert.Equal(t, testCase.wantSwapped, swapped)
+			if !testCase.wantSwapCut {
+				assert.NoError(t, err)
+				return
+			}
+			assert.ErrorIs(t, err, errSwapCut)
+			assert.ErrorIs(t, err, testCase.readErr, "the cut must name its cause")
+			assert.True(t, conn.isClosed(), "a cut must end the connection")
+		})
+	}
+}
+
+func TestGivenARefreshWhenThePredecessorEndsThenOnlyTheServersCleanCloseKeepsTheStreamGoing(t *testing.T) {
+	const chunkSize = 64
+	tests := []struct {
+		name                string
+		supersededCloseCode int
+		wantSwapped         bool
+		wantSwapCut         bool
+	}{
+		{name: "the server's clean close", supersededCloseCode: supersededCloseCode, wantSwapped: true},
+		{name: "no close frame", supersededCloseCode: testsupport.NoCloseFrame, wantSwapCut: true},
+		{name: "an abnormal close", supersededCloseCode: abnormalCloseCode, wantSwapCut: true},
+		{name: "the relay lost its leg to the server", supersededCloseCode: testsupport.InternalErrorCloseCode, wantSwapCut: true},
+		{name: "the server ended the session", supersededCloseCode: testsupport.SessionEndedCloseCode},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			mock := testsupport.NewSequenceWSS(t, testsupport.SequenceConfig{
+				ChunkSize:           chunkSize,
+				SupersededCloseCode: testCase.supersededCloseCode,
+			})
+			logs := &lockedBuffer{}
+			conn := newTestAdbConnOnRoute(t, mock.URL, fastPolicy(), RouteAdb, slog.New(slog.NewTextHandler(logs, nil)))
+			// One request opens the session and yields chunk one.
+			sent := []byte("000chost:version")
+			require.NoError(t, conn.Send(sent))
+			received, err := conn.Receive()
+			require.NoError(t, err)
+
+			require.NoError(t, conn.refresh(context.Background(), nil))
+			require.Equal(t, 1, mock.Reattaches())
+
+			if testCase.wantSwapped {
+				request := []byte("000chost:version")
+				require.NoError(t, conn.Send(request))
+				sent = append(sent, request...)
+				message, err := conn.Receive()
+				require.NoError(t, err)
+				received = append(received, message...)
+				assert.Equal(t, testsupport.ExpectedSequence(len(received)), received,
+					"the inbound stream must be gap-free, duplicate-free, and in order across the swap")
+				assert.Equal(t, sent, mock.Sessions()[0].Inbound(),
+					"every outbound byte must reach the session exactly once, in order")
+				assert.NotContains(t, logs.String(), "level=WARN", "a clean swap must log no warning")
+				return
+			}
+
+			_, err = conn.Receive()
+			require.Error(t, err)
+			sendErr := conn.Send([]byte("000chost:version"))
+			assert.ErrorIs(t, sendErr, errAdbConnClosed, "the connection must end, not read on past a possible gap")
+			if testCase.wantSwapCut {
+				assert.ErrorIs(t, err, errSwapCut)
+				assert.Contains(t, logs.String(), "level=WARN", "the cut must be logged at Warn")
+				assert.ErrorIs(t, sendErr, errSwapCut, "a write after the cut must name the cut, so the pipe logs it once")
+			}
+			assert.Equal(t, 2, mock.ConnectionsAccepted(), "no resume or fresh session may follow the end")
+		})
+	}
+}
+
+func TestGivenAStalledDrainWhenTheGuardFiresThenTheConnectionEnds(t *testing.T) {
+	// The predecessor never got the server's clean close, so bytes may still have been coming.
+	mock := testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{CleanCutDelay: neverCleanCutDelay})
+	logs := &lockedBuffer{}
+	conn := newTestAdbConnOnRoute(t, mock.URL, fastPolicy(), RouteAdb, slog.New(slog.NewTextHandler(logs, nil)))
+	handshake(t, conn)
+	require.NoError(t, conn.refresh(context.Background(), nil))
+	results := receiveInBackground(conn)
+
+	deadline := time.Minute
+	conn.seam.Lock()
+	conn.drainingSince = time.Now().Add(-drainStallMultiple * deadline)
+	conn.seam.Unlock()
+	require.True(t, conn.enforceWSDeadline(deadline))
+
+	result := await(t, results, "the read to end")
+	assert.Error(t, result.err)
+	sendErr := conn.Send([]byte("000chost:version"))
+	assert.ErrorIs(t, sendErr, errAdbConnClosed, "the connection must end")
+	assert.True(t, isBenignPipeEnd(sendErr), "a write after the guard's cut must not be logged again, got %v", sendErr)
+	assert.Contains(t, logs.String(), errSwapCut.Error(), "the end must be logged with its cause")
+	assert.Equal(t, 2, mock.ConnectionsAccepted(), "no resume may follow the drop")
+	// The peer answers the guard's close frame with its own 1000; that must not pass for the
+	// server's close.
+	swapped, err := conn.awaitSuccessor(&wsCloseError{code: supersededCloseCode})
+	assert.False(t, swapped, "the echo of the guard's own close must not commit the swap")
+	assert.NoError(t, err)
+}
+
+func TestGivenATeardownDuringADrainWhenThePredecessorEndsThenItIsNoCut(t *testing.T) {
+	// A Close whose TryLock lost leaves the phase draining; its closed latch must still win.
+	mock := testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{CleanCutDelay: neverCleanCutDelay})
+	logs := &lockedBuffer{}
+	conn := newTestAdbConnOnRoute(t, mock.URL, fastPolicy(), RouteAdb, slog.New(slog.NewTextHandler(logs, nil)))
+	handshake(t, conn)
+	require.NoError(t, conn.refresh(context.Background(), nil))
+	conn.sockets.closeAll()
+
+	swapped, err := conn.awaitSuccessor(io.EOF)
+
+	assert.False(t, swapped)
+	assert.NoError(t, err, "a teardown is no cut")
+	assert.NotContains(t, logs.String(), "level=WARN", "a teardown must log no cut")
 }
 
 func TestGivenOversizedInboundMessageWhenReceivedThenTheFaultSurfacesWithoutAResume(t *testing.T) {
@@ -1318,8 +1447,11 @@ func TestGivenFailedRefreshWhenReaderIsWaitingThenItIsReleasedWithTheReadError(t
 	conn.seam.Unlock()
 
 	waited := make(chan bool, 1)
-	// io.EOF is how x/net surfaces the server's close of a superseded websocket.
-	go func() { waited <- conn.awaitSuccessor(io.EOF) }()
+	go func() {
+		swapped, err := conn.awaitSuccessor(&wsCloseError{code: supersededCloseCode})
+		assert.NoError(t, err, "a failed refresh is no cut")
+		waited <- swapped
+	}()
 
 	// Nothing may be decided until the refresh reports its outcome.
 	select {
@@ -1500,9 +1632,9 @@ func blackHoleListener(t *testing.T) string {
 	return listener.Addr().String()
 }
 
-func TestGivenStalledDrainWhenDeadlineEnforcedThenPredecessorIsDropped(t *testing.T) {
+func TestGivenADrainWithinItsAllowanceWhenDeadlineEnforcedThenItIsLeftAlone(t *testing.T) {
 	// The half-duplex wedge guard: a blackholed close leaves sends on the successor and
-	// reads parked on a predecessor that never EOFs, and nothing else can recover since
+	// reads parked on a predecessor that never ends, and nothing else can recover since
 	// refresh() no-ops outside steady state. Hence the drain's own longer allowance.
 	mock := testsupport.NewSessionEchoWSS(t)
 	conn := newTestAdbConn(t, mock.URL, fastPolicy())
@@ -1516,13 +1648,6 @@ func TestGivenStalledDrainWhenDeadlineEnforcedThenPredecessorIsDropped(t *testin
 	conn.seam.Unlock()
 	assert.False(t, conn.enforceWSDeadline(deadline),
 		"a drain within its allowance must be left alone")
-
-	conn.seam.Lock()
-	conn.drainingSince = time.Now().Add(-drainStallMultiple * deadline)
-	conn.seam.Unlock()
-
-	assert.True(t, conn.enforceWSDeadline(deadline),
-		"a drain that never reaches EOF must be broken so the reader can advance")
 }
 
 func TestGivenFiredDeadlineGuardWhenPolledAgainThenItDoesNotRefireOrDoubleClose(t *testing.T) {
@@ -1728,6 +1853,50 @@ func TestGivenABlockedSendWhenQuietForIsReadThenTheConnectionCountsAsActive(t *t
 	assert.Equal(t, 5*time.Second, activity.quietFor(), "the finished write must stop counting")
 }
 
+func TestGivenASuccessorWhoseSendBlocksWhenTheRefresherPollsInPhaseDrainingThenReceiveStillReadsThePredecessor(t *testing.T) {
+	// The server parks input to the successor until the predecessor closes. It closes the
+	// predecessor only after the client reads its output. A refresher poll that queues for the
+	// exclusive seam behind the parked Send blocks the reader's RLock, so the reader and the
+	// server wait on each other.
+	predecessor := newFakeWS()
+	successor := &blockingWSConn{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	t.Cleanup(func() { close(successor.release) })
+	// Short cycles, so the sleep below spans many forced refresh attempts, not one.
+	policy := fastPolicy()
+	policy.Interval = 5 * time.Millisecond
+	policy.FreeSecondWait = 5 * time.Millisecond
+	policy.PollInterval = time.Millisecond
+	conn := newAdbConn(newTestDialer(testTimeout), NewActiveDevice(), testDeviceARN, RouteAdb, predecessor,
+		policy, newActivityTracker(nil), noopLogger())
+	t.Cleanup(func() { conn.Close() })
+	nextReady := make(chan struct{})
+	close(nextReady)
+	conn.seam.Lock()
+	conn.uuid = testSessionUUID
+	conn.next = successor
+	conn.writeTo = successor
+	conn.phase = phaseDraining
+	conn.drainingSince = time.Now()
+	conn.nextReady = nextReady
+	conn.refreshFailed = make(chan struct{})
+	conn.seam.Unlock()
+	conn.uuidReadyOnce.Do(func() { close(conn.uuidReady) })
+
+	go conn.Send([]byte("input the server parks"))
+	await(t, successor.entered, "the Send to park on the successor")
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	go runRefresher(context.Background(), conn, policy, stop)
+	// Wait for deadline polls and forced refresh attempts after each hunt expires.
+	time.Sleep(refreshCyclesToSpan * (policy.Interval + policy.FreeSecondWait))
+
+	predecessor.reads <- receivedMessage{message: []byte("output still draining")}
+	result := await(t, receiveInBackground(conn), "the predecessor's message")
+
+	require.NoError(t, result.err)
+	assert.Equal(t, []byte("output still draining"), result.message)
+}
+
 // waitUntilLocked waits until tryLock fails, which means another goroutine holds the lock. It
 // releases each lock it gets while it waits.
 func waitUntilLocked(t *testing.T, tryLock func() bool, unlock func(), msg string) {
@@ -1761,6 +1930,8 @@ func TestGivenAServerCloseWhenReadingThenOnlyTheSessionEndedCodeSkipsTheResume(t
 	}{
 		{name: "the server ended the session", closeCode: testsupport.SessionEndedCloseCode, endsSession: true, wantDials: 1},
 		{name: "the relay lost its leg to the server", closeCode: testsupport.InternalErrorCloseCode, wantResumed: true, wantDials: 2},
+		{name: "the websocket died with no close frame", closeCode: testsupport.NoCloseFrame, wantResumed: true, wantDials: 2},
+		{name: "an abnormal close", closeCode: abnormalCloseCode, wantResumed: true, wantDials: 2},
 		{
 			name:      "a server without the session-ended code ended the session",
 			closeCode: testsupport.InternalErrorCloseCode, endsSession: true, wantDials: 2,

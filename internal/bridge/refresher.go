@@ -50,8 +50,8 @@ const (
 	// derive wsDeadline.
 	refreshCycleHeadroom = 30 * time.Second
 
-	// drainStallMultiple scales wsDeadline into a predecessor's allowance to reach
-	// EOF (see adbConn.enforceWSDeadline). A healthy drain finishes in milliseconds.
+	// drainStallMultiple scales wsDeadline into the time a predecessor gets to end (see
+	// adbConn.enforceWSDeadline). The server closes a healthy one much sooner.
 	drainStallMultiple = 2
 )
 
