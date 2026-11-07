@@ -149,7 +149,7 @@ attach a device, then use `adb` as usual.
    ```
 
    If adb's own server holds port 5037, run `adb kill-server` first, or start the daemon yourself on another
-   port. `bridge start` takes the listener flags, and its `--session-arn` is optional. Omit it to start with
+   port. `bridge start` takes `--port`, and its `--session-arn` is optional. Omit it to start with
    no device, then attach one with `device add`.
 
    ```sh
@@ -230,7 +230,6 @@ Run `devicefarm-connect <command> --help` to see the flags of a command.
 | `--debug` | every command | Debug-level logs. The default is info. |
 | `--version`, `-v` | `devicefarm-connect` alone | Prints the release version. |
 | `--port` | `bridge start` | The local TCP port for adb clients. Default `5037`, adb's own default. |
-| `--listen-addr` | `bridge start` | The address to listen on. Default `127.0.0.1`. Keep it on loopback. Read "Security notes" before you change it. |
 | `--log` | `bridge start` | The daemon log file. Default `devicefarm-connect.log` in the runtime directory. |
 | `--allow-adb-reverse` | `bridge start` | Turns on `adb reverse`. Off by default. |
 | `--session-arn` | `bridge start`, `device add`, `device remove` | The remote access session ARN. `device remove` without it detaches the attached device. |
@@ -260,7 +259,7 @@ build follows in a later release. If you build the Windows binary yourself:
 
 - You need Windows 10 build 17063 or later. The program uses a Unix socket for its control channel, and
   older Windows builds have no Unix sockets.
-- `adb.exe` connects to `127.0.0.1` only. A daemon started with `--listen-addr ::1` is not reachable from it.
+- `adb.exe` connects to `127.0.0.1` only. A daemon that listens on `::1` is not reachable from it.
 - `adb reverse` reaches only servers that listen on `127.0.0.1`. A server that listens on `::1` alone is not
   reachable.
 
@@ -288,9 +287,10 @@ build follows in a later release. If you build the Windows binary yourself:
 
 - **Any program on your computer can use the attached device.** The listener has no authentication, like a
   normal adb server. Any process that reaches the port has the same power as your own `adb`.
-- **Keep the listener on loopback.** The daemon listens on `127.0.0.1` by default. `--listen-addr` can move
-  it to any address or hostname, and nothing stops you. Any machine that can reach that address can drive
-  the attached device and use the daemon's remote access session, with no password or token. With
+- **Keep the listener on loopback.** The daemon listens on `127.0.0.1` by default.
+  `bridge start --listen-addr <address>` can move it to any address or hostname, and nothing stops you.
+  `--help` does not list the flag. Any machine that can reach that address can drive the attached
+  device and use the daemon's remote access session, with no password or token. With
   `--allow-adb-reverse`, that machine can also add reverse rules and reach ports that are open only to
   your computer. Move the listener off loopback only on a network you control. Never put it on an
   address the internet can reach. Scanners such as Shodan find open ports fast.

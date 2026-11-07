@@ -155,16 +155,6 @@ func bindPersistentFlags(cmd *cobra.Command, cfg *config.ProxyConfig) {
 	cmd.PersistentFlags().BoolVar(&cfg.Debug, "debug", cfg.Debug, "enable debug-level logging (default is info)")
 }
 
-// listenAddrUsage is hard-wrapped: pflag indents each line to the usage column.
-// TODO: link the public security docs here once they exist.
-const listenAddrUsage = "address to listen on\n" +
-	"WARNING: changing it is not recommended. If it is\n" +
-	"not loopback, any machine that can reach that\n" +
-	"address can drive the attached device, with no\n" +
-	"password or token. With --allow-adb-reverse, it\n" +
-	"can also reach ports open only to this machine.\n" +
-	"Keep it on loopback"
-
 // bindListenerFlags wires the daemon's listener flags (--port, --listen-addr) to
 // cfg. They are needed only by the two commands that stand up the daemon: `bridge
 // start` (which spawns it) and the hidden `daemon` body (which is re-execed with
@@ -173,7 +163,10 @@ const listenAddrUsage = "address to listen on\n" +
 // them and are deliberately kept off their help output.
 func bindListenerFlags(cmd *cobra.Command, cfg *config.ProxyConfig) {
 	flags := cmd.Flags()
-	flags.StringVar(&cfg.ListenAddr, "listen-addr", cfg.ListenAddr, listenAddrUsage)
+	// WARNING: --listen-addr is not recommended: the listener has no authentication.
+	// Read "Security notes" in the README first. Hidden from help; still parses.
+	flags.StringVar(&cfg.ListenAddr, "listen-addr", cfg.ListenAddr, "address to listen on")
+	flags.Lookup("listen-addr").Hidden = true
 	flags.IntVar(&cfg.ListenPort, "port", cfg.ListenPort, "local TCP port to listen on for adb clients")
 }
 
