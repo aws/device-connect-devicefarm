@@ -26,7 +26,9 @@
 // localfilesystem, jdwp), sent as spelled: adbd refuses a bad name or pid per
 // connection. Every other kind (dev:, vsock:, acceptfd:, a bare service) fails
 // at install with adb's unknown-kind text; adb would fail it at connect time,
-// but the daemon keeps rules to sockets it can serve.
+// but the daemon keeps rules to sockets it can serve. On a rule whose remote is
+// not tcp, each accepted connection carries an OpenTurn, so the device gets the
+// rule's device services in accept order.
 //
 // Every name here is the daemon's own; an Adb-prefixed type holds adb's model
 // in its values or fields (see the internal/adbwire package doc). Where a name
