@@ -122,6 +122,21 @@ func (clientOpening opening) unwrappedService() string {
 	return clientOpening.service
 }
 
+// reverseFamily reports a `reverse:` request. It keys on the prefix alone, so a malformed one
+// counts too.
+func (clientOpening opening) reverseFamily() bool {
+	return strings.HasPrefix(clientOpening.unwrappedService(), reverseServicePrefix)
+}
+
+// ridesPreSelected reports whether the opening may ride a pre-selected socket: a device service
+// behind an answered select. A lone host request needs a session in host mode. The reverse
+// family dials too: an install's first reply waits on the server's tunnel setup, which the
+// bounded first read must not cut, and that read would take the status word the pipe's rule
+// watch settles the request on.
+func (clientOpening opening) ridesPreSelected() bool {
+	return clientOpening.selected && !clientOpening.reverseFamily()
+}
+
 // readOpening reads everything the client says before anything is dialed: its service
 // request, plus the transport select the daemon answers itself when one comes first. attached
 // is the device a select names. nil answers no select: the select is returned as the service,
@@ -279,10 +294,7 @@ const reverseServicePrefix = "reverse:"
 // counts no rule. answered means the client has its FAIL and the connection is done.
 func refuseReverseFamily(tcpConn net.Conn, clientOpening opening, forwarding *attachmentFeatures,
 	logger *slog.Logger) (answered bool) {
-	if forwarding == nil || forwarding.reverseEnabled {
-		return false
-	}
-	if !strings.HasPrefix(clientOpening.unwrappedService(), reverseServicePrefix) {
+	if forwarding == nil || forwarding.reverseEnabled || !clientOpening.reverseFamily() {
 		return false
 	}
 	refuseOpening(tcpConn, msgReverseOff, "could not refuse a reverse request", logger)
@@ -309,7 +321,7 @@ const msgReverseSlotHeld = "adb reverse on this device is held by another adb cl
 // proceed false means the connection is done.
 func awaitServerRulesCleared(ctx context.Context, tcpConn net.Conn, clientOpening opening,
 	forwarding *attachmentFeatures, bound time.Duration, logger *slog.Logger) (proceed bool) {
-	if forwarding == nil || !strings.HasPrefix(clientOpening.unwrappedService(), reverseServicePrefix) {
+	if forwarding == nil || !clientOpening.reverseFamily() {
 		return true
 	}
 	boundTimer := time.NewTimer(bound)
@@ -409,10 +421,10 @@ func screenReverseRule(tcpConn net.Conn, clientOpening opening, forwarding *atta
 // relayRequest hands a freshly wrapped session every byte the client has said that the
 // device must see, so the pipe starts with nothing stranded.
 //
-// selected says the daemon already answered the client's select. The session then needs
-// its own switch, and it must be the daemon's canonical one: the client's select was
-// consumed at the seam, and a second status word reaching the client would leave it one
-// reply ahead for the rest of the connection.
+// selected says the daemon already answered the client's select. Unless pre-selected at park,
+// the session then needs its own switch, and it must be the daemon's canonical one: the
+// client's select was consumed at the seam, and a second status word reaching the client would
+// leave it one reply ahead for the rest of the connection.
 func relayRequest(ctx context.Context, tcpConn net.Conn, session *adbConn, pending []byte,
 	selected bool) error {
 	// The watcher below is a goroutine, so a cancel that landed before it ran would not stop
@@ -439,13 +451,14 @@ func cancelOrFault(ctx context.Context, fault error) error {
 }
 
 // sendOpening plays the daemon's own `host:transport-any` switch when the seam answered the
-// client's select, then sends pending. With no switch it reads the control frame within one
-// round trip: a parked websocket can die unseen.
+// client's select and the session is not pre-selected, then sends pending. Its first read waits
+// one round trip at most: the switch's reply, the control frame, or, on a pre-selected session,
+// the device's first reply. A parked websocket can die unseen after its pre-select.
 // One return for cancelOrFault to judge.
 func sendOpening(tcpConn net.Conn, session *adbConn, pending []byte, selected bool) error {
 	// The device's reply is one round trip, which is what ReattachTimeout budgets.
 	within := session.policy.ReattachTimeout
-	if selected {
+	if selected && !session.preSelected {
 		leftover, selectErr := selectTransport(session, within)
 		if selectErr != nil {
 			// The client is waiting for the status word of its own request, so adb's
@@ -474,7 +487,17 @@ func sendOpening(tcpConn net.Conn, session *adbConn, pending []byte, selected bo
 		}
 		pending = pending[end:]
 	}
-	if !selected {
+	switch {
+	case session.preSelected:
+		// The reply is the client's, so it goes out before the pipe's own first read.
+		reply, err := receiveWithin(session, within)
+		if err != nil {
+			return fmt.Errorf("read the device's first reply: %w", err)
+		}
+		if err := writeWithin(tcpConn, reply, within); err != nil {
+			return fmt.Errorf("deliver the device's first reply: %w", err)
+		}
+	case !selected:
 		if err := session.awaitHandshake(within); err != nil {
 			return fmt.Errorf("open the session: %w", err)
 		}
