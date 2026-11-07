@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // Package forward owns the daemon's adb forward rules: the spec-text-keyed table,
 // the live listening sockets and their accept loops.
 //

@@ -60,6 +60,10 @@ Only release branches merge into `main`. A release branch is named `release/*` a
 commits reach `main` through a maintainer's release branch. A Dependabot pull request lands the same way: a maintainer
 closes it without merging, imports the dependency change, and the next release carries it.
 
+Copy the two license header lines and the blank line after them from the top of any Go file in this repository to
+the top of every new Go file.
+The maintainers' build rejects a Go file without them, so a maintainer cannot import the file.
+
 
 ## Code of Conduct
 This project has adopted the [Amazon Open Source Code of Conduct](https://aws.github.io/code-of-conduct).

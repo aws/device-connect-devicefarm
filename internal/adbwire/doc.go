@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // Package adbwire implements the pieces of the ADB smart-socket host protocol
 // the daemon or a probe speaks. Pure protocol logic: no I/O beyond an io.Writer,
 // no internal imports.
