@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // Package failure words a command's failure for the person who typed it: the
 // problem, its causes and the fix, each on its own line.
 package failure

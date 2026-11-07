@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 package testsupport
 
 // Presigned-shaped query markers on an endpoint nothing listens on: every dial fails while

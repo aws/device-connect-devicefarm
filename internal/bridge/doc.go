@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // Package bridge is the daemon's data plane: the websocket dialer and the durable adb
 // session over it, the byte pipe between a local adb client and the device, the
 // attachment state, the serial fetch, the host reply cache, the reverse pair (notifier and

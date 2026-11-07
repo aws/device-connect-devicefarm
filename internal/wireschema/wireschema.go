@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // Package wireschema holds the shared control-frame contract: the JSON Schema for a
 // frame body and the conformance fixture every peer agrees on. Both files are staged
 // copies, checked in and embedded: the binary runs where the contract's source is
