@@ -15,10 +15,11 @@ const (
 	AdbInstallCannotBind
 	// AdbInstallCannotRebind is norebind against an existing rule.
 	AdbInstallCannotRebind
-	// AdbInstallUnsupportedRemote is a remote spec that is not tcp:<port>, which
-	// adb lacks: adb defers remote validation to connect time. Refusing at
-	// install is deliberate, since every connection through such a rule would
-	// die with zero bytes.
+	// AdbInstallUnsupportedRemote is a remote spec whose kind is not tcp or one
+	// of deviceSocketKinds, a status adb lacks: adb's host server stores any
+	// remote and adbd refuses a bad one per connection. The daemon refuses at
+	// install instead, since every connection through such a rule would die
+	// with zero bytes.
 	AdbInstallUnsupportedRemote
 	// AdbInstallTooManyRules is a new local at the rule limit, which adb
 	// lacks. A rule costs a host listener, and its connections spend the
