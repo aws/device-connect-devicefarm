@@ -112,13 +112,13 @@ func newBridgeStopCommand(state *rootState) *cobra.Command {
 	}
 }
 
-// newBridgeStatusCommand reports whether the daemon is running and which device,
-// if any, is attached. It prints a human-readable line to stdout (status output,
-// not a log event).
+// newBridgeStatusCommand reports whether the daemon is running and how many devices
+// are attached; "device list" names them. It prints a human-readable line to stdout
+// (status output, not a log event).
 func newBridgeStatusCommand(state *rootState) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Report whether the bridge daemon is running and the attached device",
+		Short: "Report whether the bridge daemon is running and how many devices are attached",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			pid, running := state.newManager().Status()
@@ -127,8 +127,8 @@ func newBridgeStatusCommand(state *rootState) *cobra.Command {
 				return nil
 			}
 
-			// The daemon is up; ask it over the control channel which device is
-			// attached so status reflects live state, not just liveness.
+			// The daemon is up; ask it over the control channel what is attached so
+			// status reflects live state, not just liveness.
 			resp, err := state.controlClient().Send(control.Request{Op: control.OpStatus})
 			if err != nil {
 				if daemonNotRunning(err) {
@@ -137,14 +137,15 @@ func newBridgeStatusCommand(state *rootState) *cobra.Command {
 				}
 				return err
 			}
-			if resp.DeviceLabel == "" {
+			if len(resp.Devices) == 0 {
 				line := fmt.Sprintf("%s daemon is running (pid %d), no device attached", config.BinaryName, pid)
 				if note := lastDetachNote(resp, time.Now()); note != "" {
 					line += "; " + note
 				}
 				cmd.Println(line)
 			} else {
-				cmd.Printf("%s daemon is running (pid %d), device attached: %s\n", config.BinaryName, pid, resp.DeviceLabel)
+				cmd.Printf("%s daemon is running (pid %d), %s attached; run 'device list' for details\n",
+					config.BinaryName, pid, countNoun(len(resp.Devices), "device"))
 			}
 			return nil
 		},

@@ -379,10 +379,9 @@ func runPeriodic(ctx context.Context, interval time.Duration, tick func()) {
 // attached device. That keeps a stale remove from detaching a device the caller did not
 // mean.
 //
-// status reports the listen port and the attached device, when there is one. list
-// reports each attached device with its session ARN; the list is empty when none is
-// attached. With no device, both carry the daemon's last detach of its own, when there
-// was one since the last add.
+// status reports the listen port, the reverse setting and the attached devices, each with
+// its session ARN and label. list reports the devices alone. With no device, both carry
+// the daemon's last detach of its own, when there was one since the last add.
 //
 // shutdown cancels the daemon context, then replies.
 //
@@ -452,6 +451,7 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 				return withLastDetach(reply, device)
 			}
 			reply.DeviceLabel, reply.ARN = current.Label, current.ARN
+			reply.Devices = attachedDevices(current)
 			return reply
 
 		case control.OpList:
@@ -459,8 +459,7 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 			if !present {
 				return withLastDetach(control.Response{OK: true}, device)
 			}
-			return control.Response{OK: true,
-				Devices: []control.AttachedDevice{{SessionARN: current.ARN, Label: current.Label}}}
+			return control.Response{OK: true, Devices: attachedDevices(current)}
 
 		case control.OpShutdown:
 			m.logger.Info("shutdown requested over control channel")
@@ -471,6 +470,11 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 			return control.Response{OK: false, Error: fmt.Sprintf("unknown control op %q", req.Op)}
 		}
 	}
+}
+
+// attachedDevices builds the Devices list that status and list replies share.
+func attachedDevices(current bridge.DeviceInfo) []control.AttachedDevice {
+	return []control.AttachedDevice{{SessionARN: current.ARN, Label: current.Label}}
 }
 
 // withLastDetach adds the daemon's last detach of its own to a no-device reply.

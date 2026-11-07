@@ -261,7 +261,7 @@ func (s *controlHandlerSuite) TestListWithNoDeviceReportsAnEmptyList() {
 	s.Empty(resp.Devices)
 }
 
-func (s *controlHandlerSuite) TestStatusReportsAttachedLabelAndARNWithReverseOff() {
+func (s *controlHandlerSuite) TestStatusReportsAttachedLabelARNAndDevicesWithReverseOff() {
 	s.Require().True(s.handler(addReq("arn:1")).OK)
 
 	resp := s.handler(control.Request{Op: control.OpStatus})
@@ -269,6 +269,7 @@ func (s *controlHandlerSuite) TestStatusReportsAttachedLabelAndARNWithReverseOff
 	s.Require().True(resp.OK)
 	s.Equal("Pixel 10 (OS 17)", resp.DeviceLabel)
 	s.Equal("arn:1", resp.ARN)
+	s.Equal([]control.AttachedDevice{{SessionARN: "arn:1", Label: "Pixel 10 (OS 17)"}}, resp.Devices)
 	s.False(resp.ReverseEnabled, "the default config starts with reverse off")
 	s.Empty(resp.LastDetachReason, "an attached device reports no detach")
 	s.True(resp.LastDetachAt.IsZero())
@@ -284,6 +285,7 @@ func (s *controlHandlerSuite) TestStatusReportsReverseEnabledFromTheConfig() {
 	s.Require().True(resp.OK)
 	s.True(resp.ReverseEnabled)
 	s.Empty(resp.ARN, "no device is attached")
+	s.Empty(resp.Devices)
 }
 
 func (s *controlHandlerSuite) TestStatusAndListCarryTheLastDetachWhileNoDeviceIsAttached() {

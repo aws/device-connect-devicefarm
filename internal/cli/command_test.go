@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -319,16 +320,30 @@ func TestGivenNoBridgeWhenListDevicesInvokedThenStartsTheBridge(t *testing.T) {
 	assert.Contains(t, out.String(), "* bridge not running; starting it now")
 }
 
-func TestGivenRunningDaemonWithDeviceWhenStatusInvokedThenReportsAttachedDevice(t *testing.T) {
-	fakeDaemon(t, func(req control.Request) control.Response {
-		assert.Equal(t, control.OpStatus, req.Op)
-		return control.Response{OK: true, DeviceLabel: "Google Pixel 8 (OS 15)"}
-	})
+func TestGivenRunningDaemonWithDevicesWhenStatusInvokedThenReportsTheCountNotTheLabels(t *testing.T) {
+	pixel := control.AttachedDevice{SessionARN: "arn:aws:devicefarm:us-west-2:1:session:a/b/0", Label: "Google Pixel 8 (OS 15)"}
+	tests := []struct {
+		name    string
+		devices []control.AttachedDevice
+		want    string
+	}{
+		{name: "one device", devices: []control.AttachedDevice{pixel}, want: "1 device attached"},
+		{name: "two devices", devices: []control.AttachedDevice{pixel, pixel}, want: "2 devices attached"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeDaemon(t, func(req control.Request) control.Response {
+				assert.Equal(t, control.OpStatus, req.Op)
+				return control.Response{OK: true, DeviceLabel: pixel.Label, ARN: pixel.SessionARN, Devices: tc.devices}
+			})
 
-	out, err := execRoot(t, "bridge", "status")
+			out, err := execRoot(t, "bridge", "status")
 
-	require.NoError(t, err)
-	assert.Contains(t, out.String(), "device attached: Google Pixel 8 (OS 15)")
+			require.NoError(t, err)
+			assert.Equal(t, fmt.Sprintf("devicefarm-connect daemon is running (pid %d), %s; run 'device list' for details\n",
+				os.Getpid(), tc.want), out.String())
+		})
+	}
 }
 
 func TestGivenRunningDaemonWithoutDeviceWhenStatusInvokedThenReportsNoDevice(t *testing.T) {

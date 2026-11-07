@@ -62,10 +62,15 @@ func humanAge(age time.Duration) string {
 	case age >= time.Minute:
 		count, unit = int(age.Minutes()), "minute"
 	}
+	return countNoun(count, unit)
+}
+
+// countNoun formats a count with its noun: "1 device", "2 devices".
+func countNoun(count int, noun string) string {
 	if count != 1 {
-		unit += "s"
+		noun += "s"
 	}
-	return fmt.Sprintf("%d %s", count, unit)
+	return fmt.Sprintf("%d %s", count, noun)
 }
 
 // startBridge starts the bridge daemon. A package var so a test can swap in a fake
