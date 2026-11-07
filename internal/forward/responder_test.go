@@ -126,7 +126,7 @@ func TestGivenAnUninstallableForwardWhenRespondedThenOneFailWithAdbsText(t *test
 		{"norebind over an existing rule", forwardRequest(installed, "tcp:5555", true), adbwire.MsgCannotRebind},
 		{"a port another process holds", forwardRequest(held, "tcp:5555", false), adbwire.FailCannotBind("Address already in use")},
 		{"a local kind this daemon never serves", forwardRequest("udp:1", "tcp:5555", false), adbwire.FailCannotBind("unknown socket specification:udp:1")},
-		{"a remote kind this daemon never serves", forwardRequest("tcp:0", "localabstract:x", false), "unknown socket specification:localabstract:x"},
+		{"a remote kind this daemon never serves", forwardRequest("tcp:0", "dev:/dev/null", false), "unknown socket specification:dev:/dev/null"},
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -135,6 +135,20 @@ func TestGivenAnUninstallableForwardWhenRespondedThenOneFailWithAdbsText(t *test
 		})
 	}
 	assert.Equal(t, 1, table.ruleCount(), "no refused install may leave a rule behind")
+}
+
+func TestGivenALocalabstractForwardWhenRespondedThenOkayOkayAndTheListShowsTheSpec(t *testing.T) {
+	table := newTestTable(t)
+
+	reply := respond(t, table, anySelector, forwardRequest("tcp:0", "localabstract:chrome_devtools_remote", false), attachedSerial)
+
+	// The resolved port rides the reply as a protocol string, as for a tcp remote.
+	require.Greater(t, len(reply), len("OKAYOKAY")+4, reply)
+	resolvedPort := reply[len("OKAYOKAY")+4:]
+	require.Equal(t, "OKAYOKAY"+protoString(resolvedPort), reply, "a socket remote installs like a tcp one")
+	listed := respond(t, table, anySelector, listForwardRequest, attachedSerial)
+	row := fmt.Sprintf("%s tcp:%s localabstract:chrome_devtools_remote\n", attachedSerial, resolvedPort)
+	assert.Equal(t, "OKAY"+protoString(row), listed, "list-forward renders the remote as spelled")
 }
 
 func TestGivenKillForwardWhenRespondedThenTheRuleGoesAndASecondRemovalMisses(t *testing.T) {

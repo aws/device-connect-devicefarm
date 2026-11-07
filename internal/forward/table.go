@@ -77,11 +77,11 @@ func (table *ForwardRulesTable) Install(localText, remoteText string, noRebind b
 		return AdbInstallResult{Status: AdbInstallCannotBind, FailReason: adbwire.MsgNoDevices}
 	}
 
-	local, port, failReason := parseTCPSpec(localText)
+	local, port, failReason := parseLocalSpec(localText)
 	if failReason != "" {
 		return AdbInstallResult{Status: AdbInstallCannotBind, FailReason: adbwire.FailCannotBind(failReason)}
 	}
-	remote, _, failReason := parseTCPSpec(remoteText)
+	remote, failReason := parseRemoteSpec(remoteText)
 	if failReason != "" {
 		return AdbInstallResult{Status: AdbInstallUnsupportedRemote, FailReason: failReason}
 	}
@@ -244,11 +244,11 @@ func (table *ForwardRulesTable) acceptLoop(forwardRule *rule) {
 	}
 }
 
-// parseTCPSpec validates one end of a forward rule: it must parse and be tcp.
-// failReason is empty on success and otherwise carries the adbwire text; every
-// non-tcp kind gets adb's unknown-kind text, including the unix-socket kinds
-// adb itself serves on Linux, because this daemon serves only tcp.
-func parseTCPSpec(text string) (spec adbwire.AdbSpec, port int, failReason string) {
+// parseLocalSpec validates the local end of a forward rule: it must parse and
+// be tcp. failReason is empty on success, else the adbwire text. Every non-tcp
+// kind gets adb's unknown-kind text, even the unix-socket kinds adb listens on
+// under Linux: this daemon listens on tcp only.
+func parseLocalSpec(text string) (spec adbwire.AdbSpec, port int, failReason string) {
 	spec, err := adbwire.ParseSpec(text)
 	if err != nil {
 		return adbwire.AdbSpec{}, 0, err.Error()
@@ -261,6 +261,37 @@ func parseTCPSpec(text string) (spec adbwire.AdbSpec, port int, failReason strin
 		return adbwire.AdbSpec{}, 0, err.Error()
 	}
 	return spec, port, ""
+}
+
+// deviceSocketKinds are the remote kinds allowed besides tcp: the device's
+// unix socket kinds and jdwp. Each goes to the device as spelled: adb's host
+// server stores any remote and adbd refuses a bad name or pid per connection.
+// Every other kind fails at install: dev: and dev-raw: open character devices,
+// vsock: reaches a VM, acceptfd: cannot connect, local: is an alias that names
+// a different namespace on each side, and a bare service (shell:, exec:) is
+// no socket.
+var deviceSocketKinds = []string{"localabstract", "localreserved", "localfilesystem", "jdwp"}
+
+// parseRemoteSpec validates the device end of a forward rule: tcp with a valid
+// port (adb's texts), or one of deviceSocketKinds with any value, empty
+// included. failReason is empty on success; every other kind gets adb's
+// unknown-kind text. TCPPort on another kind returns a guard text that must
+// never reach a client.
+func parseRemoteSpec(text string) (spec adbwire.AdbSpec, failReason string) {
+	spec, err := adbwire.ParseSpec(text)
+	if err != nil {
+		return adbwire.AdbSpec{}, err.Error()
+	}
+	if spec.Kind == "tcp" {
+		if _, err := spec.TCPPort(); err != nil {
+			return adbwire.AdbSpec{}, err.Error()
+		}
+		return spec, ""
+	}
+	if slices.Contains(deviceSocketKinds, spec.Kind) {
+		return spec, ""
+	}
+	return adbwire.AdbSpec{}, adbwire.FailUnknownSpec(text)
 }
 
 // canonicalKey renders a raw local spec text the way Install renders the spec
