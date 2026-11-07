@@ -127,6 +127,28 @@ func TestGivenRunningSessionWhenResolvedThenReturnsEndpointAndLabel(t *testing.T
 	assert.Equal(t, "wss://host.example/ws", got.Endpoint, "the interactive endpoint is returned verbatim")
 }
 
+func TestGivenAStartedSessionWhenResolvedThenInfoCarriesTheStartAndTheExpiry(t *testing.T) {
+	startedAt := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
+	out := sessionOutput("wss://host.example/ws", "Pixel", "16")
+	out.RemoteAccessSession.Started = aws.Time(startedAt)
+
+	got, err := newClient(&fakeGetter{out: out}).GetSession(context.Background(), testSessionARN)
+
+	require.NoError(t, err)
+	assert.Equal(t, startedAt, got.StartedAt)
+	assert.Equal(t, startedAt.Add(150*time.Minute), got.ExpiresAt, "the service ends a session 150 minutes after it starts")
+}
+
+func TestGivenASessionWithoutAStartTimeWhenResolvedThenBothTimesAreZero(t *testing.T) {
+	fake := &fakeGetter{out: sessionOutput("wss://host.example/ws", "Pixel", "16")}
+
+	got, err := newClient(fake).GetSession(context.Background(), testSessionARN)
+
+	require.NoError(t, err)
+	assert.True(t, got.StartedAt.IsZero())
+	assert.True(t, got.ExpiresAt.IsZero(), "no start, no expiry to compute")
+}
+
 func TestGivenResolvedSessionWhenReturnedThenEndpointCarriesNoPathParameter(t *testing.T) {
 	// The route is the dialer's business: a path baked in here would be a second
 	// source of truth for it. Any query the endpoint already carries stays untouched.

@@ -419,7 +419,7 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 			// defense-in-depth against a future concurrent caller, and treats the
 			// race like the already-attached path.
 			if !device.Set(bridge.DeviceInfo{ARN: req.ARN, Endpoint: resolved.Endpoint, Label: resolved.Label,
-				Serial: serial}) {
+				Serial: serial, SessionStartedAt: resolved.StartedAt, SessionExpiresAt: resolved.ExpiresAt}) {
 				current, _ := device.Current()
 				return control.Response{
 					OK:    false,
@@ -472,9 +472,12 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 	}
 }
 
-// attachedDevices builds the Devices list that status and list replies share.
+// attachedDevices builds the Devices list that status and list replies share: everything but
+// the endpoint, which never crosses the control channel.
 func attachedDevices(current bridge.DeviceInfo) []control.AttachedDevice {
-	return []control.AttachedDevice{{SessionARN: current.ARN, Label: current.Label}}
+	return []control.AttachedDevice{{
+		SessionARN: current.ARN, Label: current.Label, Serial: current.Serial, AttachedAt: current.AttachedAt,
+		SessionStartedAt: current.SessionStartedAt, SessionExpiresAt: current.SessionExpiresAt}}
 }
 
 // withLastDetach adds the daemon's last detach of its own to a no-device reply.

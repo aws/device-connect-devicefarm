@@ -45,6 +45,13 @@ func (s *controlHandlerSuite) SetupTest() {
 	s.handler = s.mgr.controlHandler(context.Background(), s.device, s.dialer, func() {})
 }
 
+// attachedArnOne is the Devices entry the handler builds for "arn:1" once an add bound it.
+func (s *controlHandlerSuite) attachedArnOne() []control.AttachedDevice {
+	bound, _ := s.device.Current()
+	return []control.AttachedDevice{{SessionARN: "arn:1", Label: "Pixel 10 (OS 17)", Serial: attachSerial,
+		AttachedAt: bound.AttachedAt, SessionStartedAt: testSessionStartedAt, SessionExpiresAt: testSessionExpiresAt}}
+}
+
 func TestControlHandlerSuite(t *testing.T) {
 	suite.Run(t, new(controlHandlerSuite))
 }
@@ -60,6 +67,9 @@ func (s *controlHandlerSuite) TestNoDeviceAttachedAddResolvesAttachesAndReportsL
 	s.Equal("arn:1", current.ARN)
 	s.Equal(s.mock.URL, current.Endpoint, "the resolved endpoint must be stored verbatim")
 	s.Equal(attachSerial, current.Serial, "the add must bind the device with the serial it fetched")
+	s.Equal(testSessionStartedAt, current.SessionStartedAt, "the add binds the session times it resolved")
+	s.Equal(testSessionExpiresAt, current.SessionExpiresAt)
+	s.WithinDuration(time.Now(), current.AttachedAt, time.Minute)
 	s.Equal([]string{hostDevicesRequest}, sessionInbounds(s.mock), "the fetch sends host:devices alone")
 }
 
@@ -245,13 +255,13 @@ func (s *controlHandlerSuite) TestUnknownOpRejected() {
 	s.False(resp.OK)
 }
 
-func (s *controlHandlerSuite) TestListReportsEachAttachedDeviceWithItsSessionARN() {
+func (s *controlHandlerSuite) TestListReportsEachAttachedDeviceWithItsSessionARNSerialAndTimes() {
 	s.Require().True(s.handler(addReq("arn:1")).OK)
 
 	resp := s.handler(control.Request{Op: control.OpList})
 
 	s.Require().True(resp.OK)
-	s.Equal([]control.AttachedDevice{{SessionARN: "arn:1", Label: "Pixel 10 (OS 17)"}}, resp.Devices)
+	s.Equal(s.attachedArnOne(), resp.Devices)
 }
 
 func (s *controlHandlerSuite) TestListWithNoDeviceReportsAnEmptyList() {
@@ -269,7 +279,7 @@ func (s *controlHandlerSuite) TestStatusReportsAttachedLabelARNAndDevicesWithRev
 	s.Require().True(resp.OK)
 	s.Equal("Pixel 10 (OS 17)", resp.DeviceLabel)
 	s.Equal("arn:1", resp.ARN)
-	s.Equal([]control.AttachedDevice{{SessionARN: "arn:1", Label: "Pixel 10 (OS 17)"}}, resp.Devices)
+	s.Equal(s.attachedArnOne(), resp.Devices)
 	s.False(resp.ReverseEnabled, "the default config starts with reverse off")
 	s.Empty(resp.LastDetachReason, "an attached device reports no detach")
 	s.True(resp.LastDetachAt.IsZero())
