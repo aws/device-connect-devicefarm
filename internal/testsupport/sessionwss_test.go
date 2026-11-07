@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -219,11 +220,15 @@ func TestGivenDialsOnTwoRoutesWhenServedThenRoutesDialedListsThemInOrder(t *test
 	assert.Equal(t, []string{"adb", "adbreverse"}, mock.RoutesDialed())
 }
 
-// readCloseCode reads frames until the peer's close and returns its status code.
+// readCloseCode reads frames until the peer's close and returns its status code, or NoCloseFrame
+// when the connection ends with no close frame.
 func readCloseCode(t *testing.T, ws *websocket.Conn) int {
 	t.Helper()
 	for {
 		frame, err := ws.NewFrameReader()
+		if errors.Is(err, io.EOF) {
+			return NoCloseFrame
+		}
 		require.NoError(t, err)
 		payload, err := io.ReadAll(frame)
 		require.NoError(t, err)
@@ -298,4 +303,34 @@ func TestGivenRefusedNewSessionsWhenFreshSessionsOpenThenTheFirstOnesGetTheError
 	mock.RefuseNewSessions(0)
 	assertControlFrame(t, openFresh(), controlStatusNew)
 	assert.Equal(t, 3, mock.NewSessionsRefused())
+}
+
+func TestGivenASupersededCloseCodeWhenASessionIsTakenOverThenThePredecessorEndsThatWay(t *testing.T) {
+	tests := []struct {
+		name                string
+		supersededCloseCode int
+		wantCloseCode       int
+	}{
+		{name: "the server's own close", wantCloseCode: SupersededCloseCodeDefault},
+		{name: "the relay lost its leg to the server", supersededCloseCode: InternalErrorCloseCode, wantCloseCode: InternalErrorCloseCode},
+		{name: "the predecessor died", supersededCloseCode: NoCloseFrame, wantCloseCode: NoCloseFrame},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			mock := NewSessionMockWSS(t, SessionMockConfig{SupersededCloseCode: testCase.supersededCloseCode})
+			first := dialTestWSS(t, mock.URL)
+			first.PayloadType = websocket.BinaryFrame
+			require.NoError(t, websocket.Message.Send(first, []byte("000chost:version")))
+			uuid := assertControlFrame(t, firstFrame(t, first), controlStatusNew)
+			firstFrame(t, first) // the echo
+
+			second := dialTestWSS(t, mock.URL)
+			second.PayloadType = websocket.BinaryFrame
+			require.NoError(t, websocket.Message.Send(second, []byte(uuid)))
+			require.Equal(t, uuid, assertControlFrame(t, firstFrame(t, second), controlStatusReattach))
+
+			assert.Equal(t, testCase.wantCloseCode, readCloseCode(t, first))
+		})
+	}
 }

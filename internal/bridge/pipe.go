@@ -151,10 +151,11 @@ func isBenignCloseError(err error) bool {
 		errors.Is(err, context.DeadlineExceeded)
 }
 
-// isBenignPipeEnd reports whether err is a clean end of the whole pipe: an expected
-// close, or a peer reset (errPeerReset, one errno per OS), which an adb client that
-// aborts can send. The reset stays out of isBenignCloseError: awaitSuccessor uses that
-// as the expected-cut test of a refresh, and a reset there may have cut bytes short.
+// isBenignPipeEnd reports whether err is a pipe end its caller need not log: an expected
+// close, a peer reset (errPeerReset, one errno per OS), which an adb client that aborts can
+// send, or errSwapCut, which adbConn logged itself. The reset stays out of
+// isBenignCloseError: commitSwap uses that to test the end of a fresh-session fallback's
+// drain, and a reset there may have cut bytes short.
 func isBenignPipeEnd(err error) bool {
-	return isBenignCloseError(err) || errors.Is(err, errPeerReset)
+	return isBenignCloseError(err) || errors.Is(err, errPeerReset) || errors.Is(err, errSwapCut)
 }
