@@ -309,7 +309,7 @@ func TestGivenAnUppercaseHexLengthPrefixWhenInterceptionDeclinesThenTheSessionSe
 	proxyAddress, mock, _ := startForwardingProxy(t)
 	client := dialClient(t, proxyAddress)
 
-	writeAll(t, client, []byte("000Dhost:features"))
+	writeAll(t, client, []byte("000Ehost:get-state"))
 
-	assertSessionReceived(t, mock, "000Dhost:features")
+	assertSessionReceived(t, mock, "000Ehost:get-state")
 }

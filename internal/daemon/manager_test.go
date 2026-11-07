@@ -711,11 +711,13 @@ const (
 	hostVersionRequest     = "000chost:version"
 	hostDevicesRequest     = "000chost:devices"
 	hostDevicesLongRequest = "000ehost:devices-l"
+	hostFeaturesRequest    = "000dhost:features"
 )
 
 // attachFetches is what an add sends, one session per request, in byte order: the serial
 // fetch's host:devices, then one fetch of each cached host reply.
-var attachFetches = []string{hostDevicesRequest, hostDevicesRequest, hostVersionRequest, hostDevicesLongRequest}
+var attachFetches = []string{hostDevicesRequest, hostDevicesRequest, hostVersionRequest, hostFeaturesRequest,
+	hostDevicesLongRequest}
 
 // attachSerial is the serial the mocks' one device row names.
 const attachSerial = "R3CN30ABCDE"

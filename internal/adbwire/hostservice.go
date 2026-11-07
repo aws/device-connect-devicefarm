@@ -67,7 +67,7 @@ var unsupportedSerialPrefixes = []string{
 // server obeys the select and reads no device off that prefix. `adb forward
 // --list` is one host:list-forward request, with no features probe. reverse:*
 // (`--list` included) comes bare behind the same select, unclaimed by this
-// splitter. The set and remove forms also open a separate connection asking
+// splitter. The set form also opens a separate connection first, asking
 // host:features, host-serial:<s>:features or host-transport-id:<n>:features,
 // and a FAIL there kills the command before any forward request. Android
 // Studio's adb libraries select with host:transport:<serial> before every device

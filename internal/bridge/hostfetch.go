@@ -15,6 +15,7 @@ const (
 	hostVersionRequest     = "000chost:version"
 	hostDevicesRequest     = "000chost:devices"
 	hostDevicesLongRequest = "000ehost:devices-l"
+	hostFeaturesRequest    = "000dhost:features"
 )
 
 // defaultHostReplyTimeout bounds the wait for a host reply, so a wedged server cannot hold a
