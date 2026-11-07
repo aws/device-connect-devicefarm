@@ -145,16 +145,17 @@ func (s *AdbProxyServer) Run(ctx context.Context) error {
 //
 // Nothing is dialed until the client's service request has been read (readOpening), so a
 // client that only selects a transport, or says nothing, mints no session. A forward-family
-// request is answered from the local table and never dials at all. host:version and the device
-// lists are answered from cached server replies. A device tracker gets the current list, cached
-// or empty, then is held and pushed the list at every attach and detach, with or without a
-// device (serveDeviceTracker). With no device, every other request gets the close alone. While
-// reverse is off, a reverse-family request gets a local FAIL and never dials either. With reverse
-// on, a reverse-family request waits until the attachment's clear of the server's reverse rules
-// settles, or gets a local FAIL at the bound. While the server's notifier slot is held elsewhere,
-// it gets a local FAIL at once, on arrival or mid-wait. Every other request takes one of the
-// attachment's device-stream slots before the dial. No free slot, no dial. A reverse install past
-// the attachment's rule limit is refused after that, still with no dial.
+// request is answered from the local table and never dials at all. host:version, the device
+// lists and the features probe are answered from cached server replies. A device tracker gets
+// the current list, cached or empty, then is held and pushed the list at every attach and detach,
+// with or without a device (serveDeviceTracker). With no device, every other request gets the
+// close alone. While reverse is off, a reverse-family request gets a local FAIL and never dials
+// either. With reverse on, a reverse-family request waits until the attachment's clear of the
+// server's reverse rules settles, or gets a local FAIL at the bound. While the server's notifier
+// slot is held elsewhere, it gets a local FAIL at once, on arrival or mid-wait. Every other
+// request takes one of the attachment's device-stream slots before the dial. No free slot, no
+// dial. A reverse install past the attachment's rule limit is refused after that, still with no
+// dial.
 func (s *AdbProxyServer) handleConn(ctx context.Context, tcp net.Conn) {
 	connLogger := s.logger.With("client", tcp.RemoteAddr().String())
 	defer tcp.Close()
@@ -200,7 +201,7 @@ func (s *AdbProxyServer) handleConn(ctx context.Context, tcp net.Conn) {
 		connLogger.Debug("answered the forward request locally", "service", clientOpening.service)
 		return
 	}
-	if answerHostQuery(connCtx, tcp, clientOpening, forwarding, connLogger) {
+	if answerHostQuery(connCtx, tcp, clientOpening, forwarding, info.Serial, connLogger) {
 		connLogger.Debug("answered the host request locally", "service", clientOpening.service)
 		return
 	}

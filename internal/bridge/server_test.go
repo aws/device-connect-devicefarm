@@ -337,7 +337,7 @@ func spendBudget(t *testing.T, device *ActiveDevice) {
 }
 
 // relayedHostRequest is a whole host request the daemon relays rather than answers itself.
-const relayedHostRequest = "000dhost:features"
+const relayedHostRequest = "000ehost:get-state"
 
 // openPipedConnection opens one local adb connection and waits for the mock to echo its
 // request, so it holds a slot on return.

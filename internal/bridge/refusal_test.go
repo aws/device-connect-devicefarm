@@ -163,7 +163,7 @@ func TestGivenARefusedSessionWhenTheLookupFindsItRunningThenTheRenewedEndpointIs
 	proxyAddress, device := runLookupProxy(t, refusing.URL, lookup)
 	client := dialClient(t, proxyAddress)
 
-	request := []byte("000dhost:features")
+	request := []byte("000ehost:get-state")
 	writeAll(t, client, request)
 
 	assert.Equal(t, string(request), string(readN(t, client, len(request))), "the redial carries the request; the mock echoes it")
@@ -181,7 +181,7 @@ func TestGivenASingleRefusalWhenTheSessionIsRunningThenTheRedialOnTheSameEndpoin
 	proxyAddress, _ := runLookupProxy(t, mock.URL, &fakeLookup{verdict: SessionVerdict{Endpoint: mock.URL, Label: renewedLabel}})
 	client := dialClient(t, proxyAddress)
 
-	request := []byte("000dhost:features")
+	request := []byte("000ehost:get-state")
 	writeAll(t, client, request)
 
 	assert.Equal(t, string(request), string(readN(t, client, len(request))))
@@ -255,7 +255,7 @@ func TestGivenASocketParkedDuringTheLookupWhenTheSessionIsRunningElsewhereThenTh
 	waitFor(t, func() bool { return parkedSocket(keeper) != nil }, "the keeper never parked a socket")
 	client := dialClient(t, proxyAddress)
 
-	request := []byte("000dhost:features")
+	request := []byte("000ehost:get-state")
 	writeAll(t, client, request)
 	<-lookup.entered
 	// The take emptied the slot; a socket parked now is the refill, dialed at the old endpoint.
