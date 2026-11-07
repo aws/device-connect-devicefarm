@@ -417,6 +417,12 @@ func TestGivenAScriptedFrameStreamWhenReceivedThenOnlyACloseReadsDifferentlyFrom
 			wantOutcomes: 2,
 			wantClose:    &wsCloseError{code: 1011},
 		},
+		{
+			name:         "drained messages, then the server's superseded close and the end of the connection",
+			frames:       [][]byte{binaryFrame([]byte("drained")), closeFrame(supersededCloseCode, "superseded by reconnect")},
+			wantOutcomes: 2,
+			wantClose:    &wsCloseError{code: supersededCloseCode, reason: "superseded by reconnect"},
+		},
 		{name: "a masked close with a code", frames: [][]byte{maskedFrame(websocket.CloseFrame, binary.BigEndian.AppendUint16(nil, 4000))}, wantOutcomes: 1},
 		{name: "a close with a one-byte payload", frames: [][]byte{serverFrame(true, websocket.CloseFrame, []byte{0x0f})}, wantOutcomes: 1},
 		{name: "a close over the control frame cap", frames: [][]byte{closeFrame(4000, string(make([]byte, maxCloseFramePayload)))}, wantOutcomes: 1},

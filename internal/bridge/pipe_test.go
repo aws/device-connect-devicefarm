@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"crypto/rand"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -264,6 +265,19 @@ func TestGivenPeerErrorsWhenClassifiedThenOnlyResetIsBenign(t *testing.T) {
 			assert.False(t, isBenignCloseError(testCase.err), "no peer errno is an expected close")
 		})
 	}
+}
+
+func TestGivenASwapCutOnATruncatedReadWhenThePipeEndsThenItReturnsNoError(t *testing.T) {
+	// adbConn logs the cut at Warn; an error here would log it again at Error.
+	appSide, pipeSide := localTCPPair(t)
+	ws := newFakeWS()
+	ws.reads <- receivedMessage{err: fmt.Errorf("%w: %w", errSwapCut, io.ErrUnexpectedEOF)}
+
+	err := pipeConn(context.Background(), pipeSide, ws, nil)
+
+	assert.NoError(t, err)
+	_, readErr := appSide.Read(make([]byte, 1))
+	assert.ErrorIs(t, readErr, io.EOF, "the local adb client's connection must close")
 }
 
 func TestGivenLocalConnClosedWhenPumpInboundReceivesMessageThenReturnsWriteError(t *testing.T) {

@@ -1,6 +1,8 @@
 package testsupport
 
 import (
+	"cmp"
+	"crypto/tls"
 	"fmt"
 	"regexp"
 	"sync"
@@ -17,12 +19,18 @@ const sessionUUIDLen = 36
 // Websocket close codes the server and the relay send, duplicated from the wire contract like
 // the frame builders.
 const (
+	// SupersededCloseCodeDefault closes a websocket a reattach took over, after the server's last
+	// write there.
+	SupersededCloseCodeDefault = 1000
 	// SessionEndedCloseCode closes a session's current websocket once the server ends the
 	// session; nothing can resume it.
 	SessionEndedCloseCode = 4000
 	// InternalErrorCloseCode is the relay's close when its leg to the server fails. A server
 	// that does not send SessionEndedCloseCode ends sessions with it too.
 	InternalErrorCloseCode = 1011
+	// NoCloseFrame, in place of a close code, drops the connection with no close frame, as a
+	// dead peer or a cut network path does.
+	NoCloseFrame = -1
 )
 
 // Reconnect signal: a first client frame that is exactly a canonical UUIDv4.
@@ -62,6 +70,12 @@ type SessionMockConfig struct {
 	// ReattachAckDelay holds the ack until after the predecessor is cut, as when the
 	// close overtakes the ack. Zero keeps the server's own order: ack, swap, close.
 	ReattachAckDelay time.Duration
+
+	// SupersededCloseCode closes a superseded websocket with this code instead of
+	// SupersededCloseCodeDefault, or with no close frame (NoCloseFrame). Zero keeps the default. Server: a predecessor that died, or whose
+	// relay leg failed, before all its bytes arrived. Catches: a client that commits the swap
+	// anyway and reads on past the gap.
+	SupersededCloseCode int
 
 	// ReattachAckArm replaces the ack with an empty-bodied frame of that arm, so a test can
 	// drive the client's fail-closed arm for a frame /adb never carries, or its decoder with
@@ -383,7 +397,7 @@ func (m *SessionMockWSS) reattach(ws *websocket.Conn, uuid string) *MockSession 
 	// Take over but never acknowledge: indistinguishable from a lost ack, so the client
 	// must treat the predecessor as poisoned.
 	if swallowAck {
-		session.takeOver(ws, m.cfg.CleanCutDelay)
+		session.takeOver(ws, m.cfg.CleanCutDelay, m.cfg.SupersededCloseCode)
 		return session
 	}
 
@@ -398,13 +412,13 @@ func (m *SessionMockWSS) reattach(ws *websocket.Conn, uuid string) *MockSession 
 		if websocket.Message.Send(ws, ack) != nil {
 			return nil
 		}
-		session.takeOver(ws, m.cfg.CleanCutDelay)
+		session.takeOver(ws, m.cfg.CleanCutDelay, m.cfg.SupersededCloseCode)
 		return session
 	}
 
 	// Swap first, then ack: makes the cut-before-ack ordering deterministic. The delay
 	// stands in for the ack's flight time, not a change in server logic.
-	session.takeOver(ws, m.cfg.CleanCutDelay)
+	session.takeOver(ws, m.cfg.CleanCutDelay, m.cfg.SupersededCloseCode)
 	time.Sleep(m.cfg.ReattachAckDelay)
 	if websocket.Message.Send(ws, ack) != nil {
 		return nil
@@ -431,7 +445,7 @@ func (m *SessionMockWSS) newSession(ws *websocket.Conn) *MockSession {
 	if websocket.Message.Send(ws, FrameNewSession(uuid)) != nil {
 		return nil
 	}
-	session.takeOver(ws, m.cfg.CleanCutDelay)
+	session.takeOver(ws, m.cfg.CleanCutDelay, m.cfg.SupersededCloseCode)
 	return session
 }
 
@@ -483,20 +497,30 @@ func (s *MockSession) DropAttached(closeCode int) {
 	closeWithCode(attached, closeCode)
 }
 
-// closeWithCode sends a close frame carrying closeCode, then closes ws. x/net's Close sends a
-// second close frame; a client stops reading at the first. Nil is a no-op.
+// closeWithCode sends a close frame carrying closeCode, then closes ws; NoCloseFrame sends none.
+// x/net's Close sends a second close frame; a client stops reading at the first. Nil is a no-op.
 func closeWithCode(ws *websocket.Conn, closeCode int) {
 	if ws == nil {
+		return
+	}
+	if closeCode == NoCloseFrame {
+		dropWithoutCloseFrame(ws)
 		return
 	}
 	ws.WriteClose(closeCode)
 	ws.Close()
 }
 
+// dropWithoutCloseFrame closes the TCP connection under ws's TLS, so the client reads a plain end
+// of stream: no close frame, no TLS close_notify. The serve loop then ends on its failed read.
+func dropWithoutCloseFrame(ws *websocket.Conn) {
+	ws.Request().Context().Value(acceptedConnKey{}).(*tls.Conn).NetConn().Close()
+}
+
 // takeOver makes ws the attached websocket and closes the predecessor under the
-// clean-cut rule. A positive delay closes it after this returns; zero closes it at
-// once, before the caller has read the ack.
-func (s *MockSession) takeOver(ws *websocket.Conn, cleanCutDelay time.Duration) {
+// clean-cut rule, with supersededCloseCode (see SupersededCloseCode). A positive delay closes
+// it after this returns; zero closes it at once, before the caller has read the ack.
+func (s *MockSession) takeOver(ws *websocket.Conn, cleanCutDelay time.Duration, supersededCloseCode int) {
 	s.mu.Lock()
 	if s.graceTimer != nil {
 		s.graceTimer.Stop()
@@ -511,14 +535,15 @@ func (s *MockSession) takeOver(ws *websocket.Conn, cleanCutDelay time.Duration) 
 	}
 	// The swap above already made the predecessor non-current; the close is a later event.
 	// See CleanCutDelay.
+	closeCode := cmp.Or(supersededCloseCode, SupersededCloseCodeDefault)
 	if cleanCutDelay > 0 {
 		go func() {
 			time.Sleep(cleanCutDelay)
-			superseded.Close()
+			closeWithCode(superseded, closeCode)
 		}()
 		return
 	}
-	superseded.Close()
+	closeWithCode(superseded, closeCode)
 }
 
 // detach clears ws and arms the grace timer. A superseded websocket's detach is
@@ -560,10 +585,11 @@ type SequenceConfig struct {
 	ChunkSize int
 
 	// Passed through to the underlying session mock.
-	Grace            time.Duration
-	RejectReattach   bool
-	CleanCutDelay    time.Duration
-	ReattachAckDelay time.Duration
+	Grace               time.Duration
+	RejectReattach      bool
+	CleanCutDelay       time.Duration
+	ReattachAckDelay    time.Duration
+	SupersededCloseCode int
 }
 
 // NewSequenceWSS starts a session-aware mock whose outbound stream is a monotonic sequence
@@ -577,10 +603,11 @@ func NewSequenceWSS(t *testing.T, cfg SequenceConfig) *SessionMockWSS {
 	}
 
 	return NewSessionMockWSS(t, SessionMockConfig{
-		Grace:            cfg.Grace,
-		RejectReattach:   cfg.RejectReattach,
-		CleanCutDelay:    cfg.CleanCutDelay,
-		ReattachAckDelay: cfg.ReattachAckDelay,
+		Grace:               cfg.Grace,
+		RejectReattach:      cfg.RejectReattach,
+		CleanCutDelay:       cfg.CleanCutDelay,
+		ReattachAckDelay:    cfg.ReattachAckDelay,
+		SupersededCloseCode: cfg.SupersededCloseCode,
 		OnMessage: func(session *MockSession, _ []byte) []byte {
 			// SentCount is the resume point: it counts across every websocket of this
 			// session, so the successor continues the sequence rather than restarting.
