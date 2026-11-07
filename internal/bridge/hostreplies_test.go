@@ -33,6 +33,7 @@ var (
 	serverDevicesReply     = string(okayDevicesReply(testSerial + "\tdevice\n"))
 	serverDevicesLongReply = string(okayDevicesReply(
 		testSerial + "            device product:a1 model:Pixel device:a1 transport_id:3\n"))
+	serverFeaturesReply = "OKAY" + string(framed("shell_v2,cmd,stat_v2,ls_v2,fixed_push_mkdir,apex,abb,abb_exec"))
 )
 
 // cannedHostReplies is what the server answers each host request with.
@@ -40,6 +41,7 @@ var cannedHostReplies = map[string]string{
 	hostVersionRequest:     serverVersionReply,
 	hostDevicesRequest:     serverDevicesReply,
 	hostDevicesLongRequest: serverDevicesLongReply,
+	hostFeaturesRequest:    serverFeaturesReply,
 }
 
 // hostReplyMock answers each message in canned with its reply and echoes any other.
@@ -361,12 +363,14 @@ func TestGivenATrackerWhoseFirstFetchFailsWhenAnsweredThenTheClientClosesAfterOn
 
 func TestGivenAHostRequestNotAnsweredLocallyWhenSentThenItIsRelayed(t *testing.T) {
 	for name, service := range map[string]string{
-		"a serial prefix":           "host-serial:R3CN30ABCDE:version",
-		"a transport id prefix":     "host-transport-id:1:devices",
-		"the device features":       "host:features",
-		"the host features":         "host:host-features",
-		"the proto binary tracker":  "host:track-devices-proto-binary",
-		"a near miss of devices -l": "host:devices-ll",
+		"a serial prefix":                   "host-serial:R3CN30ABCDE:version",
+		"a transport id prefix":             "host-transport-id:1:devices",
+		"the features of any usb device":    "host-usb:features",
+		"the features of any local device":  "host-local:features",
+		"the host features":                 "host:host-features",
+		"the proto binary tracker":          "host:track-devices-proto-binary",
+		"a near miss of devices -l":         "host:devices-ll",
+		"a near miss of the features probe": "host:features-l",
 	} {
 		t.Run(name, func(t *testing.T) {
 			proxyAddress, mock, _ := startHostReplyProxy(t, cannedHostReplies)
@@ -379,9 +383,112 @@ func TestGivenAHostRequestNotAnsweredLocallyWhenSentThenItIsRelayed(t *testing.T
 	}
 }
 
+func TestGivenAFeaturesProbeNamingADeviceWhenAskedTwiceThenOneFetchAnswersTheAttachedDeviceAndAnotherSerialIsRefused(t *testing.T) {
+	// One fetch of the plain probe answers each form the transport select would accept: the
+	// attached serial and any transport id. Another serial gets adb's miss text, with no dial.
+	tests := map[string]struct {
+		service   string
+		wantReply string
+		wantDials int
+	}{
+		"the attached serial":        {service: "host-serial:" + testSerial + ":features", wantReply: serverFeaturesReply, wantDials: 1},
+		"the daemon's transport id":  {service: "host-transport-id:1:features", wantReply: serverFeaturesReply, wantDials: 1},
+		"another transport id":       {service: "host-transport-id:7:features", wantReply: serverFeaturesReply, wantDials: 1},
+		"another serial":             {service: "host-serial:emulator-5554:features", wantReply: "FAIL" + string(framed("device 'emulator-5554' not found"))},
+		"another serial with a port": {service: "host-serial:192.168.0.1:5555:features", wantReply: "FAIL" + string(framed("device '192.168.0.1:5555' not found"))},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			proxyAddress, mock, _ := startHostReplyProxy(t, cannedHostReplies)
+
+			for range 2 {
+				assert.Equal(t, tc.wantReply, askHost(t, proxyAddress, string(framed(tc.service))))
+			}
+
+			assert.Equal(t, tc.wantDials, mock.ConnectionsAccepted(), "one fetch for the attached device, none for another serial")
+			for _, session := range mock.Sessions() {
+				assert.Equal(t, hostFeaturesRequest, string(session.Inbound()), "the fetch sends the plain probe")
+			}
+		})
+	}
+}
+
+func TestGivenAFailingFetchWhenAHostQueryIsAskedThenOnlyAFeaturesProbeOnALiveConnectionIsRelayed(t *testing.T) {
+	// A canceled connection is a detach or shutdown: nothing to relay to.
+	tests := map[string]struct {
+		request      string
+		canceled     bool
+		wantAnswered bool
+		wantFetches  int32
+	}{
+		"the features probe":                          {request: "host:features", wantFetches: 1},
+		"the features probe for the serial":           {request: "host-serial:" + testSerial + ":features", wantFetches: 1},
+		"the version":                                 {request: "host:version", wantAnswered: true, wantFetches: 1},
+		"the features probe on a canceled connection": {request: "host:features", canceled: true, wantAnswered: true},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			var fetches atomic.Int32
+			cache := newHostReplyCache(func(context.Context, string) ([]byte, error) {
+				fetches.Add(1)
+				return nil, errors.New("dial refused")
+			})
+			features := &attachmentFeatures{ctx: context.Background(), hostReplies: cache}
+			connCtx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.canceled {
+				cancel()
+			}
+			daemonSide, clientSide := net.Pipe()
+			written := make(chan []byte, 1)
+			go func() {
+				bytesRead, _ := io.ReadAll(clientSide)
+				written <- bytesRead
+			}()
+
+			answered := answerHostQuery(connCtx, daemonSide, opening{service: tc.request}, features, testSerial, noopLogger())
+
+			assert.Equal(t, tc.wantAnswered, answered, "answered false relays the request")
+			assert.Equal(t, tc.wantFetches, fetches.Load(), "a live query fetches before it relays or closes")
+			require.NoError(t, daemonSide.Close())
+			assert.Empty(t, <-written, "a failed fetch writes nothing to the client")
+		})
+	}
+}
+
+func TestGivenAFeaturesFetchWhoseDialFailsWhenTheSessionRunsAtARenewedEndpointThenTheRelayedProbeIsAnsweredThere(t *testing.T) {
+	// A plain listener fails the TLS handshake, so the fetch fails and so does the relay's first dial.
+	address, accepted := testsupport.NewAcceptCounter(t)
+	serving := hostReplyMock(t, cannedHostReplies)
+	lookup := &fakeLookup{verdict: SessionVerdict{Endpoint: serving.URL, Label: renewedLabel}}
+	proxyAddress, device := runLookupProxy(t, "wss://"+address, lookup)
+
+	client := sendOnly(t, proxyAddress, hostFeaturesRequest)
+
+	assert.Equal(t, serverFeaturesReply, string(readN(t, client, len(serverFeaturesReply))), "the server's reply, relayed")
+	assert.Equal(t, 2, accepted(), "the fetch and the relay's first dial")
+	assert.Equal(t, []string{testDeviceARN}, lookup.calls(), "the relay's failed dial asks about the session")
+	assertSessionReceived(t, serving, hostFeaturesRequest)
+	_, present := device.Current()
+	assert.True(t, present)
+}
+
+func TestGivenAFeaturesFetchWhoseDialFailsWhenTheSessionEndedThenTheClientReadsTheDetachReason(t *testing.T) {
+	address, accepted := testsupport.NewAcceptCounter(t)
+	lookup := &fakeLookup{verdict: SessionVerdict{Detach: true, Reason: detachedReason}}
+	proxyAddress, device := runLookupProxy(t, "wss://"+address, lookup)
+
+	client := sendOnly(t, proxyAddress, hostFeaturesRequest)
+
+	assert.Equal(t, detachedReason, readFailThenEOF(t, client), "adb prints the verdict after error:")
+	assertDetached(t, device, detachedReason)
+	assert.Equal(t, 2, accepted(), "the fetch and the relay's one dial; a detach earns no second")
+}
+
 func TestGivenATransportSelectWhenAHostQueryFollowsThenItIsRelayedBehindTheDaemonsSwitch(t *testing.T) {
 	for name, request := range map[string]string{
-		"the bare query": hostVersionRequest,
+		"the bare query":     hostVersionRequest,
+		"the features probe": hostFeaturesRequest,
 		// Stored bare behind the select, this one reads as a cached query.
 		"a doubled host prefix": string(framed("host:host:version")),
 	} {

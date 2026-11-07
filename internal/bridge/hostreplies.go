@@ -10,6 +10,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/aws/device-connect-devicefarm/internal/adbwire"
+	"github.com/aws/device-connect-devicefarm/internal/forward"
 )
 
 // The daemon answers some host requests from copies of the server's replies. It fetches each
@@ -26,14 +29,28 @@ const readyDeviceState = "device"
 // errAttachmentEnded marks a tracker fetch a detach ended; nextTrackerList snapshots again.
 var errAttachmentEnded = errors.New("the attachment ended during the fetch")
 
+// hostQuery says how to answer one one-reply host request. request fetches the reply;
+// relayOnFetchFailure relays the request when the fetch fails, else the client closes, so an
+// outage costs no session lookup per query.
+type hostQuery struct {
+	request             string
+	relayOnFetchFailure bool
+}
+
+// featuresQuery answers adb's features probe, sent on its own connection before most device
+// commands. A failed fetch relays the probe through the refusal gate, so the client reads a FAIL
+// reason or the redial's reply, not a bare close.
+var featuresQuery = hostQuery{request: hostFeaturesRequest, relayOnFetchFailure: true}
+
 // localHostQueries maps each one-reply host request, sent alone with the plain host: prefix, to
-// the framed request whose cached reply answers it. As adb's handle_host_request: version,
-// devices and devices-l get one reply, then the connection closes. The adb version does not
-// change within an attachment.
-var localHostQueries = map[string]string{
-	"host:version":   hostVersionRequest,
-	"host:devices":   hostDevicesRequest,
-	"host:devices-l": hostDevicesLongRequest,
+// its query. As adb's handle_host_request: version, devices, devices-l and features get one
+// reply, then the connection closes. Neither the adb version nor the device's features (its
+// connection banner) change within an attachment.
+var localHostQueries = map[string]hostQuery{
+	"host:version":   {request: hostVersionRequest},
+	"host:devices":   {request: hostDevicesRequest},
+	"host:devices-l": {request: hostDevicesLongRequest},
+	"host:features":  featuresQuery,
 }
 
 // deviceTrackers maps each device tracker, sent alone with the plain host: prefix, to the list
@@ -45,7 +62,32 @@ var deviceTrackers = map[string]string{
 }
 
 // prefetchedHostRequests is every reply localHostQueries answers from; the attach fetches each.
-var prefetchedHostRequests = []string{hostVersionRequest, hostDevicesRequest, hostDevicesLongRequest}
+var prefetchedHostRequests = []string{hostVersionRequest, hostDevicesRequest, hostDevicesLongRequest,
+	hostFeaturesRequest}
+
+// adbFeaturesService is the features probe's service behind a device-naming host prefix:
+// host-serial:<serial>:features under `adb -s`, host-transport-id:<id>:features under `adb -t`.
+const adbFeaturesService = "features"
+
+// localHostQuery resolves a request sent alone to the query that answers it. A features probe
+// may also name the device by serial or transport id, judged as the transport select is
+// (forward.SelectorMiss): another serial returns adb's miss text as refusal, any id matches.
+// host-usb: and host-local: relay: the server answers those by device kind. local false, no
+// refusal: relay.
+func localHostQuery(request, deviceSerial string) (query hostQuery, local bool, refusal string) {
+	if mapped, found := localHostQueries[request]; found {
+		return mapped, true, ""
+	}
+	selector, service, ok := adbwire.SplitHostPrefix(request)
+	namesDevice := selector.Kind == adbwire.AdbSelectorSerial || selector.Kind == adbwire.AdbSelectorTransportID
+	if !ok || service != adbFeaturesService || !namesDevice {
+		return hostQuery{}, false, ""
+	}
+	if reason, missed := forward.SelectorMiss(selector, deviceSerial); missed {
+		return hostQuery{}, false, reason
+	}
+	return featuresQuery, true, ""
+}
 
 // hostReplyCache holds one attachment's copies of the server's host replies, keyed by framed
 // request. A copy lives until the detach. The first request for a reply fetches it; requests
@@ -111,7 +153,7 @@ func keepable(request string, reply []byte) bool {
 	if len(reply) <= hostReplyHeaderLen || string(reply[:statusWordLen]) != statusOkay {
 		return false
 	}
-	if request == hostVersionRequest {
+	if request != hostDevicesRequest && request != hostDevicesLongRequest {
 		return true
 	}
 	for _, row := range strings.Split(strings.TrimSpace(string(reply[hostReplyHeaderLen:])), "\n") {
@@ -160,21 +202,33 @@ func (fetcher *hostReplyFetcher) fetch(ctx context.Context, request string) ([]b
 	return reply, err
 }
 
-// answerHostQuery answers a request in localHostQueries from the attachment's cached reply,
-// fetching it first if there is none. One reply, then the close. A failed fetch closes the
-// client, as a failed dial does. answered false: relay the request. Either it is not a local
-// query, or the server's reply was not one to keep.
+// answerHostQuery answers a request that localHostQuery resolves, from the attachment's cached
+// reply, fetching it first if there is none. One reply, then the close. A features probe naming
+// another serial gets adb's FAIL. A failed fetch closes the client unless the connection is live
+// and query.relayOnFetchFailure is set. answered false: relay the request. Either it is not a
+// local query, the server's reply was not one to keep, or a fetch the query relays failed.
 func answerHostQuery(connCtx context.Context, tcp net.Conn, clientOpening opening, features *attachmentFeatures,
-	logger *slog.Logger) (answered bool) {
+	deviceSerial string, logger *slog.Logger) (answered bool) {
 	// A request behind a select is for the device: relay it.
-	request, local := localHostQueries[clientOpening.service]
-	if features == nil || !local || clientOpening.selected {
+	if features == nil || clientOpening.selected {
+		return false
+	}
+	query, local, refusal := localHostQuery(clientOpening.service, deviceSerial)
+	if refusal != "" {
+		refuseOpening(tcp, refusal, "could not refuse a host request for another device", logger)
+		return true
+	}
+	if !local {
 		return false
 	}
 	// Nothing reads the client here, so only a detach or the daemon's shutdown cancels connCtx,
 	// and with it this fetch or this wait on another's.
-	reply, err := features.hostReplies.lookup(connCtx, request)
+	reply, err := features.hostReplies.lookup(connCtx, query.request)
 	if err != nil {
+		if query.relayOnFetchFailure && connCtx.Err() == nil {
+			logger.Debug("failed to fetch a host reply; relaying the request", "error", err)
+			return false
+		}
 		logFetchFailure(connCtx, err, logger)
 		return true
 	}
