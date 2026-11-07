@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -285,9 +286,10 @@ func TestGivenDaemonClosesWithoutReplyWhenRemoveDeviceInvokedThenSurfacesTranspo
 	assert.ErrorContains(t, err, "the bridge daemon did not answer: read control response")
 }
 
-func TestGivenRunningDaemonWithDeviceWhenListDevicesInvokedThenPrintsOneLinePerDevice(t *testing.T) {
-	// Ago offsets only grow; the expiry offset sits mid-minute. A few seconds of test time keep
-	// every floored minute.
+// fakeDaemonWithPixel is a daemon with one attached device. Ago offsets only grow; the expiry
+// offset sits mid-minute. A few seconds of test time keep every floored minute.
+func fakeDaemonWithPixel(t *testing.T) {
+	t.Helper()
 	now := time.Now()
 	fakeDaemon(t, func(req control.Request) control.Response {
 		assert.Equal(t, control.OpList, req.Op)
@@ -297,12 +299,47 @@ func TestGivenRunningDaemonWithDeviceWhenListDevicesInvokedThenPrintsOneLinePerD
 				SessionStartedAt: now.Add(-25 * time.Minute), SessionExpiresAt: now.Add(125*time.Minute + 30*time.Second)},
 		}}
 	})
+}
+
+func TestGivenRunningDaemonWithDeviceWhenListDevicesInvokedThenPrintsATableWithoutTheSessionArn(t *testing.T) {
+	fakeDaemonWithPixel(t)
+	t.Setenv("COLUMNS", "80") // the buffer is no terminal; a developer's export must not move the width
 
 	out, err := execRoot(t, "device", "list")
 
 	require.NoError(t, err)
+	assert.Equal(t, `+----------------+-------------+----------------+------------------------------+
+| Device         | Serial      | Attached       | Session                      |
++----------------+-------------+----------------+------------------------------+
+| Google Pixel 9 | R3CN30ABCDE | 12 minutes ago | started 25 minutes ago       |
+|   (OS 16)      |             |                | expires in 2 hours 5 minutes |
++----------------+-------------+----------------+------------------------------+
+`, out.String())
+}
+
+func TestGivenRunningDaemonWithDeviceWhenListDevicesInvokedWithListThenPrintsOneLinePerDevice(t *testing.T) {
+	fakeDaemonWithPixel(t)
+
+	out, err := execRoot(t, "device", "list", "--list")
+
+	require.NoError(t, err)
 	assert.Equal(t, "arn:aws:devicefarm:us-west-2:1:session:a/b/0\tGoogle Pixel 9 (OS 16)\tserial R3CN30ABCDE\t"+
 		"attached 12 minutes ago\tsession started 25 minutes ago\tsession expires in 2 hours 5 minutes\n", out.String())
+}
+
+func TestGivenAStdoutThatRefusesWritesWhenListDevicesInvokedThenEveryViewReturnsTheWriteError(t *testing.T) {
+	// A list nobody received must not exit 0.
+	for _, flags := range [][]string{nil, {"--list"}, {"--json"}} {
+		t.Run(fmt.Sprint(flags), func(t *testing.T) {
+			fakeDaemonWithPixel(t)
+			root := newRootCommand()
+			root.SetOut(refusingWriter{})
+			root.SetErr(io.Discard)
+			root.SetArgs(append([]string{"device", "list"}, flags...))
+
+			require.EqualError(t, root.Execute(), "stdout is closed")
+		})
+	}
 }
 
 func TestGivenRunningDaemonWithoutDeviceWhenListDevicesInvokedThenSaysNoDevice(t *testing.T) {
@@ -324,6 +361,24 @@ func TestGivenDaemonRefusesListWhenListDevicesInvokedThenErrorsWithDaemonReason(
 	_, err := execRoot(t, "device", "list")
 
 	require.ErrorContains(t, err, "could not list the devices: unknown control op \"list\"")
+}
+
+func TestGivenNoBridgeWhenListDevicesInvokedWithJSONThenStdoutHoldsOnlyTheObject(t *testing.T) {
+	// --json must pipe: the start notice goes to the error stream.
+	paths := shortRuntimeDir(t)
+	fakeBridgeStart(t, paths, func(control.Request) control.Response {
+		return control.Response{OK: true}
+	})
+	root := newRootCommand()
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.SetArgs([]string{"device", "list", "--json"})
+
+	require.NoError(t, root.Execute())
+
+	assert.Equal(t, `{"devices":[]}`+"\n", stdout.String())
+	assert.Equal(t, "* bridge not running; starting it now\n", stderr.String())
 }
 
 func TestGivenNoBridgeWhenListDevicesInvokedThenStartsTheBridge(t *testing.T) {

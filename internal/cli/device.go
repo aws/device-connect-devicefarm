@@ -4,12 +4,14 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/failure"
+	"github.com/aws/device-connect-devicefarm/internal/report"
 )
 
 // newDeviceCommand groups the device subcommands under one parent: "device add"
@@ -55,18 +57,25 @@ func newDeviceAddCommand(state *rootState) *cobra.Command {
 	return cmd
 }
 
-// newDeviceListCommand prints one deviceListLine per attached device. Only one device can
-// be attached today; the one-line-per-device output keeps its shape when more are allowed.
+// newDeviceListCommand prints the attached devices on stdout: one table row per device, with
+// --list one deviceListLine per device, with --json one object. One device attaches at a time;
+// the per-device shapes hold when more are allowed.
 func newDeviceListCommand(state *rootState) *cobra.Command {
 	short := fmt.Sprintf("List the %s remote access devices attached to the bridge", productName)
-	return &cobra.Command{
+	listView, jsonView := false, false
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: short,
-		Long: short + ".\n\nOne line per device, tab-separated: the session ARN, the device name, the adb serial,\n" +
-			"how long it has been attached, when its session started and how long until the\n" +
-			"session expires.\n\n" + bridgeAutoStartNote,
+		Long: short + ".\n\nOne table row per device: the device name, the adb serial, how long it has been\n" +
+			"attached, when its session started and how long until the session expires. The\n" +
+			"table fits the terminal width, or COLUMNS when stdout is not a terminal. --list\n" +
+			"prints one tab-separated line per device instead, the session ARN first; --json\n" +
+			"prints one JSON object.\n\n" + bridgeAutoStartNote,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if listView && jsonView {
+				return usageError(cmd, errors.New("--list and --json cannot be used together"))
+			}
 			resp, err := sendToBridge(cmd, state, control.Request{Op: control.OpList})
 			if err != nil {
 				return err
@@ -74,20 +83,49 @@ func newDeviceListCommand(state *rootState) *cobra.Command {
 			if !resp.OK {
 				return &failure.Explained{Problem: "could not list the devices", Cause: errors.New(resp.Error)}
 			}
-			if len(resp.Devices) == 0 {
+			stdout, now := cmd.OutOrStdout(), time.Now()
+			switch {
+			case jsonView:
+				return report.WriteJSON(stdout, deviceListJSON(resp))
+			case len(resp.Devices) == 0:
 				cmd.Println("no device attached; use 'device add' to connect one")
-				if note := lastDetachNote(resp, time.Now()); note != "" {
+				if note := lastDetachNote(resp, now); note != "" {
 					cmd.Println(note)
 				}
 				return nil
+			case listView:
+				for _, attached := range resp.Devices {
+					if _, err := fmt.Fprintln(stdout, deviceListLine(attached, now)); err != nil {
+						return err
+					}
+				}
+				return nil
+			default:
+				_, err := io.WriteString(stdout, deviceTable(resp.Devices, now).Render(report.TerminalWidth(stdout)))
+				return err
 			}
-			now := time.Now()
-			for _, attached := range resp.Devices {
-				cmd.Println(deviceListLine(attached, now))
-			}
-			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&listView, "list", false, "print one tab-separated line per device, the session ARN first, instead of the table")
+	cmd.Flags().BoolVar(&jsonView, "json", false, "print one JSON object instead of the table")
+	return cmd
+}
+
+// deviceTable is the default view: the device name takes the width the value columns leave.
+// The Session cell is two paragraphs, the start age and the expiry.
+func deviceTable(devices []control.AttachedDevice, now time.Time) report.Table {
+	table := report.Table{Columns: []report.Column{
+		{Title: "Device", Flexible: true}, {Title: "Serial"}, {Title: "Attached"}, {Title: "Session"},
+	}}
+	for _, attached := range devices {
+		table.Rows = append(table.Rows, []report.Cell{
+			{attached.Label},
+			{cmp.Or(attached.Serial, "unknown")},
+			{agoOrUnknown(attached.AttachedAt, now)},
+			{"started " + agoOrUnknown(attached.SessionStartedAt, now), sessionExpiry(attached.SessionExpiresAt, now)},
+		})
+	}
+	return table
 }
 
 // deviceListLine renders one attached device, tab-separated: the session ARN, the label,
@@ -99,6 +137,26 @@ func deviceListLine(attached control.AttachedDevice, now time.Time) string {
 		agoOrUnknown(attached.AttachedAt, now),
 		agoOrUnknown(attached.SessionStartedAt, now),
 		sessionExpiry(attached.SessionExpiresAt, now))
+}
+
+// jsonDeviceList is the --json shape: the daemon's devices, always an array, and the last detach
+// when the daemon reports one. A device is control.AttachedDevice, so its json tags are the public
+// shape; the cli tests pin them.
+type jsonDeviceList struct {
+	Devices    []control.AttachedDevice `json:"devices"`
+	LastDetach jsonLastDetach           `json:"lastDetach,omitzero"`
+}
+
+type jsonLastDetach struct {
+	Reason string    `json:"reason"`
+	At     time.Time `json:"at"`
+}
+
+func deviceListJSON(resp control.Response) jsonDeviceList {
+	return jsonDeviceList{
+		Devices:    report.NonNil(resp.Devices),
+		LastDetach: jsonLastDetach{Reason: resp.LastDetachReason, At: resp.LastDetachAt},
+	}
 }
 
 // agoOrUnknown words how long ago at was ("12 minutes ago"), or "unknown" for a zero time.

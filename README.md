@@ -179,11 +179,11 @@ attach a device, then use `adb` as usual.
    adb -P 5037 reverse tcp:9000 tcp:9000
    ```
 
-6. Switch devices. `device list` prints one line per attached device: the session ARN, the device name, the
-   adb serial, the attach age, and the session start and expiry. The daemon serves one device at a time, so
-   remove the current device before you add another. `device remove` without `--session-arn` detaches the
-   attached device. With `--session-arn`, it detaches the device only when the ARN matches. The daemon keeps
-   running between the commands. The removed device's forward rules are gone.
+6. Switch devices. `device list` prints a table with one row per attached device: the device name, the adb
+   serial, the attach age, and the session start and expiry (see "Device list"). The daemon serves one device
+   at a time, so remove the current device before you add another. `device remove` without `--session-arn`
+   detaches the attached device. With `--session-arn`, it detaches the device only when the ARN matches. The
+   daemon keeps running between the commands. The removed device's forward rules are gone.
 
    ```sh
    devicefarm-connect device list
@@ -210,6 +210,30 @@ attach a device, then use `adb` as usual.
   session endpoint removes them all.
 - Reverse rules are stored in the remote access session, so `bridge stop` leaves them in place. Each time you
   attach the device with reverse on, the daemon clears them. Run your `adb reverse` commands again.
+
+### Device list
+
+`device list` prints one table row per attached device on stdout; a long device name wraps inside
+its row. The table follows the terminal width, or `COLUMNS` when stdout is not a terminal, between
+60 and 120 columns. At 80 columns:
+
+```
++----------------+-------------+----------------+------------------------------+
+| Device         | Serial      | Attached       | Session                      |
++----------------+-------------+----------------+------------------------------+
+| Google Pixel 9 | R3CN30ABCDE | 12 minutes ago | started 25 minutes ago       |
+|   (OS 16)      |             |                | expires in 2 hours 5 minutes |
++----------------+-------------+----------------+------------------------------+
+```
+
+`device list --list` prints one tab-separated line per device instead: the session ARN, the name,
+`serial <serial>`, `attached <age> ago`, `session started <age> ago`, `session expires in <span>`.
+`device list --json` prints one JSON object. `devices` holds one object per device: `sessionArn`,
+`label`, `serial`, `attachedAt`, `sessionStartedAt` and `sessionExpiresAt`. The times are RFC 3339;
+a time the daemon does not know is absent. With no device, `devices` is `[]`, and `lastDetach`
+(`reason`, `at`) appears when the daemon detached the last device itself. Without `--json`, no
+device prints `no device attached; use 'device add' to connect one` on stderr, then `the last
+device detached <age> ago: <reason>` when the daemon detached it itself.
 
 ## Doctor
 
