@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/aws/device-connect-devicefarm/internal/adbwire"
+	"github.com/aws/device-connect-devicefarm/internal/forward"
 	"github.com/aws/device-connect-devicefarm/internal/testsupport"
 )
 
@@ -431,8 +432,8 @@ func TestGivenADeviceStreamWhoseReattachIsRefusedWhenTheLookupSaysEndedThenTheDe
 	lookup := &fakeLookup{verdict: SessionVerdict{Detach: true, Reason: detachedReason}}
 	device := attachLookupDevice(t, mock.URL, lookup)
 	conn, _, err := openDeviceStream(context.Background(), newTestDialer(testWait), device, testDeviceARN,
-		attachedFeatures(t, device), adbwire.AdbSpec{Kind: "tcp", Value: "8080"}, fastPolicy(), testWait,
-		newActivityTracker(nil), noopLogger())
+		attachedFeatures(t, device), adbwire.AdbSpec{Kind: "tcp", Value: "8080"}, forward.ImmediateTurn().Ready,
+		fastPolicy(), testWait, newActivityTracker(nil), noopLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { conn.Close() })
 
@@ -449,8 +450,8 @@ func TestGivenADeviceStreamWhoseWebsocketDiesWhenTheResumeIsRefusedThenTheLookup
 	lookup := &fakeLookup{verdict: SessionVerdict{Detach: true, Reason: detachedReason}}
 	device := attachLookupDevice(t, mock.URL, lookup)
 	conn, _, err := openDeviceStream(context.Background(), newTestDialer(testWait), device, testDeviceARN,
-		attachedFeatures(t, device), adbwire.AdbSpec{Kind: "tcp", Value: "8080"}, fastPolicy(), testWait,
-		newActivityTracker(nil), noopLogger())
+		attachedFeatures(t, device), adbwire.AdbSpec{Kind: "tcp", Value: "8080"}, forward.ImmediateTurn().Ready,
+		fastPolicy(), testWait, newActivityTracker(nil), noopLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { conn.Close() })
 	sessions := mock.Sessions()

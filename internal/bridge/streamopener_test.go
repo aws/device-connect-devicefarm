@@ -8,7 +8,9 @@ import (
 	"io"
 	"net"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/aws/device-connect-devicefarm/internal/adbwire"
+	"github.com/aws/device-connect-devicefarm/internal/forward"
 	"github.com/aws/device-connect-devicefarm/internal/testsupport"
 )
 
@@ -25,11 +28,18 @@ import (
 // every websocket the mock counts is a stream's own.
 func openerAt(t *testing.T, endpoint string, opts ...ActiveDeviceOption) (*ActiveDevice, *deviceStreamOpener) {
 	t.Helper()
-	device := newForwardingDevice(t, opts...)
-	require.True(t, device.Set(DeviceInfo{ARN: testDeviceARN, Endpoint: endpoint, Label: "test-device"}))
+	device := forwardingDeviceAt(t, endpoint, opts...)
 	return device, &deviceStreamOpener{device: device, cfg: device.featureConfig,
 		arn: testDeviceARN, ctx: attachedFeatures(t, device).ctx,
 		budget: &streamBudget{limit: testMaxDeviceStreams}}
+}
+
+// forwardingDeviceAt binds one forwarding device at endpoint.
+func forwardingDeviceAt(t *testing.T, endpoint string, opts ...ActiveDeviceOption) *ActiveDevice {
+	t.Helper()
+	device := newForwardingDevice(t, opts...)
+	require.True(t, device.Set(DeviceInfo{ARN: testDeviceARN, Endpoint: endpoint, Label: "test-device"}))
+	return device
 }
 
 // runStream hands the opener one accepted connection on its own goroutine, as the accept
@@ -52,7 +62,7 @@ func runStream(t *testing.T, opener *deviceStreamOpener) (appConn net.Conn, ende
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		opener.OpenStream(accepted, adbwire.AdbSpec{Kind: "tcp", Value: "8080"})
+		opener.OpenStream(accepted, adbwire.AdbSpec{Kind: "tcp", Value: "8080"}, forward.ImmediateTurn())
 	}()
 	return appConn, done
 }
@@ -153,7 +163,7 @@ func TestGivenAnAppThatWillNotTakeTheLeftoverWhenTheStreamOpensThenNothingIsPipe
 	appConn, accepted := net.Pipe()
 	t.Cleanup(func() { appConn.Close() })
 
-	opener.OpenStream(refusingConn{accepted}, adbwire.AdbSpec{Kind: "tcp", Value: "8080"})
+	opener.OpenStream(refusingConn{accepted}, adbwire.AdbSpec{Kind: "tcp", Value: "8080"}, forward.ImmediateTurn())
 
 	assert.Equal(t, []string{"0012host:transport-any", "0008tcp:8080"}, mock.Frames(),
 		"a stream that could not deliver its first bytes must send nothing more")
@@ -268,4 +278,153 @@ func TestGivenFailedOpensWhenEachEndsThenItsSlotReturns(t *testing.T) {
 
 	assert.Equal(t, testMaxDeviceStreams+1, mock.ConnectionsAccepted(),
 		"a failed open must free its slot")
+}
+
+// socketRemote is the device socket the order tests forward to.
+const socketRemote = "localabstract:scrcpy"
+
+// heldReplyMock answers the transport select with OKAY. It answers every device service with
+// OKAY except the first: it holds that reply until release is called, then sends firstReply.
+// It records each device service as it arrives and the held reply as it leaves, in one order.
+type heldReplyMock struct {
+	*testsupport.SessionMockWSS
+	release func()
+
+	eventsMutex sync.Mutex
+	events      []string
+}
+
+func newHeldReplyMock(t *testing.T, firstReply string) *heldReplyMock {
+	t.Helper()
+	released := make(chan struct{})
+	var releaseOnce sync.Once
+	mock := &heldReplyMock{release: func() { releaseOnce.Do(func() { close(released) }) }}
+	mock.SessionMockWSS = testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{
+		OnMessage: func(_ *testsupport.MockSession, data []byte) []byte {
+			switch string(data) {
+			case string(deviceTransportRequest):
+				return []byte("OKAY")
+			case string(framed(socketRemote)):
+				if mock.record("service") > 1 {
+					return []byte("OKAY")
+				}
+				<-released
+				mock.record("reply")
+				return []byte(firstReply)
+			}
+			return nil
+		},
+	})
+	// Registered after the mock's own cleanup, so it runs first: a held reply must not keep
+	// the server from closing.
+	t.Cleanup(mock.release)
+	return mock
+}
+
+// record appends event and returns how many events there are.
+func (mock *heldReplyMock) record(event string) int {
+	mock.eventsMutex.Lock()
+	defer mock.eventsMutex.Unlock()
+	mock.events = append(mock.events, event)
+	return len(mock.events)
+}
+
+// Events returns the recorded device services and the held reply, in order.
+func (mock *heldReplyMock) Events() []string {
+	mock.eventsMutex.Lock()
+	defer mock.eventsMutex.Unlock()
+	return slices.Clone(mock.events)
+}
+
+// dialSocketRule installs a rule to socketRemote on device and returns its local address.
+func dialSocketRule(t *testing.T, device *ActiveDevice) string {
+	t.Helper()
+	port := installRule(t, attachedFeatures(t, device), socketRemote)
+	return net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+}
+
+// dialHeldFirst dials the rule and waits until the mock holds the reply to that connection's
+// device service. It returns the application socket.
+func dialHeldFirst(t *testing.T, mock *heldReplyMock, address string) net.Conn {
+	t.Helper()
+	first := dialClient(t, address)
+	waitFor(t, func() bool { return len(mock.Events()) == 1 }, "the first device service never arrived")
+	return first
+}
+
+// proveSecondWaitsForTheFirstReply dials the rule again, after dialHeldFirst. It waits until
+// the mock's session count is sessions: the second connection has then minted its session.
+// It holds the reply long enough for an unordered second open to pass the first, releases the
+// reply, and checks the order the mock saw.
+func proveSecondWaitsForTheFirstReply(t *testing.T, mock *heldReplyMock, address string, sessions int) {
+	t.Helper()
+	dialClient(t, address)
+	waitFor(t, func() bool { return mock.SessionsOpened() == sessions },
+		"the second connection never got a selected session")
+
+	assert.Never(t, func() bool { return len(mock.Events()) > 1 }, notifierSettle, notifierPoll,
+		"the second device service must wait for the first one's status word")
+	mock.release()
+	waitFor(t, func() bool { return len(mock.Events()) == 3 }, "the second device service never followed")
+	assert.Equal(t, []string{"service", "reply", "service"}, mock.Events())
+}
+
+func TestGivenTwoForwardedConnectionsWhenTheFirstOpensSlowerThenTheDeviceServicesLeaveInAcceptOrder(t *testing.T) {
+	mock := newHeldReplyMock(t, "OKAY")
+	address := dialSocketRule(t, forwardingDeviceAt(t, mock.URL))
+	dialHeldFirst(t, mock, address)
+
+	proveSecondWaitsForTheFirstReply(t, mock, address, 2)
+}
+
+func TestGivenTheFirstConnectionOnTheParkedSocketWhenTheSecondOpensThenItDialsAndWaitsForTheFirstStatusWord(t *testing.T) {
+	mock := newHeldReplyMock(t, statusOkay)
+	device := newWarmDevice(t, mock.URL, warmPolicy(warmInterval))
+	keeper := attachedFeatures(t, device).warmSockets()
+	parked := awaitPark(t, keeper)
+	address := dialSocketRule(t, device)
+	dialHeldFirst(t, mock, address)
+	waitFor(t, func() bool {
+		refill := parkedSocket(keeper)
+		return refill != nil && refill != parked
+	}, "the slot never refilled behind the first connection")
+	refill := parkedSocket(keeper)
+
+	// Three sessions: the park, the refill behind the first's take, the second's own dial.
+	proveSecondWaitsForTheFirstReply(t, mock, address, 3)
+
+	assert.Equal(t, canonicalSelect+string(framed(socketRemote)),
+		string(sessionNamed(mock.SessionMockWSS, parked.sessionUUID).Inbound()),
+		"the first connection rides the parked socket")
+	assert.Same(t, refill, parkedSocket(keeper),
+		"a connection that must wait leaves the parked socket to one that sends at once")
+}
+
+func TestGivenAFailedFirstOpenWhenTheSecondWaitsThenItProceeds(t *testing.T) {
+	mock := newHeldReplyMock(t, "FAIL0013no such device port")
+	address := dialSocketRule(t, forwardingDeviceAt(t, mock.URL))
+	first := dialHeldFirst(t, mock, address)
+
+	proveSecondWaitsForTheFirstReply(t, mock, address, 2)
+
+	assert.Empty(t, drainClosed(t, first), "the refused first connection must get zero bytes")
+}
+
+func TestGivenABudgetRefusalWhenTheNextConnectionWaitsThenItIsReleased(t *testing.T) {
+	mock := newPrologueMock(t, "OKAY", "OKAY")
+	device := forwardingDeviceAt(t, mock.URL)
+	address := dialSocketRule(t, device)
+	budget := attachedFeatures(t, device).budget
+	for range testMaxDeviceStreams {
+		require.True(t, budget.admit())
+	}
+	assert.Empty(t, drainClosed(t, dialClient(t, address)), "a connection past the cap must get zero bytes")
+	for range testMaxDeviceStreams {
+		budget.release()
+	}
+
+	dialClient(t, address)
+
+	waitFor(t, func() bool { return len(mock.Frames()) == 2 }, "the refused connection's turn never released the next one")
+	assert.Equal(t, []string{"0012host:transport-any", string(framed(socketRemote))}, mock.Frames())
 }
