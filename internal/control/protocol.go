@@ -27,8 +27,8 @@ const (
 	// OpStatus reports the listen port, whether reverse is on and the connected devices;
 	// with none, why and when the daemon last detached one on its own.
 	OpStatus Op = "status"
-	// OpList reports the connected devices alone; with none, the last detach as
-	// OpStatus does.
+	// OpList reports the connected devices alone, each as an AttachedDevice; with none,
+	// the last detach as OpStatus does.
 	OpList Op = "list"
 	// OpShutdown stops the daemon after replying.
 	OpShutdown Op = "shutdown"
@@ -63,8 +63,14 @@ type Response struct {
 	LastDetachAt     time.Time        `json:"lastDetachAt,omitzero"`
 }
 
-// AttachedDevice is one connected device in an OpStatus or OpList reply.
+// AttachedDevice is one connected device in an OpStatus or OpList reply: its session ARN,
+// label and adb serial, when the daemon attached it, and when its session started and
+// expires. The session times are zero when the service reported no start time.
 type AttachedDevice struct {
-	SessionARN string `json:"sessionArn"`
-	Label      string `json:"label"`
+	SessionARN       string    `json:"sessionArn"`
+	Label            string    `json:"label"`
+	Serial           string    `json:"serial"`
+	AttachedAt       time.Time `json:"attachedAt,omitzero"`
+	SessionStartedAt time.Time `json:"sessionStartedAt,omitzero"`
+	SessionExpiresAt time.Time `json:"sessionExpiresAt,omitzero"`
 }

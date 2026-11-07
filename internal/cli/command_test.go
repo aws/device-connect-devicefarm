@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -284,17 +285,23 @@ func TestGivenDaemonClosesWithoutReplyWhenRemoveDeviceInvokedThenSurfacesTranspo
 }
 
 func TestGivenRunningDaemonWithDeviceWhenListDevicesInvokedThenPrintsOneLinePerDevice(t *testing.T) {
+	// Ago offsets only grow; the expiry offset sits mid-minute. A few seconds of test time keep
+	// every floored minute.
+	now := time.Now()
 	fakeDaemon(t, func(req control.Request) control.Response {
 		assert.Equal(t, control.OpList, req.Op)
 		return control.Response{OK: true, Devices: []control.AttachedDevice{
-			{SessionARN: "arn:aws:devicefarm:us-west-2:1:session:a/b/0", Label: "Google Pixel 9 (OS 16)"},
+			{SessionARN: "arn:aws:devicefarm:us-west-2:1:session:a/b/0", Label: "Google Pixel 9 (OS 16)",
+				Serial: "R3CN30ABCDE", AttachedAt: now.Add(-12 * time.Minute),
+				SessionStartedAt: now.Add(-25 * time.Minute), SessionExpiresAt: now.Add(125*time.Minute + 30*time.Second)},
 		}}
 	})
 
 	out, err := execRoot(t, "device", "list")
 
 	require.NoError(t, err)
-	assert.Equal(t, "arn:aws:devicefarm:us-west-2:1:session:a/b/0\tGoogle Pixel 9 (OS 16)\n", out.String())
+	assert.Equal(t, "arn:aws:devicefarm:us-west-2:1:session:a/b/0\tGoogle Pixel 9 (OS 16)\tserial R3CN30ABCDE\t"+
+		"attached 12 minutes ago\tsession started 25 minutes ago\tsession expires in 2 hours 5 minutes\n", out.String())
 }
 
 func TestGivenRunningDaemonWithoutDeviceWhenListDevicesInvokedThenSaysNoDevice(t *testing.T) {
