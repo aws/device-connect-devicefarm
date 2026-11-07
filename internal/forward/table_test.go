@@ -104,7 +104,7 @@ func (table *ForwardRulesTable) ruleCount() int {
 	return len(table.rules)
 }
 
-func TestGivenRuleEndTextsWhenCheckedThenOnlyTcpPortsPass(t *testing.T) {
+func TestGivenLocalSpecTextsWhenCheckedThenOnlyTcpPortsPass(t *testing.T) {
 	tests := []struct {
 		name       string
 		text       string
@@ -114,7 +114,7 @@ func TestGivenRuleEndTextsWhenCheckedThenOnlyTcpPortsPass(t *testing.T) {
 	}{
 		{name: "tcp port", text: "tcp:1234", spec: adbwire.AdbSpec{Kind: "tcp", Value: "1234"}, port: 1234},
 		{name: "tcp zero resolves at bind time", text: "tcp:0", spec: adbwire.AdbSpec{Kind: "tcp", Value: "0"}},
-		{name: "non-tcp kind", text: "localabstract:sock", failReason: "unknown socket specification:localabstract:sock"},
+		{name: "a socket kind the device end allows", text: "localabstract:sock", failReason: "unknown socket specification:localabstract:sock"},
 		{name: "no kind", text: "garbage", failReason: "unknown socket specification:garbage"},
 		{name: "port out of range", text: "tcp:70000", failReason: "bad port number '70000'"},
 		{name: "port not numeric", text: "tcp:abc", failReason: "listening on specified hostname currently unsupported"},
@@ -122,10 +122,44 @@ func TestGivenRuleEndTextsWhenCheckedThenOnlyTcpPortsPass(t *testing.T) {
 
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			spec, port, failReason := parseTCPSpec(testCase.text)
+			spec, port, failReason := parseLocalSpec(testCase.text)
 
 			assert.Equal(t, testCase.spec, spec)
 			assert.Equal(t, testCase.port, port)
+			assert.Equal(t, testCase.failReason, failReason)
+		})
+	}
+}
+
+func TestGivenRemoteSpecTextsWhenCheckedThenTcpAndTheDeviceSocketKindsPass(t *testing.T) {
+	tests := []struct {
+		name       string
+		text       string
+		spec       adbwire.AdbSpec
+		failReason string
+	}{
+		{name: "tcp port", text: "tcp:1234", spec: adbwire.AdbSpec{Kind: "tcp", Value: "1234"}},
+		{name: "abstract socket", text: "localabstract:chrome_devtools_remote", spec: adbwire.AdbSpec{Kind: "localabstract", Value: "chrome_devtools_remote"}},
+		{name: "reserved socket", text: "localreserved:adbd", spec: adbwire.AdbSpec{Kind: "localreserved", Value: "adbd"}},
+		{name: "filesystem socket", text: "localfilesystem:/data/local/tmp/app.sock", spec: adbwire.AdbSpec{Kind: "localfilesystem", Value: "/data/local/tmp/app.sock"}},
+		{name: "jdwp pid", text: "jdwp:1234", spec: adbwire.AdbSpec{Kind: "jdwp", Value: "1234"}},
+		{name: "empty socket name is adbd's to refuse", text: "localabstract:", spec: adbwire.AdbSpec{Kind: "localabstract"}},
+		{name: "character device", text: "dev:/dev/null", failReason: "unknown socket specification:dev:/dev/null"},
+		{name: "raw character device", text: "dev-raw:/dev/null", failReason: "unknown socket specification:dev-raw:/dev/null"},
+		{name: "vm socket", text: "vsock:1:2", failReason: "unknown socket specification:vsock:1:2"},
+		{name: "accept fd", text: "acceptfd:3", failReason: "unknown socket specification:acceptfd:3"},
+		{name: "reserved socket under its device alias", text: "local:x", failReason: "unknown socket specification:local:x"},
+		{name: "a device service", text: "shell:ls", failReason: "unknown socket specification:shell:ls"},
+		{name: "no kind", text: "garbage", failReason: "unknown socket specification:garbage"},
+		{name: "port out of range", text: "tcp:70000", failReason: "bad port number '70000'"},
+		{name: "port not numeric", text: "tcp:abc", failReason: "listening on specified hostname currently unsupported"},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			spec, failReason := parseRemoteSpec(testCase.text)
+
+			assert.Equal(t, testCase.spec, spec)
 			assert.Equal(t, testCase.failReason, failReason)
 		})
 	}
@@ -187,6 +221,29 @@ func TestGivenTCPZeroWhenInstalledThenRuleIsReKeyedOnTheResolvedPort(t *testing.
 	assert.Equal(t, "tcp:9090", target, "the first rule still answers on its resolved port")
 }
 
+func TestGivenADeviceSocketRemoteWhenInstalledThenTheOpenerGetsTheSpecVerbatim(t *testing.T) {
+	table := newTestTable(t)
+	tests := []struct {
+		kind   string
+		remote string
+	}{
+		{"localabstract", "localabstract:chrome_devtools_remote"},
+		{"localreserved", "localreserved:adbd"},
+		{"localfilesystem", "localfilesystem:/data/local/tmp/app.sock"},
+		{"jdwp", "jdwp:1234"},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.kind, func(t *testing.T) {
+			port := installResolved(t, table, testCase.remote)
+
+			target, _, _ := dialRule(t, port)
+
+			assert.Equal(t, testCase.remote, target, "the opener must get the spec as the client spelled it")
+		})
+	}
+}
+
 func TestGivenPortAlreadyBoundWhenInstalledThenCannotBindCarriesTheCause(t *testing.T) {
 	table := newTestTable(t)
 	squatter, err := net.Listen("tcp", "127.0.0.1:0")
@@ -211,7 +268,7 @@ func TestGivenUnsupportedSpecsWhenInstalledThenFailsClosedWithAdbsSpecTexts(t *t
 		{"non-tcp local", "localabstract:sock", "tcp:9090", AdbInstallResult{Status: AdbInstallCannotBind, FailReason: "cannot bind listener: unknown socket specification:localabstract:sock"}},
 		{"malformed local", "garbage", "tcp:9090", AdbInstallResult{Status: AdbInstallCannotBind, FailReason: "cannot bind listener: unknown socket specification:garbage"}},
 		{"local port out of range", "tcp:70000", "tcp:9090", AdbInstallResult{Status: AdbInstallCannotBind, FailReason: "cannot bind listener: bad port number '70000'"}},
-		{"non-tcp remote", "tcp:0", "localabstract:sock", AdbInstallResult{Status: AdbInstallUnsupportedRemote, FailReason: "unknown socket specification:localabstract:sock"}},
+		{"remote kind outside the allowlist", "tcp:0", "dev:/dev/null", AdbInstallResult{Status: AdbInstallUnsupportedRemote, FailReason: "unknown socket specification:dev:/dev/null"}},
 		{"malformed remote is not wrapped", "tcp:0", "garbage", AdbInstallResult{Status: AdbInstallUnsupportedRemote, FailReason: "unknown socket specification:garbage"}},
 		{"remote port out of range", "tcp:0", "tcp:70000", AdbInstallResult{Status: AdbInstallUnsupportedRemote, FailReason: "bad port number '70000'"}},
 	}
@@ -364,7 +421,7 @@ func TestGivenAClosedTableWhenInstalledWithAMalformedSpecThenNoDevicesOutranksTh
 		remote string
 	}{
 		{"malformed local", "garbage", "tcp:9090"},
-		{"non-tcp remote", tcpSpec(port), "localabstract:sock"},
+		{"remote kind outside the allowlist", tcpSpec(port), "vsock:1:2"},
 	}
 
 	for _, testCase := range tests {
