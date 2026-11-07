@@ -311,6 +311,27 @@ func TestGivenAnOpeningWhenItsServiceIsUnwrappedThenOnlyALoneParsableHostPrefixI
 	}
 }
 
+func TestGivenAnOpeningWhenItAsksForThePreSelectedSocketThenOnlyANonReverseServiceBehindASelectRidesIt(t *testing.T) {
+	tests := []struct {
+		name    string
+		opening opening
+		want    bool
+	}{
+		{name: "a device service behind a select", want: true, opening: opening{service: "shell:ls", selected: true}},
+		// A selected session cannot answer a host request.
+		{name: "a lone host request", opening: opening{service: "host:features"}},
+		{name: "bytes that form no request", opening: opening{}},
+		// The bounded first read must not cut an install that waits on the server's tunnel setup.
+		{name: "a reverse install behind a select", opening: opening{service: "reverse:forward:tcp:4;tcp:5", selected: true}},
+		{name: "a malformed reverse request behind a select", opening: opening{service: "reverse:", selected: true}},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			assert.Equal(t, testCase.want, testCase.opening.ridesPreSelected())
+		})
+	}
+}
+
 func TestGivenASelectNamingAnotherDeviceWhenAnsweredThenAdbsRefusalEndsTheConnection(t *testing.T) {
 	// The client asked for a device this attachment does not hold. It gets adb's own text, so
 	// it prints a reason, and the caller is left with nothing to serve.

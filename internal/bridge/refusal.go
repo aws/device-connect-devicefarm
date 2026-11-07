@@ -67,9 +67,8 @@ func (refusal *sessionRefusal) Error() string {
 
 func (*sessionRefusal) Is(target error) bool { return target == ErrSessionRefused }
 
-// dialFailure marks a failed dial of the adb route (adbSocket), so openSession tells it from a
-// failure of the exchange wherever it surfaces, a parked socket's late redial included. Its text
-// is the dial's own.
+// dialFailure marks a failed dial of the adb route: openSession tells it from a failed exchange,
+// and the warm socket keeper from a refused pre-select. Its text is the dial's own.
 type dialFailure struct {
 	cause error
 }

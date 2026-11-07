@@ -47,6 +47,11 @@ const (
 	// fallback. Kept distinct because only this one can wedge, so only this one is
 	// guarded by enforceWSDeadline.
 	phaseFreshHandshake
+	// phaseSelected means the park minted the session and switched it to the device, and no
+	// reply has come back yet. A failed read here ends the connection with no resume: at a
+	// full server pool the close may be an eviction, and a reattach dial there can evict a
+	// live connection.
+	phaseSelected
 	// phaseSteady means inbound messages are raw ADB bytes for the local adb client.
 	phaseSteady
 	// phaseRefreshing means a successor is being established, so an end of the current
@@ -90,6 +95,9 @@ type adbConn struct {
 	// refusals is asked what became of the session after a refused reattach ends the
 	// connection. Nil asks nothing. Set at construction, like terminalSessionGone.
 	refusals *refusalGate
+	// preSelected means the park already minted the first websocket's session and switched it
+	// to the device, so the opening skips the select. Set at construction.
+	preSelected bool
 
 	// sockets is the teardown set and the closed latch, with its own mutex: teardown
 	// must not queue behind a refresh's dial-and-ack.
@@ -147,9 +155,24 @@ func withRefusalGate(gate *refusalGate) adbConnOption {
 	return func(connection *adbConn) { connection.refusals = gate }
 }
 
-// newAdbConn wraps an already-dialed websocket as a session's first. The control frame
-// has not been read yet: the first Receive consumes it. route must be the one first was
-// dialed on.
+// withSelectedSession starts the connection on a pre-selected socket, sessionUUID latched so
+// the refresher can reattach once the first reply proves the session. An empty sessionUUID
+// changes nothing: the connection reads its own control frame.
+func withSelectedSession(sessionUUID string) adbConnOption {
+	return func(connection *adbConn) {
+		if sessionUUID == "" {
+			return
+		}
+		connection.preSelected = true
+		connection.uuid = sessionUUID
+		connection.phase = phaseSelected
+		connection.uuidReadyOnce.Do(func() { close(connection.uuidReady) })
+	}
+}
+
+// newAdbConn wraps an already-dialed websocket as a session's first. Without
+// withSelectedSession the control frame is unread: the first Receive consumes it.
+// route must be the one first was dialed on.
 func newAdbConn(dialer *WSDialer, device *ActiveDevice, arn string, route Route, first WSConn, policy WSRefreshPolicy, activity *activityTracker, logger *slog.Logger, opts ...adbConnOption) *adbConn {
 	if logger == nil {
 		logger = slog.Default()
@@ -255,6 +278,13 @@ func (c *adbConn) Receive() ([]byte, error) {
 				return nil, handshakeErr
 			}
 			continue
+		}
+		if phase == phaseSelected {
+			c.seam.Lock()
+			if c.phase == phaseSelected {
+				c.phase = phaseSteady
+			}
+			c.seam.Unlock()
 		}
 
 		c.activity.mark()

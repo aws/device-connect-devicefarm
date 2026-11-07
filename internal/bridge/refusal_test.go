@@ -239,32 +239,36 @@ func TestGivenTwoRefusalsAtOnceWhenTheLookupDetachesThenTheLookupsRunOneAtATimeA
 }
 
 func TestGivenASocketParkedDuringTheLookupWhenTheSessionIsRunningElsewhereThenTheRedialDialsTheRenewedEndpoint(t *testing.T) {
-	refusing := refusingMock(t, -1)
+	// The old endpoint refuses the keeper's first pre-select and the client's dial, then accepts:
+	// the keeper's next retry parks a socket there while the lookup runs. The retry comes long
+	// after the client's dial.
+	const rotation = time.Second
+	refusing := refusingMock(t, 2)
 	accepting := switchReplyMock(t, "OKAY")
 	lookup := heldLookup(SessionVerdict{Endpoint: accepting.URL, Label: renewedLabel})
-	// A keeper that parks: the refused dial's take asks for a refill, which parks a socket at the
-	// old endpoint while the lookup runs.
-	warmPolicy := testPolicy()
-	warmPolicy.Interval = time.Hour
-	device := NewActiveDevice(testFeatures(newTestDialer(testWait), warmPolicy, warmParams(), noopLogger()),
+	device := NewActiveDevice(testFeatures(newTestDialer(testWait), warmPolicy(rotation), warmParams(), noopLogger()),
 		WithRefusalHandler(lookup.handler()))
 	t.Cleanup(func() { device.Clear() })
 	require.True(t, device.Set(DeviceInfo{ARN: testDeviceARN, Endpoint: refusing.URL, Label: "Test Device - OS 1"}))
 	keeper := attachedFeatures(t, device).warm
 	proxyAddress, _ := runProxy(t, device, testPolicy())
-	waitFor(t, func() bool { return parkedSocket(keeper) != nil }, "the keeper never parked a socket")
+	waitFor(t, func() bool { return refusing.NewSessionsRefused() == 1 }, "the keeper's pre-select was never refused")
 	client := dialClient(t, proxyAddress)
 
-	request := []byte("000ehost:get-state")
-	writeAll(t, client, request)
-	<-lookup.entered
-	// The take emptied the slot; a socket parked now is the refill, dialed at the old endpoint.
-	waitFor(t, func() bool { return parkedSocket(keeper) != nil }, "the refill never parked a second socket")
+	selectAnyTransport(t, client)
+	writeAll(t, client, []byte(takenService))
+	select {
+	case <-lookup.entered:
+	case <-time.After(testWait):
+		t.Fatal("the client's refused dial never asked about the session")
+	}
+	waitFor(t, func() bool { return parkedSocket(keeper) != nil }, "the retry never parked a socket at the old endpoint")
 	close(lookup.release)
 
-	assert.Equal(t, string(request), string(readN(t, client, len(request))), "the redial reached the renewed endpoint")
-	assert.Equal(t, 1, accepting.SessionsOpened(), "a fresh dial at the renewed endpoint")
-	assert.Equal(t, 1, refusing.NewSessionsRefused(), "the socket parked at the old endpoint never spoke")
+	assert.Equal(t, takenService, string(readN(t, client, len(takenService))), "the redial reached the renewed endpoint")
+	assert.Equal(t, canonicalSelect+takenService, string(soleSessionInbound(accepting)),
+		"a fresh dial at the renewed endpoint carries the select and the service")
+	assert.Equal(t, 2, refusing.NewSessionsRefused(), "the socket parked at the old endpoint carried nothing more")
 }
 
 // holdingListener accepts and holds every connection without a byte, and reports each accept: a
