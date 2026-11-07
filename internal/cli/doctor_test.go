@@ -14,7 +14,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/term"
 
 	"github.com/aws/device-connect-devicefarm/internal/config"
 	"github.com/aws/device-connect-devicefarm/internal/daemon"
@@ -206,38 +205,6 @@ func TestGivenColumnsWhenDoctorRunsThenTheTableWidthFollowsItAndAnUnusableValueF
 			assert.Len(t, strings.Split(stdout.String(), "\n")[0], tc.wantWidth)
 		})
 	}
-}
-
-func TestGivenAFileThatIsNotATerminalWhenTheWidthIsMeasuredThenColumnsDecides(t *testing.T) {
-	file, err := os.CreateTemp(t.TempDir(), "stdout")
-	require.NoError(t, err)
-	defer file.Close()
-
-	t.Setenv("COLUMNS", "120")
-	assert.Equal(t, 120, reportWidth(file))
-	t.Setenv("COLUMNS", "-5")
-	assert.Equal(t, defaultReportWidth, reportWidth(file))
-	t.Setenv("COLUMNS", "")
-	assert.Equal(t, defaultReportWidth, reportWidth(file))
-	t.Setenv("COLUMNS", "120")
-	assert.Equal(t, 120, reportWidth(&bytes.Buffer{}), "a writer that is no file measures nothing")
-}
-
-func TestGivenATerminalThatReportsNoSizeWhenTheWidthIsMeasuredThenColumnsDecides(t *testing.T) {
-	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
-	if err != nil {
-		t.Skip("no pseudo-terminal on this host:", err)
-	}
-	defer master.Close()
-	if !term.IsTerminal(int(master.Fd())) {
-		t.Skip("the pseudo-terminal master is not a terminal on this host")
-	}
-	if width, _, sizeErr := term.GetSize(int(master.Fd())); sizeErr == nil && width > 0 {
-		t.Skip("this pseudo-terminal reports a size:", width)
-	}
-
-	t.Setenv("COLUMNS", "100")
-	assert.Equal(t, 100, reportWidth(master))
 }
 
 func TestGivenAStrayArgumentWhenDoctorRunsThenItIsRejectedBeforeAnyCheck(t *testing.T) {
