@@ -214,8 +214,8 @@ func TestGivenListenerFlagsAfterBridgeStartPathWhenInvokedThenParsed(t *testing.
 		return control.Response{OK: true, DeviceLabel: "Pixel", Port: 5599}
 	})
 
-	_, err := execRoot(t, "bridge", "start", "--port", "5599", "--log", t.TempDir()+"/d.log",
-		"--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
+	_, err := execRoot(t, "bridge", "start", "--port", "5599", "--listen-addr", "127.0.0.1",
+		"--log", t.TempDir()+"/d.log", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
 
 	require.NoError(t, err, "bridge start must parse its flags and attach through the control channel")
 	assert.True(t, addSeen, "bridge start must have parsed its flags and forwarded the add to the daemon")
@@ -233,6 +233,18 @@ func TestGivenListenerFlagOnScopedCommandWhenInvokedThenRejected(t *testing.T) {
 			}
 			_, err := runRoot(t, "bridge", "status", flag, value)
 			require.Error(t, err, "%s must not be accepted on 'bridge status'", flag)
+		})
+	}
+}
+
+func TestGivenDaemonStandingCommandHelpWhenPrintedThenOmitsListenAddr(t *testing.T) {
+	for _, path := range [][]string{{"bridge", "start"}, {"daemon"}} {
+		t.Run(strings.Join(path, " "), func(t *testing.T) {
+			out, err := runRoot(t, append(path, "--help")...)
+
+			require.NoError(t, err)
+			assert.Regexp(t, `(?m)^\s+--port `, out.String())
+			assert.NotContains(t, out.String(), "listen-addr")
 		})
 	}
 }
@@ -263,17 +275,19 @@ func TestGivenAllowAdbReverseWhenParsedThenOnlyDaemonStandingCommandsAcceptIt(t 
 	}
 }
 
-func TestGivenAnOptedInConfigWhenItsDaemonArgsReachTheDaemonCommandThenReverseStaysOn(t *testing.T) {
+func TestGivenAParentConfigWhenItsDaemonArgsReachTheDaemonCommandThenReverseAndListenAddrSurvive(t *testing.T) {
 	// The re-exec round trip: the parent's argv must turn reverse on in the child, or a customer
-	// who opted in gets the reverse-off FAIL.
+	// who opted in gets the reverse-off FAIL. The hidden --listen-addr must reach the child too.
 	parent := config.Default()
 	parent.ReverseEnabled = true
+	parent.ListenAddr = "::1"
 	state := &rootState{cfg: config.Default()}
 	daemonCommand := findChild(t, newRootCommandWithState(state), "daemon")
 
 	require.NoError(t, daemonCommand.ParseFlags(parent.AsDaemonArgs()))
 
 	assert.True(t, state.cfg.ReverseEnabled, "the child must inherit the opt-in from the parent's argv")
+	assert.Equal(t, "::1", state.cfg.ListenAddr)
 }
 
 func TestGivenDebugFlagWhenStatusInvokedThenAcceptedAndRuns(t *testing.T) {
