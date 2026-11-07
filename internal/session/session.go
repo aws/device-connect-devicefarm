@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // Package session resolves an AWS Device Farm remote access session ARN into the
 // websocket endpoint and human-readable device label the proxy needs. It is the
 // only package that talks to AWS. It runs inside the detached daemon, which

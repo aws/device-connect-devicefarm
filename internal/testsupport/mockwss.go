@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // Package testsupport provides in-process test doubles shared across the
 // devicefarm-connect unit and integration tests. It is importable from any package's
 // _test.go without dragging production dependencies along. It imports "testing"

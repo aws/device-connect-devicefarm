@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // Package control is the daemon's control channel: a per-user Unix-domain socket
 // over which the foreground CLI mutates a running detached daemon (add, list or
 // remove the connected device, query status, shut it down). Signals cannot carry an ARN

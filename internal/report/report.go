@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // Package report renders what a command prints: a wrapped ASCII table sized to the terminal,
 // the width to size it to, and one compact JSON line. No cobra, no domain words.
 package report

@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // Package doctor runs readiness checks: one table, run in order, each check under its own
 // timeout, skipped when a check it needs did not pass. Report: a table with one row per
 // category and a What to do list, one text row per check, or one JSON object; the first two end
