@@ -2,20 +2,14 @@ package cli
 
 import (
 	"fmt"
-	"io"
-	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 
 	"github.com/aws/device-connect-devicefarm/internal/doctor"
+	"github.com/aws/device-connect-devicefarm/internal/report"
 )
-
-// defaultReportWidth is the table width when stdout is not a terminal and COLUMNS is unset.
-const defaultReportWidth = 80
 
 // newDoctorCommand runs the readiness checks and prints the report on stdout. Its own
 // PersistentPreRunE replaces the root hook, which would fail on a refused runtime dir before
@@ -70,20 +64,20 @@ timeout; a run in which every check times out ends in under two minutes.`, awsNa
 			// Ctrl-C ends the current check and prints what ran so far.
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
-			report := doctor.Run(ctx, doctor.Checks(doctor.Inputs{Config: state.cfg, SessionARN: state.sessionARN}))
+			results := doctor.Run(ctx, doctor.Checks(doctor.Inputs{Config: state.cfg, SessionARN: state.sessionARN}))
 			var writeErr error
 			switch {
 			case jsonReport:
-				writeErr = doctor.WriteJSON(cmd.OutOrStdout(), report, state.sessionARN)
+				writeErr = doctor.WriteJSON(cmd.OutOrStdout(), results, state.sessionARN)
 			case verbose:
-				writeErr = doctor.WriteText(cmd.OutOrStdout(), report)
+				writeErr = doctor.WriteText(cmd.OutOrStdout(), results)
 			default:
-				writeErr = doctor.WriteTable(cmd.OutOrStdout(), report, reportWidth(cmd.OutOrStdout()))
+				writeErr = doctor.WriteTable(cmd.OutOrStdout(), results, report.TerminalWidth(cmd.OutOrStdout()))
 			}
 			if writeErr != nil {
 				return writeErr
 			}
-			if failed := report.Failed(); failed > 0 {
+			if failed := results.Failed(); failed > 0 {
 				return fmt.Errorf("doctor: %d checks failed", failed)
 			}
 			return nil
@@ -95,18 +89,4 @@ timeout; a run in which every check times out ends in under two minutes.`, awsNa
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "print one line per check, with its id, instead of the table")
 	cmd.Flags().BoolVar(&jsonReport, "json", false, "print one JSON object instead of the table; same exit code")
 	return cmd
-}
-
-// reportWidth is the table width: a positive terminal size when stdout is a terminal, else
-// COLUMNS when it is a positive integer, else defaultReportWidth. The writer clamps it.
-func reportWidth(stdout io.Writer) int {
-	if file, isFile := stdout.(*os.File); isFile && term.IsTerminal(int(file.Fd())) {
-		if width, _, err := term.GetSize(int(file.Fd())); err == nil && width > 0 {
-			return width
-		}
-	}
-	if columns, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && columns > 0 {
-		return columns
-	}
-	return defaultReportWidth
 }

@@ -6,14 +6,13 @@ package doctor
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"slices"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
+
+	"github.com/aws/device-connect-devicefarm/internal/report"
 )
 
 // Status is a row's verdict, lowercase. Only FAIL fails the run.
@@ -251,50 +250,23 @@ func rollUp(rows []Row) Status {
 	return status
 }
 
-// Table layout. Category and Status are fixed columns; Details takes the rest. Width clamp:
-// below the floor a path no longer fits a Details line, above the ceiling prose is hard to follow.
+// Table layout. Category and Status are pinned columns; Details takes the rest. itemIndent is the
+// What to do list's hanging indent.
 const (
-	tableMinWidth       = 60
-	tableMaxWidth       = 120
 	categoryColumnWidth = 13
 	statusColumnWidth   = 6
-	tableFrameWidth     = 10 // four borders, six padding spaces
-	cellIndent          = 2
 	itemIndent          = 3
 )
 
 // WriteTable writes one ASCII table row per category (Category, Status, Details), a numbered
 // What to do list with the hint of every WARN or FAIL check, then the count line. width is the
-// terminal width, clamped to [tableMinWidth, tableMaxWidth]. ASCII only, no color.
-func WriteTable(writer io.Writer, report Report, width int) error {
-	width = min(max(width, tableMinWidth), tableMaxWidth)
-	detailsWidth := width - categoryColumnWidth - statusColumnWidth - tableFrameWidth
-	rule := "+" + strings.Repeat("-", categoryColumnWidth+2) + "+" + strings.Repeat("-", statusColumnWidth+2) +
-		"+" + strings.Repeat("-", detailsWidth+2) + "+\n"
-	formatRow := func(category, status, details string) string {
-		return fmt.Sprintf("| %-*s | %-*s | %-*s |\n", categoryColumnWidth, category, statusColumnWidth, status, detailsWidth, details)
-	}
-
+// terminal width, clamped to [report.MinWidth, report.MaxWidth]. ASCII only, no color.
+func WriteTable(writer io.Writer, doctorReport Report, width int) error {
+	width = report.ClampWidth(width)
+	categories := doctorReport.Categories()
 	var text strings.Builder
-	text.WriteString(rule)
-	text.WriteString(formatRow("Category", "Status", "Details"))
-	text.WriteString(rule)
-	categories := report.Categories()
-	reasons := skipReasons(report)
-	for _, category := range categories {
-		label := wrap(category.Title, categoryColumnWidth, 0, false)
-		var cell []string
-		for _, paragraph := range detailsParagraphs(category.Rows, reasons) {
-			cell = append(cell, wrap(paragraph, detailsWidth, cellIndent, false)...)
-		}
-		status := strings.ToUpper(string(category.Status))
-		for index := range max(len(label), len(cell)) {
-			text.WriteString(formatRow(lineAt(label, index), status, lineAt(cell, index)))
-			status = ""
-		}
-		text.WriteString(rule)
-	}
-	if items := whatToDo(report, width); len(items) > 0 {
+	text.WriteString(categoryTable(categories, skipReasons(doctorReport)).Render(width))
+	if items := whatToDo(doctorReport, width); len(items) > 0 {
 		text.WriteString("\nWhat to do\n")
 		for _, item := range items {
 			text.WriteString(item + "\n")
@@ -305,12 +277,21 @@ func WriteTable(writer io.Writer, report Report, width int) error {
 	return err
 }
 
-// lineAt is lines[index], or "" past the end.
-func lineAt(lines []string, index int) string {
-	if index < len(lines) {
-		return lines[index]
+// categoryTable is one row per category: its title, its status and its Details paragraphs.
+func categoryTable(categories []CategoryReport, reasons map[string]string) report.Table {
+	table := report.Table{Columns: []report.Column{
+		{Title: "Category", Width: categoryColumnWidth},
+		{Title: "Status", Width: statusColumnWidth},
+		{Title: "Details", Flexible: true},
+	}}
+	for _, category := range categories {
+		table.Rows = append(table.Rows, []report.Cell{
+			{category.Title},
+			{strings.ToUpper(string(category.Status))},
+			detailsParagraphs(category.Rows, reasons),
+		})
 	}
-	return ""
+	return table
 }
 
 // detailsParagraphs builds a category's Details cell: "<title>: <summary>" per WARN or FAIL
@@ -418,16 +399,16 @@ func rootReason(blocker string, rows map[string]Row, blockers map[string]string)
 
 // whatToDo renders one numbered item per WARN or FAIL check with a hint, in run order:
 // "N. <category>, <title>: <hint>", wrapped at the full width with a hanging indent.
-func whatToDo(report Report, width int) []string {
+func whatToDo(doctorReport Report, width int) []string {
 	var lines []string
 	number := 0
-	for _, row := range report.Rows {
+	for _, row := range doctorReport.Rows {
 		if row.Hint == "" || (row.Status != Warn && row.Status != Fail) {
 			continue
 		}
 		number++
 		item := fmt.Sprintf("%d. %s, %s: %s", number, row.Category.title(), row.Title, row.Hint)
-		lines = append(lines, wrap(item, width, itemIndent, true)...)
+		lines = append(lines, report.Wrap(item, width, itemIndent, true)...)
 	}
 	return lines
 }
@@ -454,102 +435,6 @@ func countLine(categories []CategoryReport) string {
 	return strings.Join(parts, ", ")
 }
 
-// wrap breaks text into lines of at most width runes; continuation lines indent. keepWhole
-// (the list) never cuts a token: one longer than the line stands alone and overflows, so a
-// quoted command copies whole. Without it (a cell) a quoted span longer than a continuation
-// line wraps as prose and a spaceless token longer than the line is cut at the edge and
-// continues on the next line.
-func wrap(text string, width, indent int, keepWhole bool) []string {
-	continuation := max(width-indent, 1)
-	var lines []string
-	line, capacity := "", width
-	flush := func() {
-		lines = append(lines, line)
-		line, capacity = "", continuation
-	}
-	for _, token := range tokens(text, continuation, keepWhole) {
-		if line != "" && utf8.RuneCountInString(line)+1+utf8.RuneCountInString(token) > capacity {
-			flush()
-		}
-		for !keepWhole && utf8.RuneCountInString(token) > capacity {
-			line, token = cutRunes(token, capacity)
-			flush()
-		}
-		switch {
-		case token == "":
-		case line == "":
-			line = token
-		default:
-			line += " " + token
-		}
-	}
-	if line != "" {
-		lines = append(lines, line)
-	}
-	if len(lines) == 0 {
-		return []string{""}
-	}
-	for index := 1; index < len(lines); index++ {
-		lines[index] = strings.Repeat(" ", indent) + lines[index]
-	}
-	return lines
-}
-
-// tokens splits text at whitespace. A quoted span is one token, its inner spaces kept, when
-// keepWhole is set or it fits limit; else its words are tokens.
-func tokens(text string, limit int, keepWhole bool) []string {
-	var out []string
-	rest := strings.TrimLeftFunc(text, unicode.IsSpace)
-	for rest != "" {
-		end := quotedSpanEnd(rest)
-		if end == 0 {
-			if end = strings.IndexFunc(rest, unicode.IsSpace); end < 0 {
-				end = len(rest)
-			}
-		}
-		token := rest[:end]
-		if !keepWhole && utf8.RuneCountInString(token) > limit && strings.ContainsFunc(token, unicode.IsSpace) {
-			out = append(out, strings.Fields(token)...)
-		} else {
-			out = append(out, token)
-		}
-		rest = strings.TrimLeftFunc(rest[end:], unicode.IsSpace)
-	}
-	return out
-}
-
-// quotedSpanEnd is the length of the quoted span that opens text, or 0 when text does not open
-// one: a quote, no quote inside, a closing quote with an optional . , ; or : attached, then
-// whitespace or the end. "server's" opens none.
-func quotedSpanEnd(text string) int {
-	if text == "" || text[0] != '\'' {
-		return 0
-	}
-	closing := strings.IndexByte(text[1:], '\'')
-	if closing < 0 {
-		return 0
-	}
-	end := closing + 2
-	if end < len(text) && strings.IndexByte(".,;:", text[end]) >= 0 {
-		end++
-	}
-	next, _ := utf8.DecodeRuneInString(text[end:])
-	if end == len(text) || unicode.IsSpace(next) {
-		return end
-	}
-	return 0
-}
-
-// cutRunes splits token after count runes; a shorter token comes back whole.
-func cutRunes(token string, count int) (head, tail string) {
-	offset := 0
-	for range count {
-		_, size := utf8.DecodeRuneInString(token[offset:])
-		offset += size
-	}
-	return token[:offset], token[offset:]
-}
-
 // jsonReport is the --json shape.
 type jsonReport struct {
 	OK         bool        `json:"ok"`
@@ -572,26 +457,16 @@ type jsonCheck struct {
 }
 
 // WriteJSON writes the report as one compact JSON line. ok is Failed() == 0.
-func WriteJSON(writer io.Writer, report Report, sessionARN string) error {
+func WriteJSON(writer io.Writer, doctorReport Report, sessionARN string) error {
 	out := jsonReport{
-		OK:         report.Failed() == 0,
+		OK:         doctorReport.Failed() == 0,
 		SessionARN: sessionARN,
-		Checks:     make([]jsonCheck, 0, len(report.Rows)),
-		Summary:    report.Summary(),
+		Checks:     make([]jsonCheck, 0, len(doctorReport.Rows)),
+		Summary:    doctorReport.Summary(),
 	}
-	for _, row := range report.Rows {
+	for _, row := range doctorReport.Rows {
 		out.Checks = append(out.Checks, jsonCheck{ID: row.ID, Title: row.Title, Category: row.Category, Status: row.Status,
-			Summary: row.Summary, Hint: row.Hint, Needs: nonNil(row.Needs), ElapsedMs: row.Elapsed.Milliseconds()})
+			Summary: row.Summary, Hint: row.Hint, Needs: report.NonNil(row.Needs), ElapsedMs: row.Elapsed.Milliseconds()})
 	}
-	encoder := json.NewEncoder(writer)
-	encoder.SetEscapeHTML(false) // not HTML: keep && in hints literal
-	return encoder.Encode(out)
-}
-
-// nonNil makes a nil list encode as [], not null.
-func nonNil(items []string) []string {
-	if items == nil {
-		return []string{}
-	}
-	return items
+	return report.WriteJSON(writer, out)
 }
