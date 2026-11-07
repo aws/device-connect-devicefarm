@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/arn"
@@ -49,6 +50,12 @@ const clientRegion = "us-west-2"
 // relay behind a remote access session does not work below it, so GetSession
 // refuses an older Android device.
 const minimumAndroidMajor = 9
+
+// sessionMaxLength is the service's session limit, per the Device Farm developer guide, "Using a
+// remote access session"
+// (https://docs.aws.amazon.com/devicefarm/latest/developerguide/how-to-use-session.html). The
+// API reports no expiry; ExpiresAt is Started plus this.
+const sessionMaxLength = 150 * time.Minute
 
 // Sentinels for errors.Is. GetSession wraps them into its texts, where their words read in
 // place; the SDK's own text stays inside the wrap.
@@ -123,10 +130,14 @@ func (*SessionEndedError) Is(target error) bool { return target == ErrSessionEnd
 
 // RemoteAccessInfo is the outcome of resolving a session ARN: the websocket URL
 // to dial (the interactive endpoint verbatim, path-less; each dial site names its
-// route through bridge.Route) and the device label to show the user.
+// route through bridge.Route), the device label to show the user, and the session times:
+// StartedAt from the response, ExpiresAt as StartedAt plus sessionMaxLength. Both zero when
+// the response has no start.
 type RemoteAccessInfo struct {
-	Endpoint string
-	Label    string
+	Endpoint  string
+	Label     string
+	StartedAt time.Time
+	ExpiresAt time.Time
 }
 
 // RemoteAccessClient looks up a Device Farm remote access session by ARN and
@@ -260,7 +271,12 @@ func (c awsRemoteAccessClient) GetSession(ctx context.Context, sessionARN string
 			sessionARN, ErrNoEndpointYet, status)
 	}
 
-	return RemoteAccessInfo{Endpoint: endpoint, Label: deviceLabel(remoteAccessSession.Device)}, nil
+	info := RemoteAccessInfo{Endpoint: endpoint, Label: deviceLabel(remoteAccessSession.Device)}
+	if remoteAccessSession.Started != nil {
+		info.StartedAt = *remoteAccessSession.Started
+		info.ExpiresAt = info.StartedAt.Add(sessionMaxLength)
+	}
+	return info, nil
 }
 
 // validateSessionARN rejects a session ARN the client cannot serve: one that is

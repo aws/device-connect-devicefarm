@@ -15,6 +15,12 @@ type DeviceInfo struct {
 	Endpoint string // resolved websocket endpoint to dial (path-less; dials name a Route)
 	Label    string // human-readable label shown to the user
 	Serial   string // adb serial, fetched by the control add before the bind
+	// AttachedAt is when Set bound the device; Set stamps it.
+	AttachedAt time.Time
+	// SessionStartedAt and SessionExpiresAt come from the session resolution at the add. Zero
+	// when the service reported no start time. A refresh leaves them alone.
+	SessionStartedAt time.Time
+	SessionExpiresAt time.Time
 }
 
 // LastDetach is why and when the daemon last detached a device on its own: a session the
@@ -171,14 +177,15 @@ func NewActiveDevice(opts ...ActiveDeviceOption) *ActiveDevice {
 	return device
 }
 
-// Set binds info as the active device, returning false without changing anything if a
-// device is already bound.
+// Set binds info as the active device with AttachedAt stamped now, returning false without
+// changing anything if a device is already bound.
 func (a *ActiveDevice) Set(info DeviceInfo) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.present {
 		return false
 	}
+	info.AttachedAt = time.Now()
 	a.present = true
 	a.info = info
 	a.lastDetach = LastDetach{}

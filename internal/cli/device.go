@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"time"
@@ -53,16 +54,17 @@ func newDeviceAddCommand(state *rootState) *cobra.Command {
 	return cmd
 }
 
-// newDeviceListCommand prints one line per attached device: the session ARN, a tab,
-// the device label. Only one device can be attached today. The one-line-per-device
-// output keeps its shape when more are allowed.
+// newDeviceListCommand prints one deviceListLine per attached device. Only one device can
+// be attached today; the one-line-per-device output keeps its shape when more are allowed.
 func newDeviceListCommand(state *rootState) *cobra.Command {
 	short := fmt.Sprintf("List the %s remote access devices attached to the bridge", productName)
 	return &cobra.Command{
 		Use:   "list",
 		Short: short,
-		Long:  short + ".\n\nOne line per device: the session ARN, then the device name.\n\n" + bridgeAutoStartNote,
-		Args:  cobra.NoArgs,
+		Long: short + ".\n\nOne line per device, tab-separated: the session ARN, the device name, the adb serial,\n" +
+			"how long it has been attached, when its session started and how long until the\n" +
+			"session expires.\n\n" + bridgeAutoStartNote,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			resp, err := sendToBridge(cmd, state, control.Request{Op: control.OpList})
 			if err != nil {
@@ -78,11 +80,43 @@ func newDeviceListCommand(state *rootState) *cobra.Command {
 				}
 				return nil
 			}
+			now := time.Now()
 			for _, attached := range resp.Devices {
-				cmd.Printf("%s\t%s\n", attached.SessionARN, attached.Label)
+				cmd.Println(deviceListLine(attached, now))
 			}
 			return nil
 		},
+	}
+}
+
+// deviceListLine renders one attached device, tab-separated: the session ARN, the label,
+// "serial <serial>", "attached <age> ago", "session started <age> ago", "session expires in
+// <span>". An empty serial or a zero time reads "unknown"; a passed expiry reads "session expired".
+func deviceListLine(attached control.AttachedDevice, now time.Time) string {
+	return fmt.Sprintf("%s\t%s\tserial %s\tattached %s\tsession started %s\tsession %s",
+		attached.SessionARN, attached.Label, cmp.Or(attached.Serial, "unknown"),
+		agoOrUnknown(attached.AttachedAt, now),
+		agoOrUnknown(attached.SessionStartedAt, now),
+		sessionExpiry(attached.SessionExpiresAt, now))
+}
+
+// agoOrUnknown words how long ago at was ("12 minutes ago"), or "unknown" for a zero time.
+func agoOrUnknown(at, now time.Time) string {
+	if at.IsZero() {
+		return "unknown"
+	}
+	return humanSpan(now.Sub(at)) + " ago"
+}
+
+// sessionExpiry words the time left before the service ends the session, after "session ".
+func sessionExpiry(expiresAt, now time.Time) string {
+	switch {
+	case expiresAt.IsZero():
+		return "expiry unknown"
+	case !now.Before(expiresAt):
+		return "expired"
+	default:
+		return "expires in " + humanSpan(expiresAt.Sub(now))
 	}
 }
 

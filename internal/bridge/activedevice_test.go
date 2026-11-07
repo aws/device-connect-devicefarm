@@ -26,6 +26,13 @@ func newFakeClock() *fakeClock {
 	return &fakeClock{t: time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)}
 }
 
+// ignoringAttachedAt is info without the stamp Set adds, so a test compares the rest with what
+// it passed to Set.
+func ignoringAttachedAt(info DeviceInfo) DeviceInfo {
+	info.AttachedAt = time.Time{}
+	return info
+}
+
 func TestGivenEmptyDeviceWhenSetThenBecomesCurrent(t *testing.T) {
 	device := NewActiveDevice()
 	info := DeviceInfo{ARN: "arn:1", Endpoint: "wss://h/ws", Label: "Pixel - OS 16"}
@@ -34,7 +41,16 @@ func TestGivenEmptyDeviceWhenSetThenBecomesCurrent(t *testing.T) {
 
 	got, ok := device.Current()
 	require.True(t, ok)
-	assert.Equal(t, info, got)
+	assert.Equal(t, info, ignoringAttachedAt(got))
+}
+
+func TestGivenEmptyDeviceWhenSetThenAttachedAtIsStampedNow(t *testing.T) {
+	device := NewActiveDevice()
+
+	require.True(t, device.Set(DeviceInfo{ARN: "arn:1", AttachedAt: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)}))
+
+	got, _ := device.Current()
+	assert.WithinDuration(t, time.Now(), got.AttachedAt, time.Minute, "Set stamps the attach time itself")
 }
 
 func TestGivenDeviceAlreadySetWhenSetAgainThenRejectedAndUnchanged(t *testing.T) {
@@ -46,7 +62,7 @@ func TestGivenDeviceAlreadySetWhenSetAgainThenRejectedAndUnchanged(t *testing.T)
 
 	assert.False(t, accepted, "the one-device limit must reject a second Set")
 	got, _ := device.Current()
-	assert.Equal(t, first, got, "the original device must remain bound")
+	assert.Equal(t, first, ignoringAttachedAt(got), "the original device must remain bound")
 }
 
 func TestGivenSetDeviceWhenClearedThenReturnsItAndBecomesEmpty(t *testing.T) {
@@ -57,7 +73,7 @@ func TestGivenSetDeviceWhenClearedThenReturnsItAndBecomesEmpty(t *testing.T) {
 	cleared, ok := device.Clear()
 
 	require.True(t, ok)
-	assert.Equal(t, info, cleared)
+	assert.Equal(t, info, ignoringAttachedAt(cleared))
 	_, present := device.Current()
 	assert.False(t, present)
 	// After clearing, the slot is free for a new device.
@@ -91,7 +107,7 @@ func TestGivenMismatchedARNWhenEndpointUpdatedThenIgnored(t *testing.T) {
 
 	assert.False(t, updated, "a refresh for a different ARN must not overwrite the bound device")
 	got, _ := device.Current()
-	assert.Equal(t, original, got)
+	assert.Equal(t, original, ignoringAttachedAt(got))
 }
 
 func TestGivenNoDeviceWhenEndpointUpdatedThenIgnored(t *testing.T) {
@@ -99,14 +115,20 @@ func TestGivenNoDeviceWhenEndpointUpdatedThenIgnored(t *testing.T) {
 	assert.False(t, updated)
 }
 
-func TestGivenABoundSerialWhenEndpointUpdatedThenSerialSurvives(t *testing.T) {
+func TestGivenABoundSerialAndTimesWhenEndpointUpdatedThenTheySurvive(t *testing.T) {
 	device := NewActiveDevice()
-	require.True(t, device.Set(DeviceInfo{ARN: "arn:1", Endpoint: "wss://old", Label: "Old", Serial: "R3CN30ABCDE"}))
+	startedAt := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
+	require.True(t, device.Set(DeviceInfo{ARN: "arn:1", Endpoint: "wss://old", Label: "Old", Serial: "R3CN30ABCDE",
+		SessionStartedAt: startedAt, SessionExpiresAt: startedAt.Add(150 * time.Minute)}))
+	bound, _ := device.Current()
 
 	require.True(t, device.UpdateEndpoint("arn:1", "wss://new", "New"))
 
 	got, _ := device.Current()
 	assert.Equal(t, "R3CN30ABCDE", got.Serial, "an endpoint refresh must not forget the serial")
+	assert.Equal(t, bound.AttachedAt, got.AttachedAt, "the attach time belongs to the attachment, not the endpoint")
+	assert.Equal(t, startedAt, got.SessionStartedAt)
+	assert.Equal(t, startedAt.Add(150*time.Minute), got.SessionExpiresAt)
 }
 
 func TestGivenMatchingARNWhenEndpointReadThenCurrentEndpointReturned(t *testing.T) {
@@ -145,7 +167,7 @@ func TestGivenMatchingARNWhenClearMatchingThenDetachesAndReturnsIt(t *testing.T)
 	cleared, ok := device.ClearMatching("arn:1", "the session ended")
 
 	require.True(t, ok)
-	assert.Equal(t, info, cleared)
+	assert.Equal(t, info, ignoringAttachedAt(cleared))
 	_, present := device.Current()
 	assert.False(t, present)
 }
@@ -160,7 +182,7 @@ func TestGivenMismatchedARNWhenClearMatchingThenKeepsDevice(t *testing.T) {
 	assert.False(t, ok, "ClearMatching must not detach a device whose ARN does not match")
 	got, present := device.Current()
 	require.True(t, present)
-	assert.Equal(t, info, got)
+	assert.Equal(t, info, ignoringAttachedAt(got))
 }
 
 func TestGivenNoDeviceWhenClearMatchingThenReportsNothing(t *testing.T) {

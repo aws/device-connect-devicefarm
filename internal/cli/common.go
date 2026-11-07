@@ -73,6 +73,15 @@ func countNoun(count int, noun string) string {
 	return fmt.Sprintf("%d %s", count, noun)
 }
 
+// humanSpan is humanAge plus the whole minutes past an hour: "2 hours 5 minutes", "1 hour".
+func humanSpan(span time.Duration) string {
+	minutesPastTheHour := (max(span, 0) % time.Hour) / time.Minute
+	if span < time.Hour || minutesPastTheHour == 0 {
+		return humanAge(span)
+	}
+	return humanAge(span) + " " + humanAge(minutesPastTheHour*time.Minute)
+}
+
 // startBridge starts the bridge daemon. A package var so a test can swap in a fake
 // that does not fork.
 var startBridge = func(manager *daemon.DaemonManager) error { return manager.Start() }

@@ -43,7 +43,8 @@ adb -P 5037 forward --remove tcp:8080
 # been started with 'bridge start --allow-adb-reverse'.
 adb -P 5037 reverse tcp:9000 tcp:9000
 
-# List the attached devices: one line per device, the session ARN then the device name.
+# List the attached devices, one line each: session ARN, device name, adb serial, attach age,
+# session start and expiry.
 devicefarm-connect device list
 
 # Detach the attached device (the listener stays up). With --session-arn, the device is
