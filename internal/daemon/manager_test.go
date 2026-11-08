@@ -59,6 +59,15 @@ func newTestManagerWithConfig(t *testing.T, cfg config.ProxyConfig) *DaemonManag
 	return newTestManagerWithClient(t, cfg, newFakeClient(testEndpoint, "unused"))
 }
 
+// shrinkLookupBounds sets the attach and refresh lookup bounds for one test and restores
+// them after it, so a late fake answer trips a bound without a long wait.
+func shrinkLookupBounds(t *testing.T, attach, refresh time.Duration) {
+	t.Helper()
+	previousAttach, previousRefresh := resolveTimeout, refreshLookupTimeout
+	resolveTimeout, refreshLookupTimeout = attach, refresh
+	t.Cleanup(func() { resolveTimeout, refreshLookupTimeout = previousAttach, previousRefresh })
+}
+
 // newTestManagerWithClient is newTestManagerWithConfig with a caller-supplied
 // remote-access client, so add/refresh tests inject a fake whose endpoint, label,
 // and error they control.

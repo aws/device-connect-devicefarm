@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/devicefarm"
 	"github.com/aws/aws-sdk-go-v2/service/devicefarm/types"
@@ -43,6 +45,54 @@ func closedEndpoint(t *testing.T) string {
 }
 
 const testSessionARN = "arn:aws:devicefarm:us-west-2:123456789012:session:abc/def/00000"
+
+// withoutRetryWaits swaps in an adaptive retryer with no waits: zero backoff and a free
+// attempt token, so adaptive mode never sleeps after a throttle. The client's wrap still
+// applies the production attempt budget, so tests count production attempts.
+func withoutRetryWaits() func(*devicefarm.Options) {
+	return func(options *devicefarm.Options) {
+		options.Retryer = retry.NewAdaptiveMode(func(adaptive *retry.AdaptiveModeOptions) {
+			adaptive.RequestCost = 0
+			adaptive.StandardOptions = append(adaptive.StandardOptions, func(standard *retry.StandardOptions) {
+				standard.Backoff = retry.BackoffDelayerFunc(func(int, error) (time.Duration, error) { return 0, nil })
+			})
+		})
+	}
+}
+
+// throttlingAPI is a fake remote access API on a local port. It answers ThrottlingException
+// (HTTP 400) to the first throttles requests, then a RUNNING session, and counts the requests.
+type throttlingAPI struct {
+	throttles int
+	requests  atomic.Int32
+}
+
+func (api *throttlingAPI) ServeHTTP(response http.ResponseWriter, _ *http.Request) {
+	served := int(api.requests.Add(1))
+	response.Header().Set("Content-Type", "application/x-amz-json-1.1")
+	if served <= api.throttles {
+		response.WriteHeader(http.StatusBadRequest)
+		_, _ = response.Write([]byte(`{"__type":"ThrottlingException","message":"Rate exceeded"}`))
+		return
+	}
+	_, _ = response.Write([]byte(`{"remoteAccessSession":{"status":"RUNNING",` +
+		`"endpoints":{"interactiveEndpoint":"wss://host.example/ws"},` +
+		`"device":{"name":"Pixel","os":"16","platform":"ANDROID"}}}`))
+}
+
+// newThrottlingClient builds the production client against a throttlingAPI through the pinned
+// endpoint env, without the retryer's waits.
+func newThrottlingClient(t *testing.T, throttles int) (RemoteAccessClient, *throttlingAPI) {
+	t.Helper()
+	testsupport.HermeticAWSEnv(t)
+	api := &throttlingAPI{throttles: throttles}
+	server := httptest.NewServer(api)
+	t.Cleanup(server.Close)
+	t.Setenv("AWS_ENDPOINT_URL_DEVICE_FARM", server.URL)
+	client, err := newRemoteAccessClient(context.Background(), nil, withoutRetryWaits())
+	require.NoError(t, err)
+	return client, api
+}
 
 // fakeGetter is a remoteAccessGetter that returns canned output, so the session
 // mapping is exercised without a real AWS call. It records the ARN it was asked
@@ -354,13 +404,14 @@ func TestGivenValidARNWhenSessionFetchedThenCallsThroughToTheAPI(t *testing.T) {
 	// and issue the GetRemoteAccessSession call. Pointing the SDK at a closed local
 	// port (via AWS_ENDPOINT_URL_DEVICE_FARM) makes that call fail with a connection
 	// error deterministically, so the happy-path wiring runs without reaching real
-	// AWS. A short context bounds the SDK's adaptive retry so the test cannot hang.
+	// AWS. The retryer waits for nothing, and a short context bounds the SDK's retries
+	// so the test cannot hang.
 	testsupport.HermeticAWSEnv(t)
 	t.Setenv("AWS_ENDPOINT_URL_DEVICE_FARM", closedEndpoint(t))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	client, err := NewRemoteAccessClient(ctx, nil)
+	client, err := newRemoteAccessClient(ctx, nil, withoutRetryWaits())
 	require.NoError(t, err)
 
 	_, err = client.GetSession(ctx, testSessionARN)
@@ -399,6 +450,41 @@ func TestGivenAResponseWithAMalformedDateHeaderWhenSessionFetchedThenTheSDKWrite
 	written, err := os.ReadFile(stderrFile.Name())
 	require.NoError(t, err)
 	assert.Empty(t, string(written))
+}
+
+func TestGivenALookupThrottledThreeTimesWhenItSucceedsOnTheFourthAttemptThenTheSessionResolves(t *testing.T) {
+	// The context fails the row loudly should the retryer's waits ever come back.
+	client, api := newThrottlingClient(t, 3)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	got, err := client.GetSession(ctx, testSessionARN)
+
+	require.NoError(t, err, "the fourth attempt answers RUNNING")
+	assert.Equal(t, int32(4), api.requests.Load(), "one request per attempt, the whole budget")
+	assert.Equal(t, "wss://host.example/ws", got.Endpoint)
+	assert.Equal(t, "Pixel (OS 16)", got.Label)
+}
+
+func TestGivenALookupThrottledOnEveryAttemptWhenTheBudgetEndsThenTheErrorIsTheThrottle(t *testing.T) {
+	client, api := newThrottlingClient(t, math.MaxInt)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := client.GetSession(ctx, testSessionARN)
+
+	require.Error(t, err)
+	assert.Equal(t, int32(4), api.requests.Load(), "the budget is spent whole, then the lookup fails")
+	var exhausted *retry.MaxAttemptsError
+	require.ErrorAs(t, err, &exhausted)
+	assert.Equal(t, 4, exhausted.Attempt)
+	var apiErr smithy.APIError
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "ThrottlingException", apiErr.ErrorCode(), "the throttle code reaches the caller")
+	for _, sentinel := range []error{ErrAccessDenied, ErrSessionNotFound, ErrInvalidARN, ErrRequestRejected,
+		ErrSessionEnded, ErrNoEndpointYet, ErrUnsupportedDevice} {
+		assert.NotErrorIs(t, err, sentinel, "a throttle carries no sentinel")
+	}
 }
 
 func TestGivenUnusableARNWhenSessionFetchedThenFailsFastWithoutCallingTheAPI(t *testing.T) {
