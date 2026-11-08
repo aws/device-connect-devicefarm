@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/aws/device-connect-devicefarm/internal/session"
 )
@@ -36,15 +37,16 @@ const (
 // endpoint and label, so the daemon's add and refresh paths are exercised without
 // real AWS credentials or a network call. Its fields are mutable under a mutex so
 // a test can make a later resolve return a new endpoint or an error after an
-// initial attach succeeded. It records each resolved ARN so a test can assert that
-// the one-device short-circuit avoids the AWS call. Because the daemon depends on
-// the application-layer RemoteAccessClient interface, this fake carries no
-// aws-sdk-go-v2 types.
+// initial attach succeeded, or answer late to drive a lookup bound. It records
+// each resolved ARN so a test can assert that the one-device short-circuit avoids
+// the AWS call. Because the daemon depends on the application-layer
+// RemoteAccessClient interface, this fake carries no aws-sdk-go-v2 types.
 type fakeRemoteAccessClient struct {
 	mu       sync.Mutex
 	endpoint string
 	label    string
 	err      error
+	delay    time.Duration
 	arns     []string
 	// returnedArns maps an asked ARN to the ARN the answer names. An ARN not in the
 	// map answers with no ARN, so the add makes one lookup.
@@ -83,14 +85,31 @@ func (f *fakeRemoteAccessClient) resolvedARNs() []string {
 	return append([]string(nil), f.arns...)
 }
 
-func (f *fakeRemoteAccessClient) GetSession(_ context.Context, sessionARN string) (session.RemoteAccessInfo, error) {
+// delayAnswersBy makes later GetSession calls wait delay, or fail with ctx.Err() when the
+// caller's bound ends first. It models a throttled lookup.
+func (f *fakeRemoteAccessClient) delayAnswersBy(delay time.Duration) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.delay = delay
+}
+
+func (f *fakeRemoteAccessClient) GetSession(ctx context.Context, sessionARN string) (session.RemoteAccessInfo, error) {
+	f.mu.Lock()
 	f.arns = append(f.arns, sessionARN)
-	if f.err != nil {
-		return session.RemoteAccessInfo{}, f.err
+	endpoint, label, err, delay := f.endpoint, f.label, f.err, f.delay
+	returnedARN := f.returnedArns[sessionARN]
+	f.mu.Unlock()
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return session.RemoteAccessInfo{}, ctx.Err()
+		}
 	}
-	return session.RemoteAccessInfo{Endpoint: f.endpoint, ARN: f.returnedArns[sessionARN], Label: f.label}, nil
+	if err != nil {
+		return session.RemoteAccessInfo{}, err
+	}
+	return session.RemoteAccessInfo{Endpoint: endpoint, ARN: returnedARN, Label: label}, nil
 }
 
 // attachDuringResolve wraps a RemoteAccessClient and runs attach before

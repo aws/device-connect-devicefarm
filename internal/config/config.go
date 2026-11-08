@@ -75,7 +75,7 @@ const (
 
 	// DefaultEndpointRefreshInterval is how often the daemon re-resolves the
 	// attached session's interactive endpoint. Renews the URL before
-	// endpointURLValidity lapses, with margin for a retry.
+	// endpointURLValidity lapses, with EndpointRenewMargin to spare.
 	DefaultEndpointRefreshInterval = 4 * time.Minute
 
 	// Bounds each of the two status-word reads in a forwarded connection's
@@ -124,9 +124,10 @@ const (
 	// dialable. A server-side property, mirrored so Validate can check the cadence.
 	endpointURLValidity = 5 * time.Minute
 
-	// endpointRenewMargin is the slack Validate demands between an endpoint's
-	// worst-case age and the URL going stale. One retry must still fit.
-	endpointRenewMargin = 30 * time.Second
+	// EndpointRenewMargin is the slack Validate demands between an endpoint's
+	// worst-case age and the URL going stale. It also bounds the daemon's refresh
+	// lookup, retries included.
+	EndpointRenewMargin = 30 * time.Second
 
 	// websocketLifetimeCap is the longest any websocket may live, from its dial to
 	// the server's close of it. A hard rule: intermediaries on the path cut a
@@ -282,9 +283,9 @@ func (c ProxyConfig) Validate() error {
 	// A swap can dial a URL one EndpointRefreshInterval old, so renewal must stay
 	// ahead of expiry with margin. Subtract, do not add: interval+margin can
 	// overflow and pass.
-	if c.EndpointRefreshInterval > endpointURLValidity-endpointRenewMargin {
+	if c.EndpointRefreshInterval > endpointURLValidity-EndpointRenewMargin {
 		return fmt.Errorf("endpoint refresh interval %s leaves less than %s of margin before an endpoint URL expires (validity %s)",
-			c.EndpointRefreshInterval, endpointRenewMargin, endpointURLValidity)
+			c.EndpointRefreshInterval, EndpointRenewMargin, endpointURLValidity)
 	}
 	if c.DeviceStreamStatusTimeout <= 0 {
 		return fmt.Errorf("device stream status timeout must be positive, got %s", c.DeviceStreamStatusTimeout)

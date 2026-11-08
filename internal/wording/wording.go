@@ -211,6 +211,7 @@ const (
 	RefusalMalformedRequest      = "malformed request"
 	RefusalUnknownOpFormat       = "unknown control operation %q"
 	RefusalDifferentDeviceFormat = "a different device is already attached (%s)"
+	RefusalLookupTimeoutFormat   = "Device Farm did not answer the session lookup within %s"
 	RefusalNoDevice              = "no device is attached"
 	RefusalDeviceMismatch        = "the attached device does not match the requested session"
 )
