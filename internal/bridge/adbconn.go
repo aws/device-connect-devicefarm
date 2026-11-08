@@ -130,8 +130,10 @@ type adbConn struct {
 	nextNeedsHandshake bool
 	// endedOnCut marks a connection endOnSwapCutLocked closed; see closedErrLocked.
 	endedOnCut bool
-	// readSince is when the current read target entered service: what wsDeadline
-	// measures.
+	// openedAt is when writeTo was dialed: the refresher counts a cycle from it. readSince
+	// is the same for readFrom: what WSDeadline measures. Both anchor at the websocket's
+	// dial, so its whole life counts.
+	openedAt  time.Time
 	readSince time.Time
 	// drainingSince bounds how long a predecessor may take to end. A drain that never ends
 	// leaves the connection half-duplex.
@@ -183,8 +185,9 @@ func withSelectedSession(sessionUUID string) adbConnOption {
 
 // newAdbConn wraps an already-dialed websocket as a session's first. Without
 // withSelectedSession the control frame is unread: the first Receive consumes it.
-// route must be the one first was dialed on.
-func newAdbConn(dialer *WSDialer, device *ActiveDevice, arn string, route Route, first WSConn, policy WSRefreshPolicy, activity *activityTracker, logger *slog.Logger, opts ...adbConnOption) *adbConn {
+// route must be the one first was dialed on; openedAt is when that dial started, so a
+// socket that waited parked has that much less of its first cycle left.
+func newAdbConn(dialer *WSDialer, device *ActiveDevice, arn string, route Route, first WSConn, openedAt time.Time, policy WSRefreshPolicy, activity *activityTracker, logger *slog.Logger, opts ...adbConnOption) *adbConn {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -201,7 +204,8 @@ func newAdbConn(dialer *WSDialer, device *ActiveDevice, arn string, route Route,
 		readFrom:  first,
 		writeTo:   first,
 		phase:     phaseHandshake,
-		readSince: time.Now(),
+		openedAt:  openedAt,
+		readSince: openedAt,
 		uuidReady: make(chan struct{}),
 	}
 	for _, opt := range opts {
@@ -425,7 +429,7 @@ func (c *adbConn) commitSwap(readErr error) (swapped bool, cutErr error) {
 	}
 	drained := c.readFrom
 	c.readFrom = c.next
-	c.readSince = time.Now()
+	c.readSince = c.openedAt // the successor's dial
 	// Every entry into phaseDraining already pointed writeTo here.
 	c.writeTo = c.next
 	c.next = nil
@@ -476,6 +480,13 @@ func (c *adbConn) closedErrLocked() error {
 		return errClosedAfterCut
 	}
 	return errAdbConnClosed
+}
+
+// writeOpenedAt is when the websocket currently written to was dialed.
+func (c *adbConn) writeOpenedAt() time.Time {
+	c.seam.RLock()
+	defer c.seam.RUnlock()
+	return c.openedAt
 }
 
 // sessionUUID returns the current session's UUID, or "" before one is announced.

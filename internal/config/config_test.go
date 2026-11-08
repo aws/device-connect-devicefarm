@@ -12,6 +12,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/aws/device-connect-devicefarm/internal/bridge"
 )
 
 func TestGivenDefaultConfigWhenConstructedThenHasExpectedDefaults(t *testing.T) {
@@ -43,6 +45,7 @@ func TestGivenInvalidFieldValuesWhenValidatedThenRejected(t *testing.T) {
 		{name: "port too high", mutate: func(c *ProxyConfig) { c.ListenPort = 70000 }},
 		{name: "zero refresh interval", mutate: func(c *ProxyConfig) { c.EndpointRefreshInterval = 0 }},
 		{name: "zero websocket refresh interval", mutate: func(c *ProxyConfig) { c.WSRefreshInterval = 0 }},
+		{name: "zero dial timeout", mutate: func(cfg *ProxyConfig) { cfg.DialTimeout = 0 }},
 		{name: "zero free-second wait", mutate: func(c *ProxyConfig) { c.FreeSecondWait = 0 }},
 		{name: "zero quiet window", mutate: func(c *ProxyConfig) { c.QuietWindow = 0 }},
 		// A swap dials an endpoint up to one EndpointRefreshInterval old, so an
@@ -62,6 +65,53 @@ func TestGivenInvalidFieldValuesWhenValidatedThenRejected(t *testing.T) {
 			require.Error(t, cfg.Validate())
 		})
 	}
+}
+
+func TestGivenASwapCadenceWhenValidatedThenTheWebsocketLifetimeCapHolds(t *testing.T) {
+	// The defaults leave this much to spare under the cap; the stretched rows pin it
+	// and the weight of each addend. A dial timeout counts once per round trip.
+	spare := 5 * time.Second
+	perDialTimeout := spare / (2 * bridge.AttachAttempts)
+	tests := []struct {
+		name    string
+		mutate  func(*ProxyConfig)
+		wantErr bool
+	}{
+		{name: "interval stretched to the cap fits", mutate: func(cfg *ProxyConfig) { cfg.WSRefreshInterval += spare }},
+		{name: "interval past the cap fails", mutate: func(cfg *ProxyConfig) { cfg.WSRefreshInterval += spare + time.Nanosecond }, wantErr: true},
+		{name: "hunt stretched to the cap fits", mutate: func(cfg *ProxyConfig) { cfg.FreeSecondWait += spare }},
+		{name: "hunt past the cap fails", mutate: func(cfg *ProxyConfig) { cfg.FreeSecondWait += spare + time.Nanosecond }, wantErr: true},
+		{name: "dial timeout stretched to the cap fits", mutate: func(cfg *ProxyConfig) { cfg.DialTimeout += perDialTimeout }},
+		{name: "dial timeout past the cap fails", mutate: func(cfg *ProxyConfig) { cfg.DialTimeout += perDialTimeout + time.Nanosecond }, wantErr: true},
+		// Neither the subtraction nor the attach product may overflow into a pass.
+		{name: "interval at the maximum duration fails", mutate: func(cfg *ProxyConfig) { cfg.WSRefreshInterval = math.MaxInt64 }, wantErr: true},
+		{name: "hunt at the maximum duration fails", mutate: func(cfg *ProxyConfig) { cfg.FreeSecondWait = math.MaxInt64 }, wantErr: true},
+		{name: "dial timeout at the maximum duration fails", mutate: func(cfg *ProxyConfig) { cfg.DialTimeout = math.MaxInt64 }, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			tc.mutate(&cfg)
+
+			err := cfg.Validate()
+			if !tc.wantErr {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, "websocket lifetime cap")
+		})
+	}
+}
+
+func TestGivenTheDefaultsWhenTheDeadlineGuardIsDerivedThenItEndsAWebsocketInsideTheCap(t *testing.T) {
+	// After a failed refresh the guard, not a swap, ends the websocket; its deadline must
+	// fit the cap as the swap's sum does.
+	cfg := Default()
+	policy := bridge.WSRefreshPolicy{Interval: cfg.WSRefreshInterval, FreeSecondWait: cfg.FreeSecondWait,
+		ReattachTimeout: cfg.DialTimeout}
+
+	assert.LessOrEqual(t, policy.WSDeadline(), websocketLifetimeCap)
 }
 
 func TestGivenNonAddressListenAddrWhenValidatedThenRejected(t *testing.T) {

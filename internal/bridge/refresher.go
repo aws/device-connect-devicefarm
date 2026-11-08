@@ -14,7 +14,8 @@ import (
 //
 // The zero value disables refreshing (a zero Interval).
 type WSRefreshPolicy struct {
-	// Interval is how long a websocket is used before a refresh is attempted.
+	// Interval is how long a websocket is used before a refresh is attempted, counted
+	// from its dial.
 	Interval time.Duration
 
 	// FreeSecondWait bounds the hunt for a QuietWindow-long idle gap; past it the
@@ -29,7 +30,7 @@ type WSRefreshPolicy struct {
 	// PollInterval is how often quiescence is re-checked during the hunt.
 	PollInterval time.Duration
 
-	// Jitter spreads Interval by +/- this fraction (0.10 == +/-10%), so concurrent
+	// Jitter pulls Interval earlier by up to this fraction, never later, so concurrent
 	// connections' swaps decorrelate and do not overrun the server's per-host cap.
 	Jitter float64
 
@@ -50,10 +51,10 @@ const (
 	defaultPollInterval = 100 * time.Millisecond
 
 	// refreshCycleHeadroom is the slack added to a cycle's worst-case duration to
-	// derive wsDeadline.
+	// derive WSDeadline.
 	refreshCycleHeadroom = 30 * time.Second
 
-	// drainStallMultiple scales wsDeadline into the time a predecessor gets to end (see
+	// drainStallMultiple scales WSDeadline into the time a predecessor gets to end (see
 	// adbConn.enforceWSDeadline). The server closes a healthy one much sooner.
 	drainStallMultiple = 2
 )
@@ -76,24 +77,24 @@ func (p WSRefreshPolicy) reactiveTimeout() time.Duration {
 	return 2 * p.normalized().ReattachTimeout
 }
 
-// wsDeadline is how long one websocket may live before it is presumed wedged: the
+// WSDeadline is how long one websocket may live before it is presumed wedged: the
 // worst-case healthy cycle plus headroom, so a cadence change cannot make it fire on a
-// healthy connection. Zero Interval means no deadline. Bounds the websocket, not the adb
-// TCP connection.
-func (p WSRefreshPolicy) wsDeadline() time.Duration {
+// healthy connection. Counted from the websocket's dial, like the cycle. Zero Interval
+// means no deadline. Bounds the websocket, not the adb TCP connection.
+func (p WSRefreshPolicy) WSDeadline() time.Duration {
 	if p.Interval <= 0 {
 		return 0
 	}
 	p = p.normalized()
-	longestInterval := p.Interval + p.jitterSpan()
-	// Two round trips per attempt (dial, then ack), charged at ReattachTimeout since
-	// the daemon seeds it from DialTimeout. Undercounting fires on healthy websockets:
-	// the poll after a failed refresh inherits the age of every attempt just spent.
-	attachBudget := attachAttempts * 2 * p.ReattachTimeout
-	return longestInterval + p.FreeSecondWait + attachBudget + refreshCycleHeadroom
+	// The jitter only shortens a wait, so Interval is the longest one. Two round trips
+	// per attempt (dial, then ack), charged at ReattachTimeout since the daemon seeds
+	// it from DialTimeout. Undercounting fires on healthy websockets: the poll after a
+	// failed refresh inherits the age of every attempt just spent.
+	attachBudget := AttachAttempts * 2 * p.ReattachTimeout
+	return p.Interval + p.FreeSecondWait + attachBudget + refreshCycleHeadroom
 }
 
-// jitterSpan is the maximum absolute amount Interval can be shifted by.
+// jitterSpan is the most Interval can be pulled earlier by.
 func (p WSRefreshPolicy) jitterSpan() time.Duration {
 	if p.Jitter <= 0 {
 		return 0
@@ -101,16 +102,11 @@ func (p WSRefreshPolicy) jitterSpan() time.Duration {
 	return time.Duration(float64(p.Interval) * p.Jitter)
 }
 
-// nextInterval returns Interval shifted by a pseudo-random amount inside the jitter band.
+// nextInterval returns Interval less a pseudo-random offset in [0, jitterSpan].
 // maphash, not rand: this needs decorrelation, not unpredictability.
 func (p WSRefreshPolicy) nextInterval() time.Duration {
-	span := p.jitterSpan()
-	if span == 0 {
-		return p.Interval
-	}
-	// A random offset in [-span, +span].
-	offset := time.Duration(maphash.Bytes(maphash.MakeSeed(), nil)%uint64(2*span)) - span
-	return p.Interval + offset
+	offset := time.Duration(maphash.Bytes(maphash.MakeSeed(), nil) % uint64(p.jitterSpan()+1))
+	return p.Interval - offset
 }
 
 // quiescenceDecision is the verdict of one poll during the hunt for a quiet moment.
@@ -139,7 +135,7 @@ func decideQuiescence(quietFor, waitedFor time.Duration, p WSRefreshPolicy) quie
 
 // runRefresher drives one connection's refresh cycle until ctx ends, done closes, or the
 // connection is torn down. Started as pipeConn's aux goroutine, so it never outlives the
-// pipe. One poll loop, not one long sleep, so wsDeadline is enforced promptly.
+// pipe. One poll loop, not one long sleep, so WSDeadline is enforced promptly.
 func runRefresher(ctx context.Context, conn *adbConn, policy WSRefreshPolicy, done <-chan struct{}) {
 	if policy.Interval <= 0 {
 		return
@@ -155,8 +151,10 @@ func runRefresher(ctx context.Context, conn *adbConn, policy WSRefreshPolicy, do
 		return
 	}
 
+	// The cycle counts from the websocket's dial, so time spent parked or dialing is spent;
+	// a remainder of zero or less hunts on the first poll.
 	interval := policy.nextInterval()
-	cycleStarted := time.Now()
+	cycleStarted := conn.writeOpenedAt()
 	hunting := false
 	var huntStarted time.Time
 
@@ -169,7 +167,7 @@ func runRefresher(ctx context.Context, conn *adbConn, policy WSRefreshPolicy, do
 		}
 
 		// Every poll, independent of the cycle.
-		if conn.enforceWSDeadline(policy.wsDeadline()) {
+		if conn.enforceWSDeadline(policy.WSDeadline()) {
 			cycleStarted = time.Now()
 			hunting = false
 			continue
@@ -180,7 +178,9 @@ func runRefresher(ctx context.Context, conn *adbConn, policy WSRefreshPolicy, do
 				continue
 			}
 			hunting = true
-			huntStarted = time.Now()
+			// The hunt counts from the interval's end, so a late poll or a gate miss shortens
+			// it instead of restarting it.
+			huntStarted = cycleStarted.Add(interval)
 		}
 
 		decision := decideQuiescence(conn.activity.quietFor(), time.Since(huntStarted), policy)
@@ -194,7 +194,9 @@ func runRefresher(ctx context.Context, conn *adbConn, policy WSRefreshPolicy, do
 			gate = func() bool { return conn.activity.quietFor() >= policy.QuietWindow }
 		}
 
-		if err := conn.refresh(ctx, gate); err != nil {
+		beforeRefresh := conn.writeOpenedAt()
+		err := conn.refresh(ctx, gate)
+		if err != nil {
 			conn.logger.Debug("websocket refresh failed", "error", err)
 			if policy.MaxFailures > 0 && conn.failureCount() >= policy.MaxFailures {
 				conn.logger.Warn("giving up on the proxied connection after repeated refresh failures",
@@ -209,9 +211,19 @@ func runRefresher(ctx context.Context, conn *adbConn, policy WSRefreshPolicy, do
 
 		// Re-jitter every cycle.
 		interval = policy.nextInterval()
-		cycleStarted = time.Now()
+		cycleStarted = nextCycleAnchor(beforeRefresh, conn.writeOpenedAt(), err != nil, time.Now())
 		hunting = false
 	}
+}
+
+// nextCycleAnchor is where the next cycle counts from: the dial of the websocket now written
+// to, a swap's successor or a reactive recovery's replacement. A failed refresh that left the
+// same websocket in service restarts the wait from now: the deadline guard, not a retry, ends it.
+func nextCycleAnchor(beforeRefresh, afterRefresh time.Time, failed bool, now time.Time) time.Time {
+	if failed && afterRefresh.Equal(beforeRefresh) {
+		return now
+	}
+	return afterRefresh
 }
 
 // sleepFor waits for d, reporting false if ctx ended or done closed first.

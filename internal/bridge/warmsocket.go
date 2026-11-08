@@ -13,9 +13,10 @@ import (
 	"time"
 )
 
-// warmSocketMaxAge caps how long a socket stays parked: under the load balancer's idle timeout,
-// which closes a websocket that carries nothing, and under the server's idle limit, so a park the
-// server closed is redialed before the session idles out.
+// warmSocketMaxAge is the ceiling on a park when the refresh interval is longer: under the load
+// balancer's idle timeout, which closes a websocket that carries nothing, and under the server's
+// idle limit, so a park the server closed is redialed before the session idles out. A park also
+// ends at the jittered interval, so a taker's socket is at most an interval old.
 const warmSocketMaxAge = 4 * time.Minute
 
 // warmSocketRetryDelay is how soon the keeper redials after a failed dial; the parked socket
@@ -43,10 +44,11 @@ type warmSocket struct {
 	sessionUUID string
 	// first carries the read started at park, then closes.
 	first chan receivedMessage
-	// parkedAt carries a monotonic reading, which stops while a Linux or macOS machine sleeps.
-	// parkedWall is wall-clock time, which does not stop.
-	parkedAt   time.Time
-	parkedWall time.Time
+	// dialedAt is the dial start, a monotonic reading, which stops while a Linux or macOS
+	// machine sleeps. dialedWall is the same instant on the wall clock, which does not stop.
+	// A taker's connection counts the socket's life from dialedAt.
+	dialedAt   time.Time
+	dialedWall time.Time
 	maxAge     time.Duration
 	// firstSendErr is the taker's first Send result, latched once.
 	firstSend    sync.Once
@@ -56,10 +58,9 @@ type warmSocket struct {
 	pongsAtPing uint64
 }
 
-func parkSocket(ws WSConn, sessionUUID string, maxAge time.Duration) *warmSocket {
-	now := time.Now()
+func parkSocket(ws WSConn, sessionUUID string, dialedAt time.Time, maxAge time.Duration) *warmSocket {
 	socket := &warmSocket{WSConn: ws, sessionUUID: sessionUUID, first: make(chan receivedMessage, 1),
-		parkedAt: now, parkedWall: now.Round(0), maxAge: maxAge}
+		dialedAt: dialedAt, dialedWall: dialedAt.Round(0), maxAge: maxAge}
 	go func() {
 		message, err := ws.Receive()
 		socket.first <- receivedMessage{message: message, err: err}
@@ -77,8 +78,8 @@ func (socket *warmSocket) ended() bool {
 // since park: after a sleep the network path may be gone with nothing to show it.
 func (socket *warmSocket) withinAge() bool {
 	now := time.Now()
-	age := now.Sub(socket.parkedAt)
-	slept := now.Round(0).Sub(socket.parkedWall)-age > sleepTolerance
+	age := now.Sub(socket.dialedAt)
+	slept := now.Round(0).Sub(socket.dialedWall)-age > sleepTolerance
 	return age <= socket.maxAge && !slept
 }
 
@@ -204,6 +205,7 @@ func (keeper *warmSocketKeeper) parkOne(ctx context.Context, maxAge time.Duratio
 		keeper.land(nil)
 		return nil
 	}
+	dialedAt := time.Now()
 	ws, err := keeper.cfg.dialer.Dial(ctx, endpoint, RouteAdb)
 	if err != nil {
 		keeper.land(nil)
@@ -228,7 +230,7 @@ func (keeper *warmSocketKeeper) parkOne(ctx context.Context, maxAge time.Duratio
 		return err
 	}
 	keeper.cfg.logger.Debug("parked a pre-selected adb websocket", "device", keeper.arn, "session", sessionUUID)
-	keeper.land(parkSocket(ws, sessionUUID, maxAge))
+	keeper.land(parkSocket(ws, sessionUUID, dialedAt, maxAge))
 	return nil
 }
 
@@ -447,13 +449,15 @@ func (keeper *warmSocketKeeper) awaitRefill(ctx context.Context, arrival chan *w
 
 // connOpening wraps ws as a connection's first websocket and plays the connection's opening on
 // it. sessionUUID names the session a pre-selected socket already holds; empty for a fresh dial.
-type connOpening func(ws WSConn, sessionUUID string) (*adbConn, error)
+// openedAt is when ws was dialed, a parked socket's by the keeper, so the connection counts the
+// socket's whole life from it.
+type connOpening func(ws WSConn, sessionUUID string, openedAt time.Time) (*adbConn, error)
 
 // openConn plays opening on the socket take hands out, else on a fresh adb-route dial. A failed
 // first Send on the taken socket put nothing on the wire, so the opening moves to a fresh dial
-// once. After a Send succeeds nothing is sent again: the server may have acted on it. A ctx
-// dead on entry returns its error, as a dial would, and leaves the slot alone. A failed dial is
-// a dialFailure. Nil-safe: without a keeper it dials.
+// once, counted from that dial. After a Send succeeds nothing is sent again: the server may have
+// acted on it. A ctx dead on entry returns its error, as a dial would, and leaves the slot alone.
+// A failed dial is a dialFailure. Nil-safe: without a keeper it dials.
 func (keeper *warmSocketKeeper) openConn(ctx context.Context, dialer *WSDialer, endpoint string,
 	opening connOpening) (*adbConn, error) {
 	if err := ctx.Err(); err != nil {
@@ -468,15 +472,16 @@ func (keeper *warmSocketKeeper) openConn(ctx context.Context, dialer *WSDialer, 
 	}
 	if socket != nil {
 		keeper.cfg.logger.Debug("took the parked adb websocket", "device", keeper.arn, "session", socket.sessionUUID)
-		conn, err := opening(socket, socket.sessionUUID)
+		conn, err := opening(socket, socket.sessionUUID, socket.dialedAt)
 		if err == nil || !socket.firstSendFailed() {
 			return conn, err
 		}
 		keeper.cfg.logger.Debug("the parked adb websocket failed its first send; dialing a fresh one", "error", err)
 	}
+	dialedAt := time.Now()
 	ws, err := dialer.Dial(ctx, endpoint, RouteAdb)
 	if err != nil {
 		return nil, &dialFailure{cause: err}
 	}
-	return opening(ws, "")
+	return opening(ws, "", dialedAt)
 }

@@ -252,6 +252,7 @@ func refillRequested(keeper *warmSocketKeeper) bool {
 type openedSocket struct {
 	ws          WSConn
 	sessionUUID string
+	openedAt    time.Time
 	err         error
 }
 
@@ -260,8 +261,8 @@ type openedSocket struct {
 func openThrough(keeper *warmSocketKeeper, endpoint string) openedSocket {
 	var opened openedSocket
 	_, opened.err = keeper.openConn(context.Background(), newTestDialer(testWait), endpoint,
-		func(ws WSConn, sessionUUID string) (*adbConn, error) {
-			opened.ws, opened.sessionUUID = ws, sessionUUID
+		func(ws WSConn, sessionUUID string, openedAt time.Time) (*adbConn, error) {
+			opened.ws, opened.sessionUUID, opened.openedAt = ws, sessionUUID, openedAt
 			return nil, nil
 		})
 	return opened
@@ -279,7 +280,7 @@ func mustOpenThrough(t *testing.T, keeper *warmSocketKeeper, endpoint string) op
 
 func TestGivenAParkedSocketWhenReadThenItsFirstReceiveIsTheReadStartedAtPark(t *testing.T) {
 	raw := newFakeWS()
-	socket := parkSocket(raw, parkedSessionUUID, warmInterval)
+	socket := parkSocket(raw, parkedSessionUUID, time.Now(), warmInterval)
 	require.False(t, socket.ended(), "an unread parked socket has not ended")
 
 	raw.reads <- receivedMessage{message: []byte("first")}
@@ -295,7 +296,7 @@ func TestGivenAParkedSocketWhenReadThenItsFirstReceiveIsTheReadStartedAtPark(t *
 
 func TestGivenAParkedSocketTheServerClosedWhenTakenThenItIsClosedAndNoRefillIsAsked(t *testing.T) {
 	raw := newFakeWS()
-	socket := parkSocket(raw, parkedSessionUUID, warmInterval)
+	socket := parkSocket(raw, parkedSessionUUID, time.Now(), warmInterval)
 	raw.reads <- receivedMessage{err: errors.New("EOF")}
 	require.Eventually(t, socket.ended, testWait, notifierPoll, "a server close must end the parked socket")
 	keeper := keeperHolding(socket)
@@ -321,9 +322,9 @@ func TestGivenAParkedSocketPastItsAgeWhenTakenThenItIsClosedAndTheSlotRefills(t 
 		t.Run(testCase.name, func(t *testing.T) {
 			// The pending read never returns, as after a suspend that killed the path unseen.
 			raw := newFakeWS()
-			socket := parkSocket(raw, parkedSessionUUID, testCase.maxAge)
-			socket.parkedWall = socket.parkedWall.Add(-testCase.wallShift)
-			socket.parkedAt = socket.parkedAt.Add(-testCase.monotonicShift)
+			socket := parkSocket(raw, parkedSessionUUID, time.Now(), testCase.maxAge)
+			socket.dialedWall = socket.dialedWall.Add(-testCase.wallShift)
+			socket.dialedAt = socket.dialedAt.Add(-testCase.monotonicShift)
 			keeper := keeperHolding(socket)
 
 			assert.Nil(t, keeper.take(context.Background()), "the caller dials its own")
@@ -337,22 +338,35 @@ func TestGivenNoKeeperWhenAConnectionOpensThenItDials(t *testing.T) {
 	var keeper *warmSocketKeeper
 	mock := testsupport.NewSessionEchoWSS(t)
 
+	beforeDial := time.Now()
 	opened := mustOpenThrough(t, keeper, mock.URL)
 
 	assert.Empty(t, opened.sessionUUID, "a dial holds no session yet")
 	assert.Equal(t, 1, mock.ConnectionsAccepted())
+	assert.False(t, opened.openedAt.Before(beforeDial) || opened.openedAt.After(time.Now()), "a fresh dial's open is its dial start")
+}
+
+func TestGivenAParkedSocketWhenTakenThenTheTakerGetsItsDialStart(t *testing.T) {
+	// The taker counts the socket's life from its dial, so a long park shortens its first cycle.
+	dialedAt := time.Now().Add(-warmInterval / 2)
+	keeper := keeperHolding(parkSocket(newFakeWS(), parkedSessionUUID, dialedAt, warmInterval))
+
+	opened := mustOpenThrough(t, keeper, "wss://127.0.0.1:1/adb")
+
+	assert.Equal(t, parkedSessionUUID, opened.sessionUUID, "the parked socket is the one handed out")
+	assert.True(t, opened.openedAt.Equal(dialedAt), "a taken socket's open is the dial that parked it")
 }
 
 func TestGivenACancelledContextWhenAConnectionOpensThenTheParkedSocketStaysAndNothingDials(t *testing.T) {
 	// A detach cancels a forwarded stream between its endpoint read and the take.
-	socket := parkSocket(newFakeWS(), parkedSessionUUID, warmInterval)
+	socket := parkSocket(newFakeWS(), parkedSessionUUID, time.Now(), warmInterval)
 	keeper := keeperHolding(socket)
 	mock := testsupport.NewSessionEchoWSS(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	openings := 0
 
-	conn, err := keeper.openConn(ctx, newTestDialer(testWait), mock.URL, func(WSConn, string) (*adbConn, error) {
+	conn, err := keeper.openConn(ctx, newTestDialer(testWait), mock.URL, func(WSConn, string, time.Time) (*adbConn, error) {
 		openings++
 		return nil, nil
 	})
@@ -913,9 +927,9 @@ func TestGivenATakenSocketWhoseSendFailsWhenOpenedThenOnlyAFailedFirstSendMovesT
 		t.Run(testCase.name, func(t *testing.T) {
 			raw := &failingSendWS{fakeWS: newFakeWS(), failFrom: testCase.failFrom}
 			mock := testsupport.NewSessionEchoWSS(t)
-			keeper := keeperHolding(parkSocket(raw, parkedSessionUUID, warmInterval))
+			keeper := keeperHolding(parkSocket(raw, parkedSessionUUID, time.Now(), warmInterval))
 			var openedFor []string
-			opening := func(ws WSConn, sessionUUID string) (*adbConn, error) {
+			opening := func(ws WSConn, sessionUUID string, openedAt time.Time) (*adbConn, error) {
 				openedFor = append(openedFor, sessionUUID)
 				for range testCase.wantSends {
 					if err := ws.Send(request); err != nil {
@@ -923,7 +937,7 @@ func TestGivenATakenSocketWhoseSendFailsWhenOpenedThenOnlyAFailedFirstSendMovesT
 						return nil, err
 					}
 				}
-				return newAdbConn(nil, nil, testDeviceARN, RouteAdb, ws, WSRefreshPolicy{}, newActivityTracker(nil),
+				return newAdbConn(nil, nil, testDeviceARN, RouteAdb, ws, openedAt, WSRefreshPolicy{}, newActivityTracker(nil),
 					noopLogger(), withSelectedSession(sessionUUID)), nil
 			}
 
@@ -950,12 +964,12 @@ func TestGivenATakenSocketWhoseSendFailsWhenOpenedThenOnlyAFailedFirstSendMovesT
 
 func TestGivenAFailedFirstSendWhenTheFreshDialFailsThenTheOpeningFailsAsADialFailure(t *testing.T) {
 	raw := &failingSendWS{fakeWS: newFakeWS(), failFrom: 1}
-	keeper := keeperHolding(parkSocket(raw, parkedSessionUUID, warmInterval))
+	keeper := keeperHolding(parkSocket(raw, parkedSessionUUID, time.Now(), warmInterval))
 	unreachable, _ := testsupport.NewAcceptCounter(t)
 	openings := 0
 
 	_, err := keeper.openConn(context.Background(), newTestDialer(testWait), "wss://"+unreachable,
-		func(ws WSConn, _ string) (*adbConn, error) {
+		func(ws WSConn, _ string, _ time.Time) (*adbConn, error) {
 			openings++
 			return nil, ws.Send([]byte(takenService))
 		})
@@ -982,7 +996,7 @@ func (ws *gatedCloseWS) Close() error {
 func TestGivenAStaleSocketClosingWhenTheKeeperRotatesThenItsPreDialStepWaitsForTheClose(t *testing.T) {
 	// At a full server pool a dial that overlaps the stale socket can evict a live connection.
 	raw := &gatedCloseWS{fakeWS: newFakeWS(), closeEntered: make(chan struct{}), closeGate: make(chan struct{})}
-	socket := parkSocket(raw, parkedSessionUUID, warmInterval)
+	socket := parkSocket(raw, parkedSessionUUID, time.Now(), warmInterval)
 	raw.reads <- receivedMessage{err: errors.New("EOF")}
 	require.Eventually(t, socket.ended, testWait, notifierPoll)
 	keeper := keeperHolding(socket)
@@ -1088,7 +1102,7 @@ func TestGivenAParkedSocketWhosePingWriteFailsWhenPingedThenItClosesAndTheTurnEn
 	// The turn's end is where run closes the slot and dials the replacement.
 	raw := newFakeWS()
 	raw.pingErr = errors.New("broken pipe")
-	keeper := pingingKeeperHolding(parkSocket(raw, parkedSessionUUID, warmInterval))
+	keeper := pingingKeeperHolding(parkSocket(raw, parkedSessionUUID, time.Now(), warmInterval))
 	started := time.Now()
 
 	nextTurn := keeper.waitForTurn(context.Background(), warmInterval)
@@ -1101,7 +1115,7 @@ func TestGivenAParkedSocketWhosePingWriteFailsWhenPingedThenItClosesAndTheTurnEn
 
 func TestGivenTheServerClosedAParkedSocketWhenThePingIntervalPassesThenNoPingIsSentAndTheKeeperWaitsForTheRotation(t *testing.T) {
 	raw := newFakeWS()
-	socket := parkSocket(raw, parkedSessionUUID, warmInterval)
+	socket := parkSocket(raw, parkedSessionUUID, time.Now(), warmInterval)
 	raw.reads <- receivedMessage{err: errors.New("EOF")}
 	require.Eventually(t, socket.ended, testWait, notifierPoll, "a server close must end the parked socket")
 	keeper := pingingKeeperHolding(socket)
@@ -1131,7 +1145,7 @@ func TestGivenAMissedPongWhenTheReplacementsPreSelectIsUnansweredThenTheKeeperWa
 func TestGivenASocketTakenBetweenTwoPingsWhenItsPongIsMissingThenTheTakenSocketIsNotClosed(t *testing.T) {
 	raw := newFakeWS()
 	raw.silent = true
-	socket := parkSocket(raw, parkedSessionUUID, warmInterval)
+	socket := parkSocket(raw, parkedSessionUUID, time.Now(), warmInterval)
 	keeper := pingingKeeperHolding(socket)
 	require.False(t, keeper.pingParked(), "the first ping only marks the socket")
 
@@ -1155,7 +1169,7 @@ func (plain *pinglessWS) Close() error             { return plain.ws.Close() }
 
 func TestGivenAParkedSocketThatCannotPingWhenTheIntervalPassesThenItWaitsForTheRotation(t *testing.T) {
 	raw := newFakeWS()
-	socket := parkSocket(&pinglessWS{ws: raw}, parkedSessionUUID, warmInterval)
+	socket := parkSocket(&pinglessWS{ws: raw}, parkedSessionUUID, time.Now(), warmInterval)
 	keeper := pingingKeeperHolding(socket)
 
 	assert.False(t, keeper.pingParked())
