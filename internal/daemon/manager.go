@@ -45,9 +45,9 @@ const (
 	killTimeout         = 2 * time.Second
 )
 
-// resolveTimeout bounds one session lookup (GetRemoteAccessSession with its retries) on
-// refresh, and the add's lookups (up to two), serial fetch and status read. The SDK's retry budget
-// caps attempts, not wall time, and add runs on the inline control loop, so a stalled step would
+// resolveTimeout bounds what a client waits on: the add's lookups (up to two), serial fetch and
+// status read, and the lookup after a refused adb connection. The SDK's retry budget caps
+// attempts, not wall time, and add runs on the inline control loop, so a stalled step would
 // wedge every later control command. It sits below the control channel's deadline so a slow
 // step surfaces as an add error to the CLI, not a dead socket. A var so tests can shrink it.
 var resolveTimeout = 8 * time.Second
@@ -56,6 +56,11 @@ var resolveTimeout = 8 * time.Second
 // resolveTimeout, so a silent status route still leaves the add under the control deadline.
 // A var so tests can shrink it.
 var sessionStatusTimeout = 2 * time.Second
+
+// refreshLookupTimeout bounds the refresh tick's lookup. No client waits on a tick, so it
+// gets the whole renew margin: room for the SDK's spaced retries after a throttle, and the
+// stored URL outlives the tick. A var so tests can shrink it.
+var refreshLookupTimeout = config.EndpointRenewMargin
 
 // spawnDaemon launches the detached daemon child and returns its process handle and
 // a channel that closes when the child exits. A package var: a test fake can play
@@ -533,6 +538,12 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 				// The log names the step; the reply gets the session error alone.
 				m.logger.Warn("failed to attach the device on add",
 					"error", fmt.Errorf("resolve session: %w", err), "arn", req.ARN)
+				// The SDK's retries after a throttle can outlive the bound, and its canceled
+				// backoff drops the throttle text, so the reply words the timeout. The daemon's
+				// own end is not a timeout: that lookup keeps its error.
+				if resolveCtx.Err() != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+					return refusedReply(m.lookupTimedOut(req.ARN))
+				}
 				return refusedReply(failure.WithFix(err, m.addFix(err, req.ARN)))
 			}
 			// Defense in depth, as the Set branch: an attach that landed during the
@@ -671,12 +682,13 @@ func (m *DaemonManager) resolveForAttach(ctx context.Context,
 	return resolved, resolved.ReturnedARN(askedARN), nil
 }
 
-// lookUpSession resolves sessionARN under resolveTimeout and judges the answer for the attached
+// lookUpSession resolves sessionARN under timeout and judges the answer for the attached
 // device: a RUNNING session carries its renewed endpoint; a failure carries the one-line reason
 // the user gets and whether the session is gone for good (see detachReason). The refresh tick
-// and the refusal handler share it, and differ only in what they do with a kept device.
-func (m *DaemonManager) lookUpSession(ctx context.Context, sessionARN string) (bridge.SessionVerdict, error) {
-	resolveCtx, cancel := context.WithTimeout(ctx, resolveTimeout)
+// and the refusal handler share it; each picks its bound and what it does with a kept device.
+func (m *DaemonManager) lookUpSession(ctx context.Context, sessionARN string,
+	timeout time.Duration) (bridge.SessionVerdict, error) {
+	resolveCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	resolved, err := m.remoteAccessClient.GetSession(resolveCtx, sessionARN)
 	if err != nil {
@@ -713,6 +725,13 @@ func (manager *DaemonManager) quotedRestart(sessionARN string) string {
 // doctorCommand is the doctor run for sessionARN on this bridge's port and listen address.
 func (manager *DaemonManager) doctorCommand(sessionARN string) string {
 	return DoctorCommand(manager.config.ListenAddr, manager.config.ListenPort, sessionARN)
+}
+
+// lookupTimedOut refuses an add of sessionARN whose session lookup resolveTimeout ended. The next
+// try may work, so the fix is the one for a connection that ran out of time.
+func (manager *DaemonManager) lookupTimedOut(sessionARN string) error {
+	return failure.WithFix(fmt.Errorf(wording.RefusalLookupTimeoutFormat, resolveTimeout),
+		fmt.Sprintf(wording.FixRetryThenDoctorFormat, sessionARN, manager.doctorCommand(sessionARN)))
 }
 
 // addFix is the fix for an add whose ARN or session lookup failed, by the error's class. The
@@ -845,7 +864,7 @@ func endedState(err error) string {
 // of another refused behind it, which gets the same reason.
 func (m *DaemonManager) refusalHandler(ctx context.Context) bridge.RefusalHandler {
 	return func(sessionARN string) bridge.SessionVerdict {
-		verdict, err := m.lookUpSession(ctx, sessionARN)
+		verdict, err := m.lookUpSession(ctx, sessionARN, resolveTimeout)
 		switch {
 		case err == nil:
 			m.logger.Info("a refused adb connection found the session running; endpoint refreshed", "arn", sessionARN)
@@ -859,10 +878,10 @@ func (m *DaemonManager) refusalHandler(ctx context.Context) bridge.RefusalHandle
 }
 
 // refreshEndpointOnce performs a single refresh: if a device is attached, it
-// re-resolves the session and updates the stored endpoint in place. Any error the
-// SDK surfaces after its retry budget detaches the device: its session can no
-// longer be resolved, so the stored endpoint is about to lapse (the URL is
-// valid ~5 min, one refresh interval away) and every later dial would fail.
+// re-resolves the session under refreshLookupTimeout and updates the stored endpoint
+// in place. An error past the SDK's retry budget or that bound detaches the device:
+// its session cannot be resolved, so the stored endpoint lapses before the next tick
+// and every later dial fails.
 // Detaching on the first failed tick rather than tolerating a few (a credential
 // expiry mid-session, e.g. ambient temporary credentials lapsing, presents this
 // way) is the deliberate trade-off: surface a dead session promptly for a
@@ -878,7 +897,7 @@ func (m *DaemonManager) refreshEndpointOnce(ctx context.Context, device *bridge.
 		return false
 	}
 
-	verdict, err := m.lookUpSession(ctx, current.ARN)
+	verdict, err := m.lookUpSession(ctx, current.ARN, refreshLookupTimeout)
 	if err != nil {
 		// Do not detach on a cancelled context: that is the daemon shutting down,
 		// not a dead session, and the device state is about to be torn down anyway.

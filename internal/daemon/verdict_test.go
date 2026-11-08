@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -103,6 +104,22 @@ func TestGivenTheRefusalHandlerWhenTheSessionResolvesOrFailsThenTheVerdictCarrie
 	assert.False(t, kept.Detach, "a network failure keeps the device")
 	assert.Empty(t, kept.Endpoint, "and renews nothing")
 	assert.Equal(t, []string{verdictARN, verdictARN, verdictARN}, client.resolvedARNs())
+}
+
+func TestGivenALookupSlowerThanTheAttachBoundWhenTheRefusalHandlerRunsThenTheDeviceIsKeptAndNothingRenewed(t *testing.T) {
+	// An adb client waits on this lookup, so it keeps the attach bound, not the refresh tick's.
+	// The fake never answers in time: the attach bound must end the lookup.
+	shrinkLookupBounds(t, 50*time.Millisecond, time.Minute)
+	client := newFakeClient(testEndpointRenewed, "Pixel 10 (OS 17)")
+	client.delayAnswersBy(time.Minute)
+	manager := newTestManagerWithClient(t, config.Default(), client)
+	started := time.Now()
+
+	verdict := manager.refusalHandler(context.Background())(verdictARN)
+
+	assert.Less(t, time.Since(started), 10*time.Second, "the attach bound ends the lookup, not the refresh bound")
+	assert.False(t, verdict.Detach, "a lookup that ran out of time keeps the device")
+	assert.Empty(t, verdict.Endpoint, "and renews nothing: the fake's late answer never arrived")
 }
 
 func TestGivenACancelledDaemonWhenTheRefusalHandlerRunsThenTheDeviceIsKept(t *testing.T) {

@@ -194,9 +194,7 @@ func (s *controlHandlerSuite) TestSerialFetchHangsAddFailsAtTheResolveTimeoutAnd
 		OnMessage: func(_ *testsupport.MockSession, _ []byte) []byte { return nil },
 	})
 	s.client.set(silent.URL, nil)
-	previous := resolveTimeout
-	resolveTimeout = 200 * time.Millisecond
-	s.T().Cleanup(func() { resolveTimeout = previous })
+	shrinkLookupBounds(s.T(), 200*time.Millisecond, refreshLookupTimeout)
 	started := time.Now()
 
 	resp := s.handler(addReq(testSessionArnOne))
@@ -205,6 +203,38 @@ func (s *controlHandlerSuite) TestSerialFetchHangsAddFailsAtTheResolveTimeoutAnd
 	s.Equal("the attach ran out of time before the device answered", resp.Error)
 	s.Equal([]string{fixRetryThenDoctor}, resp.Fixes)
 	s.Less(time.Since(started), 2*time.Second, "the add must end at resolveTimeout, not at the reply timeout")
+	_, present := s.device.Current()
+	s.False(present)
+}
+
+func (s *controlHandlerSuite) TestSessionLookupOutlivesTheResolveTimeoutAddFailsWithTheTimeoutCauseAndTheRetryFix() {
+	// The SDK's retries under a throttle can outlive the attach bound, and its canceled backoff
+	// drops the throttle text, so the add words the timeout for the user, inside the bound.
+	shrinkLookupBounds(s.T(), 200*time.Millisecond, refreshLookupTimeout)
+	s.client.delayAnswersBy(time.Minute)
+	started := time.Now()
+
+	resp := s.handler(addReq(testSessionArnOne))
+
+	s.False(resp.OK, "a lookup past the bound must fail the add")
+	s.Equal("Device Farm did not answer the session lookup within 200ms", resp.Error)
+	s.Equal([]string{fixRetryThenDoctor}, resp.Fixes)
+	s.Less(time.Since(started), 10*time.Second, "the add ends at resolveTimeout, not at the fake's delay")
+	_, present := s.device.Current()
+	s.False(present)
+}
+
+func (s *controlHandlerSuite) TestDaemonShutdownDuringTheLookupAddFailsWithoutTheTimeoutWording() {
+	// A lookup the daemon context ends is a shutdown, not a timeout: the raw error stays.
+	s.client.delayAnswersBy(time.Minute)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	handler := s.mgr.controlHandler(ctx, s.device, s.dialer, func() {})
+
+	resp := handler(addReq(testSessionArnOne))
+
+	s.False(resp.OK)
+	s.Equal("context canceled", resp.Error)
 	_, present := s.device.Current()
 	s.False(present)
 }

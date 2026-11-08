@@ -40,13 +40,16 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
-// maxRetryAttempts caps how many times the SDK tries GetRemoteAccessSession
-// before returning an error. The daemon resolves synchronously on attach (a user
-// is waiting on the control channel) and again on every refresh tick, so the
-// budget is kept small: two attempts smooths a single transient blip without
-// letting a persistent outage stall the attach for long. Any error the SDK
-// surfaces after this budget causes the daemon to detach the device.
-const maxRetryAttempts = 2
+// maxRetryAttempts caps the SDK's GetRemoteAccessSession attempts. The daemon looks a
+// session up on attach and on every refresh tick, and those lookups share the account's
+// API rate with every other caller, so the service may throttle one. The adaptive mode
+// spaces the retries and slows the client after a throttle, so the budget must outlast
+// a throttled burst. Four attempts always fit the refresh lookup's bound: three backoff
+// sleeps of up to 2, 4 and 8 s plus the adaptive token waits sit inside the renew margin,
+// and the typical case fits the attach bound too; a fifth attempt would run only when
+// the sleeps come up short. The caller bounds wall time. An error past the budget
+// detaches the device.
+const maxRetryAttempts = 4
 
 // clientRegion is the region the Device Farm client is built for. Device Farm's
 // remote access control plane is only offered in us-west-2 today, so every
@@ -228,6 +231,13 @@ type awsRemoteAccessClient struct {
 // first use, so an absent credential chain does not fail here; a malformed profile
 // or AWS_* value still does. A nil logger defaults to slog.Default.
 func NewRemoteAccessClient(ctx context.Context, logger *slog.Logger) (RemoteAccessClient, error) {
+	return newRemoteAccessClient(ctx, logger)
+}
+
+// newRemoteAccessClient backs NewRemoteAccessClient. Only tests pass clientOptions, to
+// strip the retryer's waits; maxRetryAttempts still wraps any retryer they set.
+func newRemoteAccessClient(ctx context.Context, logger *slog.Logger,
+	clientOptions ...func(*devicefarm.Options)) (RemoteAccessClient, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -235,7 +245,7 @@ func NewRemoteAccessClient(ctx context.Context, logger *slog.Logger) (RemoteAcce
 	if err != nil {
 		return nil, err
 	}
-	return awsRemoteAccessClient{getter: devicefarm.NewFromConfig(cfg), logger: logger}, nil
+	return awsRemoteAccessClient{getter: devicefarm.NewFromConfig(cfg, clientOptions...), logger: logger}, nil
 }
 
 // loadConfig is the AWS config the Device Farm client and ResolveCredentials share.
