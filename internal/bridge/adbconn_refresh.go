@@ -26,9 +26,10 @@ var errReattachIndeterminate = errors.New("reattach outcome is indeterminate")
 // errAdbConnClosed means the connection has been torn down.
 var errAdbConnClosed = errors.New("adb connection is closed")
 
-// attachAttempts is one attempt plus one retry. Retrying harder just stalls the adb
-// client, since each attempt carries its own timeout.
-const attachAttempts = 2
+// AttachAttempts is one attempt plus one retry. Retrying harder just stalls the adb
+// client, since each attempt carries its own timeout. Exported: the config's Validate
+// counts it into a websocket's longest life.
+const AttachAttempts = 2
 
 // startRefreshLocked moves the machine into phaseRefreshing and arms the outcome
 // channels; exactly one of the two must be closed later. Caller holds the seam.
@@ -42,11 +43,12 @@ func (c *adbConn) startRefreshLocked() (sessionUUID string, nextReady, refreshFa
 // enterDrainingLocked publishes successor as the write target and starts the
 // predecessor's drain; reads move over when it ends (commitSwap). Caller holds the seam;
 // releases it.
-func (c *adbConn) enterDrainingLocked(successor WSConn, nextReady chan struct{}) {
+func (c *adbConn) enterDrainingLocked(successor WSConn, openedAt time.Time, nextReady chan struct{}) {
 	c.next = successor
 	// The predecessor can no longer carry writes (superseded or refused), so the
 	// outbound direction moves immediately even though reads stay on it.
 	c.writeTo = successor
+	c.openedAt = openedAt
 	c.phase = phaseDraining
 	c.consecutiveFailures = 0
 	c.drainingSince = time.Now()
@@ -81,7 +83,7 @@ func (c *adbConn) refresh(ctx context.Context, gate func() bool) error {
 	sessionUUID, nextReady, refreshFailed := c.startRefreshLocked()
 
 	// Lock still held: everything up to the publish below is inside the fence.
-	successor, err := c.attachSuccessorRetrying(ctx, sessionUUID)
+	successor, openedAt, err := c.attachSuccessorRetrying(ctx, sessionUUID)
 	if err != nil {
 		// Teardown first: see unwindIfClosedLocked.
 		if c.unwindIfClosedLocked(successor, refreshFailed) {
@@ -120,7 +122,7 @@ func (c *adbConn) refresh(ctx context.Context, gate func() bool) error {
 		return errAdbConnClosed
 	}
 
-	c.enterDrainingLocked(successor, nextReady)
+	c.enterDrainingLocked(successor, openedAt, nextReady)
 	return nil
 }
 
@@ -130,14 +132,15 @@ func (c *adbConn) refresh(ctx context.Context, gate func() bool) error {
 //
 // Indeterminacy is sticky. Once a UUID goes out unacked, a later refusal proves only that
 // that attempt did not take over, so it is re-wrapped.
-func (c *adbConn) attachSuccessorRetrying(ctx context.Context, sessionUUID string) (WSConn, error) {
+func (c *adbConn) attachSuccessorRetrying(ctx context.Context, sessionUUID string) (WSConn, time.Time, error) {
 	var err error
 	indeterminate := false
-	for attempt := 1; attempt <= attachAttempts; attempt++ {
+	for attempt := 1; attempt <= AttachAttempts; attempt++ {
 		var successor WSConn
-		successor, err = c.attachSuccessor(ctx, sessionUUID)
+		var openedAt time.Time
+		successor, openedAt, err = c.attachSuccessor(ctx, sessionUUID)
 		if err == nil {
-			return successor, nil
+			return successor, openedAt, nil
 		}
 		if errors.Is(err, errReattachIndeterminate) {
 			indeterminate = true
@@ -145,18 +148,18 @@ func (c *adbConn) attachSuccessorRetrying(ctx context.Context, sessionUUID strin
 		// Retry only failures a second try could answer differently. A cancelled ctx needs no
 		// check: the next dial fails at once.
 		if errors.Is(err, ErrSessionGone) || errors.Is(err, errAdbConnClosed) {
-			return nil, keepIndeterminateTaint(indeterminate, err)
+			return nil, time.Time{}, keepIndeterminateTaint(indeterminate, err)
 		}
 		if _, stopping := c.device.detachIfSessionStopping(c.arn, err); stopping {
-			return nil, keepIndeterminateTaint(indeterminate, err)
+			return nil, time.Time{}, keepIndeterminateTaint(indeterminate, err)
 		}
-		if attempt < attachAttempts {
+		if attempt < AttachAttempts {
 			c.logger.Debug("retrying the websocket attach once",
 				"session", sessionUUID, "attempt", attempt, "error", err)
 		}
 	}
-	return nil, keepIndeterminateTaint(indeterminate,
-		fmt.Errorf("attach a successor websocket after %d attempts: %w", attachAttempts, err))
+	return nil, time.Time{}, keepIndeterminateTaint(indeterminate,
+		fmt.Errorf("attach a successor websocket after %d attempts: %w", AttachAttempts, err))
 }
 
 // keepIndeterminateTaint re-wraps err when an earlier attempt left a UUID unacked. Without
@@ -172,33 +175,34 @@ func keepIndeterminateTaint(indeterminate bool, err error) error {
 // attachSuccessor dials a websocket, sends the session UUID as its whole first
 // message, and requires a matching reattach ack. On any failure it closes the
 // websocket it dialed, so a caller never inherits a half-attached one.
-func (c *adbConn) attachSuccessor(ctx context.Context, sessionUUID string) (WSConn, error) {
+func (c *adbConn) attachSuccessor(ctx context.Context, sessionUUID string) (WSConn, time.Time, error) {
 	// Teardown first: a latched Close must cost no upgrade. register below catches a Close
 	// that lands mid-dial.
 	if c.isClosed() {
-		return nil, errAdbConnClosed
+		return nil, time.Time{}, errAdbConnClosed
 	}
 	// Re-read per attempt: the daemon renews the endpoint every few minutes, and a
 	// swap must dial the current one. A miss means the device is gone, so the caller
 	// unwinds like any other attach failure.
 	endpoint, ok := c.device.EndpointFor(c.arn)
 	if !ok {
-		return nil, errAdbConnClosed
+		return nil, time.Time{}, errAdbConnClosed
 	}
 
+	openedAt := time.Now()
 	successor, err := c.dialer.Dial(ctx, endpoint, c.route)
 	if err != nil {
-		return nil, fmt.Errorf("dial successor websocket: %w", err)
+		return nil, time.Time{}, fmt.Errorf("dial successor websocket: %w", err)
 	}
 	if !c.sockets.register(successor) {
 		successor.Close()
-		return nil, errAdbConnClosed
+		return nil, time.Time{}, errAdbConnClosed
 	}
 
 	// The UUID as its own whole message: that framing is the reconnect signal.
 	if err := successor.Send([]byte(sessionUUID)); err != nil {
 		c.sockets.forget(successor)
-		return nil, fmt.Errorf("send session uuid: %w", err)
+		return nil, time.Time{}, fmt.Errorf("send session uuid: %w", err)
 	}
 
 	// The UUID is on the wire, so every failure below is indeterminate. Only an explicit
@@ -206,24 +210,24 @@ func (c *adbConn) attachSuccessor(ctx context.Context, sessionUUID string) (WSCo
 	frame, err := readControlFrameWithin(successor, c.policy.ReattachTimeout)
 	if err != nil {
 		c.sockets.forget(successor)
-		return nil, fmt.Errorf("read reattach ack: %w: %w", errReattachIndeterminate, err)
+		return nil, time.Time{}, fmt.Errorf("read reattach ack: %w: %w", errReattachIndeterminate, err)
 	}
 
 	switch frame.arm {
 	case armReattach:
 		if frame.payload != sessionUUID {
 			c.sockets.forget(successor)
-			return nil, fmt.Errorf("%w: reattach ack names session %q, expected %q",
+			return nil, time.Time{}, fmt.Errorf("%w: reattach ack names session %q, expected %q",
 				errReattachIndeterminate, frame.payload, sessionUUID)
 		}
-		return successor, nil
+		return successor, openedAt, nil
 	case armError:
 		// The one determinate failure: refused outright, so nothing switched.
 		c.sockets.forget(successor)
-		return nil, fmt.Errorf("%w: %s", ErrSessionGone, frame.payload)
+		return nil, time.Time{}, fmt.Errorf("%w: %s", ErrSessionGone, frame.payload)
 	default:
 		c.sockets.forget(successor)
-		return nil, fmt.Errorf("%w: unexpected control frame %s acking a reattach",
+		return nil, time.Time{}, fmt.Errorf("%w: unexpected control frame %s acking a reattach",
 			errReattachIndeterminate, frame.arm)
 	}
 }
@@ -276,6 +280,7 @@ func (c *adbConn) restartAsNewSessionLocked(ctx context.Context, nextReady, refr
 		return errAdbConnClosed
 	}
 
+	openedAt := time.Now()
 	successor, err := c.dialer.Dial(ctx, endpoint, c.route)
 	if err != nil {
 		// Teardown first. Nothing to discard: the dial is what failed.
@@ -299,7 +304,7 @@ func (c *adbConn) restartAsNewSessionLocked(ctx context.Context, nextReady, refr
 	// session's own control frame instead of forwarding it to the adb client.
 	c.nextNeedsHandshake = true
 	predecessor := c.readFrom
-	c.enterDrainingLocked(successor, nextReady)
+	c.enterDrainingLocked(successor, openedAt, nextReady)
 
 	// The client must close the predecessor: the server refused the reattach, so it will
 	// never cut this websocket and the parked reader would wait forever.
@@ -322,7 +327,7 @@ func (c *adbConn) unwindIfClosedLocked(successor WSConn, refreshFailed chan stru
 
 // failRefreshLocked returns to steady state after a failed refresh, counts the failure, and
 // releases any parked reader. The predecessor stays in service. It does not re-arm
-// readSince; wsDeadline budgets for that. Called with the seam held; releases it.
+// readSince; WSDeadline budgets for that. Called with the seam held; releases it.
 func (c *adbConn) failRefreshLocked(refreshFailed chan struct{}) {
 	if c.phase == phaseRefreshing {
 		c.phase = phaseSteady
@@ -375,7 +380,7 @@ func (c *adbConn) reconnectReactively(readErr error) bool {
 
 	// Lock held across the dial and ack, as in refresh, so a Send waits instead of failing
 	// mid-recovery.
-	successor, err := c.attachSuccessorRetrying(ctx, sessionUUID)
+	successor, openedAt, err := c.attachSuccessorRetrying(ctx, sessionUUID)
 	if err != nil {
 		// Teardown first, as in refresh: a Close mid-attach is no failure to warn about.
 		if c.unwindIfClosedLocked(successor, refreshFailed) {
@@ -401,7 +406,8 @@ func (c *adbConn) reconnectReactively(readErr error) bool {
 	}
 	dead := c.readFrom
 	c.readFrom = successor
-	c.readSince = time.Now()
+	c.readSince = openedAt
+	c.openedAt = openedAt
 	c.writeTo = successor
 	c.phase = phaseSteady
 	c.consecutiveFailures = 0

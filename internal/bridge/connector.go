@@ -48,13 +48,14 @@ func openConnector(ctx context.Context, cfg *featureConfig, device *ActiveDevice
 	if !ok {
 		return fmt.Errorf("%w: the device detached before the connector opened", errAdbConnClosed)
 	}
+	openedAt := time.Now()
 	ws, err := cfg.dialer.Dial(ctx, endpoint, RouteAdbReverse)
 	if err != nil {
 		return fmt.Errorf("dial the connector websocket: %w", err)
 	}
 	// Wrap before sending anything: only this reader reads the session control frame. Its tracker
 	// is fresh, not shared, so only this connection's writes gate its swap.
-	stream := newAdbConn(cfg.dialer, device, arn, RouteAdbReverse, ws, cfg.policy,
+	stream := newAdbConn(cfg.dialer, device, arn, RouteAdbReverse, ws, openedAt, cfg.policy,
 		newActivityTracker(nil), cfg.logger, withTerminalSessionGone())
 	// Every failure past here closes what it opened, so the device's connection ends with the
 	// websocket rather than waiting behind a half-spliced one.

@@ -57,13 +57,21 @@ func newTestAdbConn(t *testing.T, endpoint string, policy WSRefreshPolicy) *adbC
 func newTestAdbConnOnRoute(t *testing.T, endpoint string, policy WSRefreshPolicy, route Route,
 	logger *slog.Logger) *adbConn {
 	t.Helper()
+	return dialTestAdbConn(t, endpoint, policy, route, logger, time.Now())
+}
+
+// dialTestAdbConn is newTestAdbConnOnRoute with the websocket's dial time set by the caller,
+// as for a socket that waited parked before it was taken.
+func dialTestAdbConn(t *testing.T, endpoint string, policy WSRefreshPolicy, route Route,
+	logger *slog.Logger, openedAt time.Time) *adbConn {
+	t.Helper()
 	device := NewActiveDevice()
 	require.True(t, device.Set(DeviceInfo{ARN: testDeviceARN, Endpoint: endpoint, Label: "test-device"}))
 	dialer := newTestDialer(testTimeout)
 	ws, err := dialer.Dial(context.Background(), endpoint, route)
 	require.NoError(t, err)
 
-	conn := newAdbConn(dialer, device, testDeviceARN, route, ws, policy, newActivityTracker(nil), logger)
+	conn := newAdbConn(dialer, device, testDeviceARN, route, ws, openedAt, policy, newActivityTracker(nil), logger)
 	t.Cleanup(func() { conn.Close() })
 	return conn
 }
@@ -180,6 +188,70 @@ func TestGivenIdleConnectionWhenRefreshDueThenSwapsOnTheQuietWindow(t *testing.T
 
 	assert.Equal(t, sessionUUID, conn.sessionUUID(), "a refresh must resume the SAME session, not open a new one")
 	assert.Equal(t, 1, mock.SessionsOpened(), "a refresh must not mint a second session")
+}
+
+func TestGivenASlowReattachAckWhenTheSwapCommitsThenBothClocksAnchorAtTheSuccessorsDial(t *testing.T) {
+	// The successor's life starts at its dial; an ack that arrives late must not extend it.
+	const ackDelay = 300 * time.Millisecond
+	mock := testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{
+		CleanCutDelay: 20 * time.Millisecond, ReattachAckDelay: ackDelay})
+	conn := newTestAdbConn(t, mock.URL, fastPolicy())
+	handshake(t, conn)
+	go drainReceives(conn)
+
+	beforeDial := time.Now()
+	require.NoError(t, conn.refresh(context.Background(), nil))
+	published := time.Now()
+
+	openedAt := conn.writeOpenedAt()
+	assert.False(t, openedAt.Before(beforeDial), "the anchor is this swap's dial, not an earlier one")
+	assert.GreaterOrEqual(t, published.Sub(openedAt), ackDelay,
+		"the cycle must count from the dial, not from the ack")
+	waitFor(t, func() bool {
+		conn.seam.RLock()
+		defer conn.seam.RUnlock()
+		return conn.phase == phaseSteady
+	}, "the swap never committed")
+	conn.seam.RLock()
+	defer conn.seam.RUnlock()
+	assert.True(t, conn.readSince.Equal(conn.openedAt), "the deadline clock must anchor at the same dial")
+}
+
+func TestGivenAWebsocketOpenedBeforeTheRefresherStartsWhenItRunsThenTheFirstCycleCountsFromTheOpen(t *testing.T) {
+	// An adopted warm socket arrives already aged: its first interval is the remainder, and
+	// an age at or past the interval hunts at once.
+	policy := fastPolicy()
+	policy.Interval = 2 * time.Second
+	tests := []struct {
+		name    string
+		openAge time.Duration
+		// swapBy bounds the wait from the refresher's start; a whole interval would mean the
+		// age was ignored.
+		swapBy time.Duration
+	}{
+		{name: "aged most of the interval swaps after the remainder", openAge: 1500 * time.Millisecond, swapBy: 1500 * time.Millisecond},
+		{name: "aged past the interval swaps at once", openAge: 10 * time.Second, swapBy: time.Second},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{CleanCutDelay: 20 * time.Millisecond})
+			openedAt := time.Now().Add(-tc.openAge)
+			conn := dialTestAdbConn(t, mock.URL, policy, RouteAdb, noopLogger(), openedAt)
+			handshake(t, conn)
+			go drainReceives(conn)
+			stop := make(chan struct{})
+			defer close(stop)
+
+			started := time.Now()
+			go runRefresher(context.Background(), conn, policy, stop)
+			waitFor(t, func() bool { return mock.Reattaches() >= 1 }, "the aged websocket never swapped")
+			swapped := time.Now()
+
+			assert.GreaterOrEqual(t, swapped.Sub(openedAt), policy.Interval, "the interval is honored from the dial")
+			assert.Less(t, swapped.Sub(started), tc.swapBy, "the age at the dial must shorten the first interval")
+		})
+	}
 }
 
 func TestGivenConstantTrafficWhenRefreshDueThenSwapsOnlyAfterTheFreeSecondWait(t *testing.T) {
@@ -859,6 +931,7 @@ func TestGivenUnexpectedWebsocketFailureWhenReadingThenSessionResumesReactively(
 	conn.seam.RLock()
 	current := conn.readFrom
 	conn.seam.RUnlock()
+	killed := time.Now()
 	current.Close()
 
 	// Receive detects the dead socket and resumes, so the reader must drive recovery.
@@ -885,6 +958,10 @@ func TestGivenUnexpectedWebsocketFailureWhenReadingThenSessionResumesReactively(
 	assert.Equal(t, sessionUUID, conn.sessionUUID(), "the reactive reconnect must resume the same session")
 	assert.GreaterOrEqual(t, mock.Reattaches(), 1)
 	assert.Equal(t, 1, mock.SessionsOpened(), "resuming must not mint a new session")
+	conn.seam.RLock()
+	defer conn.seam.RUnlock()
+	assert.False(t, conn.openedAt.Before(killed), "the resumed websocket's clocks start at its own dial")
+	assert.True(t, conn.readSince.Equal(conn.openedAt), "both clocks anchor at that dial")
 }
 
 func TestGivenTransientlyDroppedReconnectWhenResumingThenItRetriesOnceAndSucceeds(t *testing.T) {
@@ -1830,7 +1907,7 @@ func TestGivenABlockedSendWhenQuietForIsReadThenTheConnectionCountsAsActive(t *t
 		return clock.now()
 	})
 	conn := newAdbConn(newTestDialer(time.Second), NewActiveDevice(), testDeviceARN, RouteAdb, socket,
-		fastPolicy(), activity, noopLogger())
+		time.Now(), fastPolicy(), activity, noopLogger())
 
 	sendReturned := make(chan error, 1)
 	go func() { sendReturned <- conn.Send([]byte("000chost:version")) }()
@@ -1864,7 +1941,7 @@ func TestGivenASuccessorWhoseSendBlocksWhenTheRefresherDecidesInPhaseDrainingThe
 	successor := &blockingWSConn{entered: make(chan struct{}, 1), release: make(chan struct{})}
 	t.Cleanup(func() { close(successor.release) })
 	policy := fastPolicy()
-	conn := newAdbConn(newTestDialer(testTimeout), NewActiveDevice(), testDeviceARN, RouteAdb, predecessor,
+	conn := newAdbConn(newTestDialer(testTimeout), NewActiveDevice(), testDeviceARN, RouteAdb, predecessor, time.Now(),
 		policy, newActivityTracker(nil), noopLogger())
 	t.Cleanup(func() { conn.Close() })
 	nextReady := make(chan struct{})
@@ -1882,14 +1959,16 @@ func TestGivenASuccessorWhoseSendBlocksWhenTheRefresherDecidesInPhaseDrainingThe
 
 	go conn.Send([]byte("input the server parks"))
 	await(t, successor.entered, "the Send to park on the successor")
-	// The refresher's two decisions: the deadline poll and a forced refresh. Both must return
-	// while the Send is parked; one that takes the exclusive seam never does.
+	// The refresher's cycle anchor read and its two decisions: the deadline poll and a forced
+	// refresh. All must return while the Send is parked; one that takes the exclusive seam
+	// never does.
 	var guardFired bool
 	var refreshErr error
 	decided := make(chan struct{})
 	go func() {
 		defer close(decided)
-		guardFired = conn.enforceWSDeadline(policy.wsDeadline())
+		_ = conn.writeOpenedAt()
+		guardFired = conn.enforceWSDeadline(policy.WSDeadline())
 		refreshErr = conn.refresh(context.Background(), nil)
 	}()
 	await(t, decided, "the refresher's decisions to return behind the parked Send")
@@ -1998,8 +2077,8 @@ func TestGivenASessionEndedCloseWhenReadThenOnlyAWholeUnmaskedOneSkipsTheResume(
 			require.True(t, device.Set(DeviceInfo{ARN: testDeviceARN, Endpoint: mock.URL, Label: "test-device"}))
 			opening := binaryFrame(testsupport.FrameNewSession(testSessionUUID))
 			scripted := &wsConn{conn: dialScriptedServer(t, [][]byte{opening, testCase.closing}, maxInboundMessageBytes), writeDeadline: sendDeadline}
-			conn := newAdbConn(newTestDialer(testTimeout), device, testDeviceARN, RouteAdb, scripted, fastPolicy(),
-				newActivityTracker(nil), noopLogger())
+			conn := newAdbConn(newTestDialer(testTimeout), device, testDeviceARN, RouteAdb, scripted, time.Now(),
+				fastPolicy(), newActivityTracker(nil), noopLogger())
 			t.Cleanup(func() { conn.Close() })
 
 			_, err := conn.Receive()
