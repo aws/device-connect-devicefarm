@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/device-connect-devicefarm/internal/bridge"
 	"github.com/aws/device-connect-devicefarm/internal/failure"
 	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
@@ -48,13 +49,15 @@ const (
 	DefaultStopTimeout = 10 * time.Second
 	DefaultDialTimeout = 10 * time.Second
 
-	// Websocket lifetime per proxied connection, well under any intermediary's
-	// connection-age limit. The swap is lossless, so the adb client never sees it.
-	DefaultWSRefreshInterval = 3 * time.Minute
+	// Latest a swap starts per proxied connection; the jitter below only pulls it
+	// earlier. Interval + hunt + attach budget + the server's drain of the superseded
+	// websocket fits websocketLifetimeCap; Validate enforces the sum. The swap is
+	// lossless, so the adb client never sees it.
+	DefaultWSRefreshInterval = 3*time.Minute + 15*time.Second
 
 	// Bounds the hunt for a quiet moment to swap in. Past it the refresh proceeds
 	// regardless: a connection under continuous load must still refresh.
-	DefaultFreeSecondWait = 60 * time.Second
+	DefaultFreeSecondWait = 30 * time.Second
 
 	// Idle gap that makes a swap safe to attempt, since the seam briefly fences
 	// the outbound direction.
@@ -66,8 +69,8 @@ const (
 	// Consecutive failed refreshes tolerated before the connection is torn down.
 	DefaultMaxRefreshFailures = 3
 
-	// Spreads each refresh by +/-10% so concurrent connections do not swap
-	// together and overrun the server's per-host connection cap.
+	// Pulls each refresh earlier by up to this fraction, never later, so concurrent
+	// connections do not swap together and overrun the server's per-host connection cap.
 	DefaultRefreshJitter = 0.10
 
 	// DefaultEndpointRefreshInterval is how often the daemon re-resolves the
@@ -124,6 +127,16 @@ const (
 	// endpointRenewMargin is the slack Validate demands between an endpoint's
 	// worst-case age and the URL going stale. One retry must still fit.
 	endpointRenewMargin = 30 * time.Second
+
+	// websocketLifetimeCap is the longest any websocket may live, from its dial to
+	// the server's close of it. A hard rule: intermediaries on the path cut a
+	// connection at about this age. Validate fits a whole swap cycle inside it.
+	websocketLifetimeCap = 5 * time.Minute
+
+	// supersededDrainAllowance is how long the server keeps a superseded websocket
+	// open after the takeover while its inbound drains under load. A server-side
+	// property, mirrored so Validate can count it against websocketLifetimeCap.
+	supersededDrainAllowance = 30 * time.Second
 
 	// loadBalancerIdleTimeout is how long the load balancer in front of the
 	// websocket relay lets a websocket sit with no frame in either direction. A
@@ -222,11 +235,13 @@ func Default() ProxyConfig {
 // break a loop: EndpointRefreshInterval feeds time.NewTicker (panics at zero),
 // WSRefreshInterval at zero switches refreshing off, FreeSecondWait or QuietWindow
 // at zero make every swap lossy. QuiescePoll needs no guard: normalized defaults
-// it. It also gates the forward and reverse knobs: a non-positive timeout,
-// keepalive or backoff wedges a read or spins a loop; a stream cap below one
-// refuses every forwarded connection and connector; a stream cap at or past
-// adbAdmissionCeiling plans for slots the remote access service does not have; a
-// rule cap below one refuses every rule.
+// it. DialTimeout at zero fails every dial at once. It bounds a websocket's life:
+// WSRefreshInterval, FreeSecondWait, the attach budget and the server's drain must fit
+// websocketLifetimeCap. It also gates the
+// forward and reverse knobs: a non-positive timeout, keepalive or backoff wedges a
+// read or spins a loop; a stream cap below one refuses every forwarded connection
+// and connector; a stream cap at or past adbAdmissionCeiling plans for slots the
+// remote access service does not have; a rule cap below one refuses every rule.
 func (c ProxyConfig) Validate() error {
 	if c.ListenAddr == "" {
 		return errors.New(wording.ConfigListenAddrEmpty)
@@ -245,6 +260,9 @@ func (c ProxyConfig) Validate() error {
 	if c.EndpointRefreshInterval <= 0 {
 		return fmt.Errorf("endpoint refresh interval must be positive, got %s", c.EndpointRefreshInterval)
 	}
+	if c.DialTimeout <= 0 {
+		return fmt.Errorf("dial timeout must be positive, got %s", c.DialTimeout)
+	}
 	if c.WSRefreshInterval <= 0 {
 		return fmt.Errorf("websocket refresh interval must be positive, got %s", c.WSRefreshInterval)
 	}
@@ -253,6 +271,13 @@ func (c ProxyConfig) Validate() error {
 	}
 	if c.QuietWindow <= 0 {
 		return fmt.Errorf("quiet window must be positive, got %s", c.QuietWindow)
+	}
+	// Subtract and divide, do not add or multiply: a sum or product can overflow and pass.
+	swapBudget := websocketLifetimeCap - supersededDrainAllowance - c.FreeSecondWait
+	const roundTrips = 2 * bridge.AttachAttempts
+	if c.DialTimeout > swapBudget/roundTrips || c.WSRefreshInterval > swapBudget-roundTrips*c.DialTimeout {
+		return fmt.Errorf("websocket refresh interval %s, free-second wait %s, %d attach attempts of two round trips at the dial timeout %s and the server's %s drain of a superseded websocket must fit the websocket lifetime cap %s",
+			c.WSRefreshInterval, c.FreeSecondWait, bridge.AttachAttempts, c.DialTimeout, supersededDrainAllowance, websocketLifetimeCap)
 	}
 	// A swap can dial a URL one EndpointRefreshInterval old, so renewal must stay
 	// ahead of expiry with margin. Subtract, do not add: interval+margin can

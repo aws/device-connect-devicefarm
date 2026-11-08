@@ -139,10 +139,10 @@ func openDeviceStream(ctx context.Context, dialer *WSDialer, device *ActiveDevic
 		if useParked && turnHasCome(ready) {
 			warm = features.warmSockets()
 		}
-		return warm.openConn(ctx, dialer, endpoint, func(ws WSConn, sessionUUID string) (*adbConn, error) {
+		return warm.openConn(ctx, dialer, endpoint, func(ws WSConn, sessionUUID string, openedAt time.Time) (*adbConn, error) {
 			// Wrap before sending anything: the control frame must be read by this reader. The
 			// fresh-session fallback is refused; withTerminalSessionGone says why.
-			conn := newAdbConn(dialer, device, arn, RouteAdb, ws, policy, activity, logger,
+			conn := newAdbConn(dialer, device, arn, RouteAdb, ws, openedAt, policy, activity, logger,
 				withTerminalSessionGone(), withRefusalGate(features.refusalGate()), withSelectedSession(sessionUUID))
 			var err error
 			if leftover, err = playPrologue(ctx, conn, deviceService, statusTimeout, ready); err != nil {

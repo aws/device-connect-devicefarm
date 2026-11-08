@@ -11,6 +11,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/aws/device-connect-devicefarm/internal/adbwire"
 	"github.com/aws/device-connect-devicefarm/internal/forward"
@@ -302,8 +303,8 @@ func (s *AdbProxyServer) openClientSession(ctx context.Context, tcp net.Conn, cl
 		if useParked && clientOpening.ridesPreSelected() {
 			warm = forwarding.warmSockets()
 		}
-		return warm.openConn(ctx, s.dialer, endpoint, func(ws WSConn, sessionUUID string) (*adbConn, error) {
-			session := newAdbConn(s.dialer, s.device, arn, RouteAdb, ws, s.refresh, newActivityTracker(nil), logger,
+		return warm.openConn(ctx, s.dialer, endpoint, func(ws WSConn, sessionUUID string, openedAt time.Time) (*adbConn, error) {
+			session := newAdbConn(s.dialer, s.device, arn, RouteAdb, ws, openedAt, s.refresh, newActivityTracker(nil), logger,
 				withSelectedSession(sessionUUID))
 			if err := relayRequest(ctx, tcp, session, clientOpening.pending, clientOpening.selected); err != nil {
 				session.Close()
