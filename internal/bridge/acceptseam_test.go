@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -181,12 +182,18 @@ func TestGivenAClientsOpeningWhenItIsReadThenOnlyTheUnansweredBytesArePending(t 
 		name         string
 		said         string
 		deviceSerial string
+		noDevice     bool
 		wantPending  string
 		wantService  string
 		wantSelected bool
 		wantReplies  string
 		wantErr      error
 	}{
+		{
+			// No device, so no select is answered: the select is returned as the service.
+			name: "a select with no device", said: "000ehost:tport:any0008shell:ls", noDevice: true,
+			wantPending: "000ehost:tport:any0008shell:ls", wantService: "host:tport:any",
+		},
 		{
 			// Both requests in one segment: the second is already buffered when the daemon
 			// goes looking for it, and the select it answered must not reach the device.
@@ -259,7 +266,12 @@ func TestGivenAClientsOpeningWhenItIsReadThenOnlyTheUnansweredBytesArePending(t 
 		t.Run(testCase.name, func(t *testing.T) {
 			client := newScriptedConn(testCase.said)
 
-			clientOpening, err := readOpening(context.Background(), client, testCase.deviceSerial)
+			attached := &DeviceInfo{Serial: testCase.deviceSerial}
+			if testCase.noDevice {
+				attached = nil
+			}
+
+			clientOpening, err := readOpening(context.Background(), client, attached)
 
 			if testCase.wantErr != nil {
 				require.ErrorIs(t, err, testCase.wantErr)
@@ -455,6 +467,31 @@ func TestGivenADetachWhileTheSwitchIsPendingWhenRelayingThenItEndsAtOnce(t *test
 	}
 }
 
+func TestGivenAReleasedWatcherWhenItsContextEndsThenTheTargetStaysOpen(t *testing.T) {
+	// A caller releases, then may cancel at once; a watcher still starting would see both
+	// channels ready, so the release must outlast it. synctest.Wait runs any watcher the release
+	// left behind before the write, so a release that did not wait for it fails here.
+	synctest.Test(t, func(t *testing.T) {
+		for range 20 {
+			clientEnd, daemonEnd := net.Pipe()
+			ctx, cancel := context.WithCancel(context.Background())
+			release := closeOnCancel(ctx, daemonEnd)
+
+			release()
+			cancel()
+			synctest.Wait()
+
+			written := make(chan error, 1)
+			go func() { _, err := daemonEnd.Write([]byte("x")); written <- err }()
+			_, err := clientEnd.Read(make([]byte, 1))
+			require.NoError(t, err, "the released target must still carry bytes")
+			require.NoError(t, <-written)
+			_ = clientEnd.Close()
+			_ = daemonEnd.Close()
+		}
+	})
+}
+
 func TestGivenADetachWhileTheOpeningIsReadWhenItIsCancelledThenTheReadEndsAtOnce(t *testing.T) {
 	// net.Pipe, not a scripted reader: a read of it blocks the way a read of a client's
 	// socket does, so only closing it under the read can end the wait.
@@ -463,7 +500,7 @@ func TestGivenADetachWhileTheOpeningIsReadWhenItIsCancelledThenTheReadEndsAtOnce
 	ctx, cancel := context.WithCancel(context.Background())
 	opened := make(chan error, 1)
 	go func() {
-		_, err := readOpening(ctx, daemon, "")
+		_, err := readOpening(ctx, daemon, &DeviceInfo{})
 		opened <- err
 	}()
 

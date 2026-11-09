@@ -211,6 +211,47 @@ func TestGivenTrackedConnsWhenClearMatchingThenAllCancelled(t *testing.T) {
 	assert.ErrorIs(t, features.ctx.Err(), context.Canceled, "ClearMatching must end the attachment")
 }
 
+// signaled reports whether a snapshot's change signal has closed.
+func signaled(changed <-chan struct{}) bool {
+	select {
+	case <-changed:
+		return true
+	default:
+		return false
+	}
+}
+
+func TestGivenASnapshotWhenTheDeviceChangesThenItsSignalClosesOnlyForAnAttachOrADetach(t *testing.T) {
+	attached := DeviceInfo{ARN: "arn:test", Endpoint: "wss://example.invalid"}
+	set := func(device *ActiveDevice) { device.Set(attached) }
+	for name, testCase := range map[string]struct {
+		before       func(device *ActiveDevice)
+		change       func(device *ActiveDevice)
+		wantSignaled bool
+	}{
+		"a set":                    {before: func(*ActiveDevice) {}, change: set, wantSignaled: true},
+		"a clear":                  {before: set, change: func(device *ActiveDevice) { device.Clear() }, wantSignaled: true},
+		"a clear matching the ARN": {before: set, change: func(device *ActiveDevice) { device.ClearMatching("arn:test", "gone") }, wantSignaled: true},
+		"a set after a clear":      {before: func(device *ActiveDevice) { set(device); device.Clear() }, change: set, wantSignaled: true},
+		"a refused set":            {before: set, change: func(device *ActiveDevice) { device.Set(DeviceInfo{ARN: "arn:other"}) }},
+		"a clear with no device":   {before: func(*ActiveDevice) {}, change: func(device *ActiveDevice) { device.Clear() }},
+		"an endpoint update":       {before: set, change: func(device *ActiveDevice) { device.UpdateEndpoint("arn:test", "wss://renewed.invalid", "label") }},
+		"a clear for another ARN":  {before: set, change: func(device *ActiveDevice) { device.ClearMatching("arn:other", "gone") }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			device := NewActiveDevice()
+			testCase.before(device)
+			_, _, changed := device.snapshot()
+
+			testCase.change(device)
+
+			assert.Equal(t, testCase.wantSignaled, signaled(changed), "only an attach or a detach closes the signal")
+			_, _, next := device.snapshot()
+			assert.False(t, signaled(next), "the next signal waits for the next change")
+		})
+	}
+}
+
 func TestGivenNoDeviceWhenConnTrackedThenRefused(t *testing.T) {
 	_, _, _, ok := NewActiveDevice().trackConn(func() {})
 	assert.False(t, ok, "a connection must not be tracked when no device is bound")
