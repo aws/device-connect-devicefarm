@@ -197,7 +197,11 @@ func TestGivenTransportIDSelectorWhenRespondedThenItMatchesTheSingleDevice(t *te
 	assert.Equal(t, 1, table.ruleCount())
 }
 
-func TestGivenSelectorKindsWhenCheckedThenOnlyAnotherSerialMisses(t *testing.T) {
+func TestGivenSelectorKindsWhenCheckedThenAdbsMissTextsFollowTheSerialAndKind(t *testing.T) {
+	// The device's kind is read off its serial: emulator-<port> is local, anything else usb.
+	const emulatorSerial = "emulator-5554"
+	usbSelector := adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorUSB}
+	localSelector := adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorLocal}
 	tests := []struct {
 		name         string
 		selector     adbwire.AdbDeviceSelector
@@ -205,8 +209,11 @@ func TestGivenSelectorKindsWhenCheckedThenOnlyAnotherSerialMisses(t *testing.T) 
 		failText     string
 	}{
 		{"any device", anySelector, attachedSerial, ""},
-		{"any usb device", adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorUSB}, attachedSerial, ""},
-		{"any local device", adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorLocal}, attachedSerial, ""},
+		{"any device, an emulator attached", anySelector, emulatorSerial, ""},
+		{"any usb device", usbSelector, attachedSerial, ""},
+		{"any usb device, an emulator attached", usbSelector, emulatorSerial, "no devices found"},
+		{"any local device", localSelector, attachedSerial, "no emulators found"},
+		{"any local device, an emulator attached", localSelector, emulatorSerial, ""},
 		{"the attached serial", serialSelector(attachedSerial), attachedSerial, ""},
 		{"a transport id", adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorTransportID, TransportID: 7}, attachedSerial, ""},
 		{"the unset transport id", adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorTransportID}, attachedSerial, ""},

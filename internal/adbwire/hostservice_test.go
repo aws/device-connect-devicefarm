@@ -149,6 +149,22 @@ func TestGivenTransportSelectServicesWhenParsedThenSelectorAndIDPayloadFlag(t *t
 			selector: AdbDeviceSelector{Kind: AdbSelectorTransportID, TransportID: 18446744073709551615},
 			ok:       true,
 		},
+		// The older spellings Android Studio sends: a bare OKAY, no id.
+		{name: "the older any spelling", service: "transport-any", selector: AdbDeviceSelector{Kind: AdbSelectorAny}, ok: true},
+		{name: "the older usb spelling", service: "transport-usb", selector: AdbDeviceSelector{Kind: AdbSelectorUSB}, ok: true},
+		{name: "the older local spelling", service: "transport-local", selector: AdbDeviceSelector{Kind: AdbSelectorLocal}, ok: true},
+		{
+			name:     "the older serial spelling",
+			service:  "transport:R3CN30XXXX",
+			selector: AdbDeviceSelector{Kind: AdbSelectorSerial, Serial: "R3CN30XXXX"},
+			ok:       true,
+		},
+		{
+			name:     "the older serial spelling keeps a network serial whole",
+			service:  "transport:192.168.0.1:5555",
+			selector: AdbDeviceSelector{Kind: AdbSelectorSerial, Serial: "192.168.0.1:5555"},
+			ok:       true,
+		},
 		// Not a select: the byte-blind path owns every row below.
 		{name: "no service at all", service: ""},
 		{name: "forward service", service: "forward:tcp:1;tcp:2"},
@@ -156,12 +172,10 @@ func TestGivenTransportSelectServicesWhenParsedThenSelectorAndIDPayloadFlag(t *t
 		{name: "devices", service: "devices"},
 		{name: "version", service: "version"},
 		{name: "list-forward", service: "list-forward"},
-		// Older spellings. The client never sends them; unread, they relay like any other request.
-		{name: "the older any spelling", service: "transport-any"},
-		{name: "the older usb spelling", service: "transport-usb"},
-		{name: "the older local spelling", service: "transport-local"},
-		{name: "the older serial spelling", service: "transport:R3CN30XXXX"},
 		{name: "no separator after tport", service: "tportsomething"},
+		{name: "no separator after transport", service: "transportsomething"},
+		{name: "the older serial spelling with no serial", service: "transport:"},
+		{name: "the older serial spelling in a refused grammar", service: "transport:usb:1-1.2"},
 		{name: "tport with no target", service: "tport:"},
 		{name: "tport serial with no serial", service: "tport:serial:"},
 		{name: "transport id not a number", service: "transport-id:abc"},

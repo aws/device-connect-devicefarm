@@ -31,9 +31,9 @@ const syntheticTransportID = 1
 // Chosen, not derived.
 const openingRequestTimeout = 30 * time.Second
 
-// errSelectRefused means the client named a device the attachment does not hold and
+// errSelectRefused means the client's select missed the device the attachment holds and
 // already has its FAIL, so there is nothing left to serve it.
-var errSelectRefused = errors.New("the transport select named another device")
+var errSelectRefused = errors.New("the transport select missed the attached device")
 
 // requestScanner reassembles smart-socket requests from a byte stream and keeps every
 // byte: RequestReader drops what it consumes, and a declined request must reach the
@@ -165,11 +165,11 @@ func readOpening(ctx context.Context, tcpConn net.Conn, deviceSerial string) (cl
 // client sends ahead of the service it came for; only the daemon knows which device the
 // attachment holds. claimed means the reply went out, so the service is a second request
 // on this connection and selector is what it named. An error ends the connection: the
-// reply would not write, or the select named another device and now has its FAIL.
+// reply would not write, or the select missed the attached device and now has its FAIL.
 //
 // The reply shape follows the select's spelling. A tport: form waits for OKAY plus the
-// transport id; transport-id:<n> takes a bare OKAY. Which spelling adb sends, and before
-// which services, is at adbwire.SplitHostPrefix.
+// transport id; every other spelling takes a bare OKAY. Which spellings adb and Android Studio
+// send, and before which services, is at adbwire.SplitHostPrefix and adbwire.ParseTransportSelect.
 func answerTransportSelect(writer io.Writer, request, deviceSerial string) (selector adbwire.AdbDeviceSelector,
 	claimed bool, err error) {
 	// adb's client puts every select behind the plain `host:` prefix and names its device
@@ -267,8 +267,9 @@ const reverseServicePrefix = "reverse:"
 
 // refuseReverseFamily answers every `reverse:` request the seam reads with a FAIL while reverse
 // is off; real adb has no such setting. It keys on the prefix alone, so a malformed request is
-// refused too. One behind a select the seam declined, or alone behind a host prefix it cannot
-// parse, rides the byte pipe to the server, which denies reverse with no notifier. It runs after
+// refused too. One behind a select the seam did not read (a device-selecting prefix, or a serial
+// grammar the parser refuses), or alone behind a host prefix it cannot parse, rides the byte pipe
+// to the server, which denies reverse with no notifier. It runs after
 // the forward family and before the budget and the rule screen, so a refusal spends no slot and
 // counts no rule. answered means the client has its FAIL and the connection is done.
 func refuseReverseFamily(tcpConn net.Conn, clientOpening opening, forwarding *attachmentFeatures,
