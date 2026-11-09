@@ -20,9 +20,9 @@
 //     list-forward table and its failure texts (adb_io.cpp SendOkay, SendFail
 //     and SendProtocolString; adb_listeners.cpp format_listeners;
 //     transport.cpp acquire_one_transport), plus the transport select's reply:
-//     OKAY and the 8 raw little-endian bytes of a uint64 transport id, or a
-//     bare OKAY for host:transport-id:<n> (adb.cpp handle_host_request; adb.h
-//     TransportId).
+//     OKAY and the 8 raw little-endian bytes of a uint64 transport id for
+//     host:tport:*, a bare OKAY for every other spelling (adb.cpp
+//     handle_host_request; adb.h TransportId).
 //
 // Two markers run through adbwire, forward and bridge. "adb's model": adb
 // defines it and the Go code mirrors it, under adb's name where it has one,

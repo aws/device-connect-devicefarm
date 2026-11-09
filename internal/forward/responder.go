@@ -3,6 +3,7 @@ package forward
 import (
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/aws/device-connect-devicefarm/internal/adbwire"
 )
@@ -52,16 +53,30 @@ func Respond(conn io.WriteCloser, selector adbwire.AdbDeviceSelector, request ad
 	}
 }
 
+// isEmulatorSerial reports whether serial names an emulator. The daemon's
+// stand-in for the transport-type match in acquire_one_transport: an
+// emulator-<console port> serial (transport_local.cpp) is local, anything else
+// usb; a network serial counts as usb here where adb counts it local.
+func isEmulatorSerial(serial string) bool {
+	return strings.HasPrefix(serial, "emulator-")
+}
+
 // SelectorMiss reports whether selector names anything but the attached device,
 // with adb's FAIL text when it does. The daemon's own stand-in for adb's
 // transport lookup (transport.cpp acquire_one_transport), whose miss texts it
-// uses. Only a serial can miss. The any, usb and local selectors match the
-// single attached device, and so does a transport id: the ids this daemon
-// reports are its own, adb reads 0 as unset, and a client that echoes an id
-// back must reach its device.
+// uses. A serial misses unless it is the device's; usb misses an emulator and
+// local anything else. The any selector matches the single attached device,
+// and so does a transport id: the ids this daemon reports are its own, adb
+// reads 0 as unset, and a client that echoes an id back must reach its device.
 func SelectorMiss(selector adbwire.AdbDeviceSelector, deviceSerial string) (string, bool) {
-	if selector.Kind == adbwire.AdbSelectorSerial && selector.Serial != deviceSerial {
+	isEmulator := isEmulatorSerial(deviceSerial)
+	switch {
+	case selector.Kind == adbwire.AdbSelectorSerial && selector.Serial != deviceSerial:
 		return adbwire.FailDeviceNotFound(selector.Serial), true
+	case selector.Kind == adbwire.AdbSelectorUSB && isEmulator:
+		return adbwire.MsgNoUSBDevices, true
+	case selector.Kind == adbwire.AdbSelectorLocal && !isEmulator:
+		return adbwire.MsgNoEmulators, true
 	}
 	return "", false
 }

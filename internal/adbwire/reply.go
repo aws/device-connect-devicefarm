@@ -24,6 +24,10 @@ const (
 	// MsgNoDevices is adb's failure text when the any-device selector finds
 	// no device.
 	MsgNoDevices = "no devices/emulators found"
+	// MsgNoUSBDevices is adb's failure text when the usb selector finds no device.
+	MsgNoUSBDevices = "no devices found"
+	// MsgNoEmulators is adb's failure text when the local selector finds no device.
+	MsgNoEmulators = "no emulators found"
 )
 
 // FailCannotBind wraps a bind failure cause the way adb does.
