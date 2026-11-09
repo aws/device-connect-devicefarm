@@ -45,6 +45,10 @@ type ActiveDevice struct {
 	info       DeviceInfo
 	lastDetach LastDetach
 
+	// changed is closed and replaced under mu by every Set and every clear; a holder from
+	// snapshot wakes on the next change. Holders wait outside mu.
+	changed chan struct{}
+
 	// refusalHandler is asked about the session after a refused fresh adb connection; see
 	// WithRefusalHandler. Set once at construction. Nil: no lookup.
 	refusalHandler RefusalHandler
@@ -170,7 +174,7 @@ func WithRefusalHandler(handler RefusalHandler) ActiveDeviceOption {
 
 // NewActiveDevice builds an empty ActiveDevice.
 func NewActiveDevice(opts ...ActiveDeviceOption) *ActiveDevice {
-	device := &ActiveDevice{conns: make(map[uint64]context.CancelFunc)}
+	device := &ActiveDevice{conns: make(map[uint64]context.CancelFunc), changed: make(chan struct{})}
 	for _, opt := range opts {
 		opt(device)
 	}
@@ -190,7 +194,24 @@ func (a *ActiveDevice) Set(info DeviceInfo) bool {
 	a.info = info
 	a.lastDetach = LastDetach{}
 	a.buildFeaturesLocked()
+	a.signalChangeLocked()
 	return true
+}
+
+// signalChangeLocked wakes every holder of the current change signal and arms the next one.
+// Caller holds mu.
+func (device *ActiveDevice) signalChangeLocked() {
+	close(device.changed)
+	device.changed = make(chan struct{})
+}
+
+// snapshot reads the features (nil with no device or no dialer), the presence and the signal the
+// next Set or clear closes, in one lock hold, so no change slips between the read and the wait.
+// Callers wait on the signal outside the lock.
+func (device *ActiveDevice) snapshot() (features *attachmentFeatures, present bool, changed <-chan struct{}) {
+	device.mu.Lock()
+	defer device.mu.Unlock()
+	return device.features, device.present, device.changed
 }
 
 // buildFeaturesLocked gives the attachment being bound its own features, context, stream budget
@@ -274,6 +295,7 @@ func (a *ActiveDevice) clearLocked() (DeviceInfo, bool) {
 		cancel()
 	}
 	clear(a.conns)
+	a.signalChangeLocked()
 	return info, true
 }
 

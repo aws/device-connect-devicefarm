@@ -123,10 +123,12 @@ func (clientOpening opening) unwrappedService() string {
 }
 
 // readOpening reads everything the client says before anything is dialed: its service
-// request, plus the transport select the daemon answers itself when one comes first.
+// request, plus the transport select the daemon answers itself when one comes first. attached
+// is the device a select names. nil answers no select: the select is returned as the service,
+// and the caller closes it.
 //
 // Nothing is dialed from here, so a client that says nothing mints no session.
-func readOpening(ctx context.Context, tcpConn net.Conn, deviceSerial string) (clientOpening opening, err error) {
+func readOpening(ctx context.Context, tcpConn net.Conn, attached *DeviceInfo) (clientOpening opening, err error) {
 	// The watcher below is a goroutine, so a cancel that already landed would not stop the
 	// first read.
 	if err := ctx.Err(); err != nil {
@@ -144,9 +146,12 @@ func readOpening(ctx context.Context, tcpConn net.Conn, deviceSerial string) (cl
 	if err != nil {
 		return opening{}, err
 	}
-	selector, selected, err := answerTransportSelect(tcpConn, service, deviceSerial)
-	if err != nil {
-		return opening{}, err
+	var selector adbwire.AdbDeviceSelector
+	var selected bool
+	if attached != nil {
+		if selector, selected, err = answerTransportSelect(tcpConn, service, attached.Serial); err != nil {
+			return opening{}, err
+		}
 	}
 	if selected {
 		// A client says what it came for only after its select is answered. adb keeps the
@@ -478,10 +483,13 @@ func sendOpening(tcpConn net.Conn, session *adbConn, pending []byte, selected bo
 }
 
 // closeOnCancel closes every target when ctx ends: no context can unblock a blocked read
-// or write. The returned release stops the watcher, which must not outlive its caller.
+// or write. The returned release stops the watcher and returns once it has exited, so a
+// cancel after release closes nothing. The watcher must not outlive its caller.
 func closeOnCancel(ctx context.Context, targets ...io.Closer) (release func()) {
 	released := make(chan struct{})
+	exited := make(chan struct{})
 	go func() {
+		defer close(exited)
 		select {
 		case <-ctx.Done():
 			for _, target := range targets {
@@ -490,5 +498,8 @@ func closeOnCancel(ctx context.Context, targets ...io.Closer) (release func()) {
 		case <-released:
 		}
 	}()
-	return func() { close(released) }
+	return func() {
+		close(released)
+		<-exited
+	}
 }

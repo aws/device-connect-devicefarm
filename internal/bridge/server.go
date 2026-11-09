@@ -145,10 +145,12 @@ func (s *AdbProxyServer) Run(ctx context.Context) error {
 //
 // Nothing is dialed until the client's service request has been read (readOpening), so a
 // client that only selects a transport, or says nothing, mints no session. A forward-family
-// request is answered from the local table and never dials at all; host:version, the device
-// lists and the device trackers are answered from cached server replies; while reverse is off, a
-// reverse-family request gets a local FAIL and never dials either. With reverse on, a
-// reverse-family request waits until the attachment's clear of the server's reverse rules
+// request is answered from the local table and never dials at all. host:version and the device
+// lists are answered from cached server replies. A device tracker gets the current list, cached
+// or empty, then is held and pushed the list at every attach and detach, with or without a
+// device (serveDeviceTracker). With no device, every other request gets the close alone. While
+// reverse is off, a reverse-family request gets a local FAIL and never dials either. With reverse
+// on, a reverse-family request waits until the attachment's clear of the server's reverse rules
 // settles, or gets a local FAIL at the bound. While the server's notifier slot is held elsewhere,
 // it gets a local FAIL at once, on arrival or mid-wait. Every other request takes one of the
 // attachment's device-stream slots before the dial. No free slot, no dial. A reverse install past
@@ -160,19 +162,19 @@ func (s *AdbProxyServer) handleConn(ctx context.Context, tcp net.Conn) {
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Read and register in one locked step (see trackConn). ok=false means no
-	// device bound. The forwarding is this attachment's own table, so a rule cannot
-	// outlive the device it was installed for.
+	// Read and register in one locked step (see trackConn). ok=false means no device bound; the
+	// request is still read, since a device tracker is served without one. The forwarding is this
+	// attachment's own table, so a rule cannot outlive the device it was installed for.
 	info, forwarding, untrack, ok := s.device.trackConn(cancel)
-	if !ok {
-		connLogger.Warn("local adb client connected but no device is attached; closing")
-		return
+	var attached *DeviceInfo
+	if ok {
+		defer untrack()
+		attached = &info
+		connLogger.Debug("local adb client connected", "device", info.Label)
 	}
-	defer untrack()
-	connLogger.Debug("local adb client connected", "device", info.Label)
 
 	// The serial comes from the same snapshot as the forwarding.
-	clientOpening, err := readOpening(connCtx, tcp, info.Serial)
+	clientOpening, err := readOpening(connCtx, tcp, attached)
 	if err != nil {
 		if errors.Is(err, errSelectRefused) {
 			connLogger.Warn("refused a transport select; closing", "error", err)
@@ -182,6 +184,18 @@ func (s *AdbProxyServer) handleConn(ctx context.Context, tcp net.Conn) {
 		return
 	}
 
+	// A tracker is held on the daemon's context: a detach cancels connCtx, and the tracker
+	// outlives the detach. One accepted with a device stays registered until the first detach
+	// drops it, then waits unregistered.
+	if serveDeviceTracker(ctx, tcp, clientOpening, s.device, connLogger) {
+		connLogger.Debug("device tracker ended", "service", clientOpening.service)
+		return
+	}
+	if !ok {
+		// A device attached since the accept is not this connection's; the client's next one sees it.
+		connLogger.Warn("local adb client connected while no device was attached; closing", "service", clientOpening.service)
+		return
+	}
 	if respondForwardLocally(tcp, clientOpening, forwarding, info.Serial, connLogger) {
 		connLogger.Debug("answered the forward request locally", "service", clientOpening.service)
 		return
