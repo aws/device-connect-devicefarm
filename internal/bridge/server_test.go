@@ -209,31 +209,25 @@ func TestGivenServerPipingToEchoWhenClientSendsBytesThenSameBytesReturn(t *testi
 	assert.Equal(t, payload, got)
 }
 
-func TestGivenNoDeviceAttachedWhenClientConnectsThenConnectionClosedAndServerSurvives(t *testing.T) {
-	dialer := newTestDialer(5 * time.Second)
-	// ActiveDevice with nothing bound.
-	server := newProxyServer(t, 0, testPolicy(), dialer, NewActiveDevice())
+func TestGivenNoDeviceAttachedWhenAClientAsksForAnythingButATrackerThenItIsClosedAndTheServerSurvives(t *testing.T) {
+	for name, request := range map[string]string{
+		"a host query":       hostVersionRequest,
+		"a transport select": "000ehost:tport:any0008shell:ls",
+	} {
+		t.Run(name, func(t *testing.T) {
+			// ActiveDevice with nothing bound.
+			addr, _ := runProxy(t, NewActiveDevice(), testPolicy())
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- server.Run(ctx) }()
-	defer func() {
-		cancel()
-		<-done
-	}()
+			refused := dialClient(t, addr)
+			writeAll(t, refused, []byte(request))
 
-	addr := waitForAddr(t, server)
-
-	refused, err := net.Dial("tcp", addr)
-	require.NoError(t, err)
-	defer refused.Close()
-	refused.SetReadDeadline(time.Now().Add(5 * time.Second))
-	_, readErr := refused.Read(make([]byte, 1))
-	assert.ErrorIs(t, readErr, io.EOF, "client must be closed when no device is attached")
-
-	second, err := net.Dial("tcp", addr)
-	require.NoError(t, err)
-	second.Close()
+			_, readErr := refused.Read(make([]byte, 1))
+			assert.ErrorIs(t, readErr, io.EOF, "client must be closed with no reply when no device is attached")
+			second, err := net.Dial("tcp", addr)
+			require.NoError(t, err)
+			second.Close()
+		})
+	}
 }
 
 func TestGivenDialFailsForClientWhenClientConnectsThenClientConnectionClosedAndServerSurvives(t *testing.T) {

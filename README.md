@@ -141,9 +141,13 @@ These limits may change in later releases:
   `error: too many adb connections (limit <n>)`; one more forwarded connection closes with no bytes;
   one more reverse connection is refused and closes when the remote access service reaps it.
 - `adb devices`, `adb devices -l` and device trackers answer from a copy of the server's reply.
-  The copy does not change while the device stays attached, and a tracker gets no updates.
-  During an `adb reconnect`, a device crash or a dropped connection, it still lists the device
-  as `device` while commands fail.
+  The copy does not change while the device stays attached. During an `adb reconnect`, a device
+  crash or a dropped connection, it still lists the device as `device` while commands fail.
+- A device tracker (`adb track-devices`, Android Studio's device chooser) stays open with or
+  without a device. It gets the list again at every `device add`, `device remove` and session
+  end, and nothing in between. It ends when its client closes or writes to it, when the daemon
+  stops, when a newly attached device's list cannot be copied, or when the client does not read
+  a push in time.
 - No websocket-level ping on a proxied connection: `x/net/websocket` cannot send one. Liveness comes
   from TCP keepalive, the refresh cycle and a reactive reconnect. The reverse notifier, the websocket
   on which the remote access service announces device-originated connections, is the exception: an

@@ -99,6 +99,41 @@ func openTracker(t *testing.T, proxyAddress, request, firstMessage string) net.C
 	return client
 }
 
+// pushedList is the server reply with its status word cut: what a held tracker gets pushed.
+func pushedList(serverReply string) string {
+	return serverReply[statusWordLen:]
+}
+
+// assertHeldQuiet checks that tracker stays open and sends nothing for a while.
+func assertHeldQuiet(t *testing.T, tracker net.Conn) {
+	t.Helper()
+	require.NoError(t, tracker.SetReadDeadline(time.Now().Add(notifierSettle)))
+	_, err := tracker.Read(make([]byte, 1))
+	require.ErrorIs(t, err, os.ErrDeadlineExceeded, "the tracker must stay open and quiet")
+	require.NoError(t, tracker.SetReadDeadline(time.Now().Add(testTimeout)))
+}
+
+// assertPushed reads the next tracker message and checks it is list.
+func assertPushed(t *testing.T, tracker net.Conn, list string) {
+	t.Helper()
+	require.Equal(t, list, string(readN(t, tracker, len(list))), "the tracker reads the new list")
+}
+
+// startEmptyProxy runs a proxy over an empty device slot; mock is ready for a Set.
+func startEmptyProxy(t *testing.T) (proxyAddress string, mock *testsupport.SessionMockWSS, device *ActiveDevice) {
+	t.Helper()
+	mock = hostReplyMock(t, cannedHostReplies)
+	device = newForwardingDevice(t)
+	proxyAddress, _ = runProxy(t, device, testPolicy())
+	return proxyAddress, mock, device
+}
+
+// attachTo binds the test device at endpoint.
+func attachTo(t *testing.T, device *ActiveDevice, endpoint string) {
+	t.Helper()
+	require.True(t, device.Set(DeviceInfo{ARN: testDeviceARN, Endpoint: endpoint, Label: "test-device", Serial: testSerial}))
+}
+
 // sortedSessionInbounds returns what each session the mock minted received, in byte order.
 func sortedSessionInbounds(mock *testsupport.SessionMockWSS) []string {
 	var inbounds []string
@@ -311,6 +346,19 @@ func TestGivenAFetchWhoseDialFailsWhenAHostQueryArrivesThenTheClientClosesAfterO
 	assert.Equal(t, 1, accepted(), "the failed fetch is the only dial")
 }
 
+func TestGivenATrackerWhoseFirstFetchFailsWhenAnsweredThenTheClientClosesAfterOneDial(t *testing.T) {
+	// A plain listener fails the TLS handshake: the first list cannot be fetched, so the tracker
+	// closes with zero bytes, as a host query does, and is not relayed.
+	address, accepted := testsupport.NewAcceptCounter(t)
+	device := newForwardingDevice(t)
+	require.True(t, device.Set(DeviceInfo{ARN: testDeviceARN, Endpoint: "wss://" + address + "/adb"}))
+	proxyAddress, _ := runProxy(t, device, testPolicy())
+
+	assert.Empty(t, drainClosed(t, sendOnly(t, proxyAddress, trackDevicesRequest)), "a failed first fetch gives zero bytes")
+
+	assert.Equal(t, 1, accepted(), "the failed fetch is the only dial")
+}
+
 func TestGivenAHostRequestNotAnsweredLocallyWhenSentThenItIsRelayed(t *testing.T) {
 	for name, service := range map[string]string{
 		"a serial prefix":           "host-serial:R3CN30ABCDE:version",
@@ -349,7 +397,7 @@ func TestGivenATransportSelectWhenAHostQueryFollowsThenItIsRelayedBehindTheDaemo
 	}
 }
 
-func TestGivenATrackerWhenAnsweredThenItIsHeldWithNoWebsocketUntilTheDetachSendsTheEmptyList(t *testing.T) {
+func TestGivenATrackerWhenTheDeviceDetachesThenItReadsTheEmptyListAndStaysOpen(t *testing.T) {
 	for request, firstMessage := range map[string]string{
 		trackDevicesRequest:     serverDevicesReply,
 		trackDevicesLongRequest: serverDevicesLongReply,
@@ -358,20 +406,261 @@ func TestGivenATrackerWhenAnsweredThenItIsHeldWithNoWebsocketUntilTheDetachSends
 			proxyAddress, mock, device := startHostReplyProxy(t, cannedHostReplies)
 
 			tracker := openTracker(t, proxyAddress, request, firstMessage)
-			require.NoError(t, tracker.SetReadDeadline(time.Now().Add(200*time.Millisecond)))
-			_, err := tracker.Read(make([]byte, 1))
-			require.ErrorIs(t, err, os.ErrDeadlineExceeded, "the tracker must stay open and quiet")
-			require.NoError(t, tracker.SetReadDeadline(time.Now().Add(testTimeout)))
+			assertHeldQuiet(t, tracker)
 			assert.Equal(t, 1, mock.ConnectionsAccepted(), "only the fetch dials; the tracker holds no websocket")
 
 			_, ok := device.Clear()
 			require.True(t, ok)
 
-			rest, err := io.ReadAll(tracker)
-			require.NoError(t, err, "the detach must close the tracker")
-			assert.Equal(t, emptyDeviceList, string(rest), "the device leaves the list before the close")
+			assertPushed(t, tracker, emptyDeviceList)
+			assertHeldQuiet(t, tracker)
 		})
 	}
+}
+
+func TestGivenATrackerOpenedWithNoDeviceWhenADeviceAttachesThenItReadsTheEmptyListThenTheList(t *testing.T) {
+	for request, serverReply := range map[string]string{
+		trackDevicesRequest:     serverDevicesReply,
+		trackDevicesLongRequest: serverDevicesLongReply,
+	} {
+		t.Run(request, func(t *testing.T) {
+			proxyAddress, mock, device := startEmptyProxy(t)
+			tracker := openTracker(t, proxyAddress, request, statusOkay+emptyDeviceList)
+			assertHeldQuiet(t, tracker)
+
+			attachTo(t, device, mock.URL)
+
+			assertPushed(t, tracker, pushedList(serverReply))
+			fresh := openTracker(t, proxyAddress, request, serverReply)
+			assertHeldQuiet(t, fresh)
+			assert.Equal(t, 1, mock.ConnectionsAccepted(), "one fetch serves the push and the fresh tracker")
+		})
+	}
+}
+
+func TestGivenAHeldTrackerWhenTheDeviceDetachesAndAttachesAgainThenItReadsEachList(t *testing.T) {
+	proxyAddress, mock, device := startEmptyProxy(t)
+	tracker := openTracker(t, proxyAddress, trackDevicesRequest, statusOkay+emptyDeviceList)
+	attachTo(t, device, mock.URL)
+	assertPushed(t, tracker, pushedList(serverDevicesReply))
+
+	_, cleared := device.Clear()
+	require.True(t, cleared)
+	assertPushed(t, tracker, emptyDeviceList)
+	assertHeldQuiet(t, tracker)
+	attachTo(t, device, mock.URL)
+
+	assertPushed(t, tracker, pushedList(serverDevicesReply))
+	assert.Equal(t, 2, mock.ConnectionsAccepted(), "each attachment fetches its own list once")
+}
+
+func TestGivenTwoHeldTrackersWhenADeviceAttachesThenBothReadTheList(t *testing.T) {
+	proxyAddress, mock, device := startEmptyProxy(t)
+	first := openTracker(t, proxyAddress, trackDevicesRequest, statusOkay+emptyDeviceList)
+	second := openTracker(t, proxyAddress, trackDevicesLongRequest, statusOkay+emptyDeviceList)
+
+	attachTo(t, device, mock.URL)
+
+	assertPushed(t, first, pushedList(serverDevicesReply))
+	assertPushed(t, second, pushedList(serverDevicesLongReply))
+}
+
+func TestGivenAHeldTrackerWithNoDeviceWhenTheDaemonStopsThenItEndsAtOnce(t *testing.T) {
+	device := newForwardingDevice(t)
+	server, err := NewAdbProxyServer("127.0.0.1", 0, testPolicy(), newTestDialer(testWait), device, noopLogger())
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan error, 1)
+	go func() { stopped <- server.Run(ctx) }()
+	tracker := openTracker(t, waitForAddr(t, server), trackDevicesRequest, statusOkay+emptyDeviceList)
+
+	cancel()
+
+	select {
+	case err := <-stopped:
+		require.NoError(t, err)
+	case <-time.After(testWait):
+		t.Fatal("a held tracker held the daemon's shutdown")
+	}
+	rest, err := io.ReadAll(tracker)
+	require.NoError(t, err, "the shutdown must close the tracker")
+	assert.Empty(t, rest, "nothing follows for a tracker the shutdown ends")
+}
+
+func TestGivenAHeldTrackerWhenADeviceWhoseListCannotBeCopiedAttachesThenTheTrackerEnds(t *testing.T) {
+	// A plain listener fails the TLS handshake, so a fetch of it fails.
+	failingAddress, _ := testsupport.NewAcceptCounter(t)
+	notReady := hostReplyMock(t, map[string]string{
+		hostDevicesRequest: string(okayDevicesReply(testSerial + "\toffline\n")),
+	})
+	for name, endpoint := range map[string]string{
+		"a device not ready": notReady.URL,
+		"a fetch that fails": "wss://" + failingAddress,
+	} {
+		t.Run(name, func(t *testing.T) {
+			device := newForwardingDevice(t)
+			proxyAddress, _ := runProxy(t, device, testPolicy())
+			tracker := openTracker(t, proxyAddress, trackDevicesRequest, statusOkay+emptyDeviceList)
+
+			attachTo(t, device, endpoint)
+
+			rest, err := io.ReadAll(tracker)
+			require.NoError(t, err, "a tracker with no list to push must end")
+			assert.Empty(t, rest, "nothing is pushed for a list the daemon cannot copy")
+		})
+	}
+}
+
+func TestGivenAHeldTrackerWhenADeviceWithNoDialerAttachesThenTheTrackerEnds(t *testing.T) {
+	// No dialer, no features: nothing to copy a list from.
+	device := NewActiveDevice()
+	proxyAddress, _ := runProxy(t, device, testPolicy())
+	tracker := openTracker(t, proxyAddress, trackDevicesRequest, statusOkay+emptyDeviceList)
+
+	require.True(t, device.Set(DeviceInfo{ARN: testDeviceARN, Endpoint: "wss://example.invalid"}))
+
+	rest, err := io.ReadAll(tracker)
+	require.NoError(t, err, "a tracker with no list to push must end")
+	assert.Empty(t, rest)
+}
+
+func TestGivenATrackerWhoseFirstListIsNotKeptWhenAnsweredThenItIsRelayed(t *testing.T) {
+	// The server's own tracker reports a device that is not ready yet.
+	proxyAddress, mock, _ := startHostReplyProxy(t, map[string]string{
+		hostDevicesRequest:  string(okayDevicesReply(testSerial + "\toffline\n")),
+		trackDevicesRequest: serverDevicesReply,
+	})
+
+	tracker := sendOnly(t, proxyAddress, trackDevicesRequest)
+
+	waitFor(t, func() bool { return slices.Contains(sortedSessionInbounds(mock), trackDevicesRequest) },
+		"the tracker must reach the server")
+	assert.Equal(t, 2, mock.ConnectionsAccepted(), "the list fetch, then the relay")
+	assertPushed(t, tracker, serverDevicesReply)
+	assertHeldQuiet(t, tracker)
+}
+
+// heldBackListMock answers host requests from cannedHostReplies once release is called.
+func heldBackListMock(t *testing.T) (mock *testsupport.SessionMockWSS, release func()) {
+	t.Helper()
+	released := make(chan struct{})
+	release = sync.OnceFunc(func() { close(released) })
+	mock = testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{
+		OnMessage: func(_ *testsupport.MockSession, data []byte) []byte {
+			<-released
+			return []byte(cannedHostReplies[string(data)])
+		},
+	})
+	t.Cleanup(release) // before the mock's own cleanup, which waits on its handlers
+	return mock, release
+}
+
+// startHeldBackProxy runs a proxy over an empty device slot and opens one tracker on it. A fetch
+// ends only at the test's release or at a detach.
+func startHeldBackProxy(t *testing.T) (proxyAddress string, mock *testsupport.SessionMockWSS, release func(),
+	device *ActiveDevice, tracker net.Conn) {
+	t.Helper()
+	mock, release = heldBackListMock(t)
+	device = newForwardingDevice(t)
+	device.featureConfig.dialer.hostReplyTimeout = time.Hour
+	proxyAddress, _ = runProxy(t, device, testPolicy())
+	tracker = openTracker(t, proxyAddress, trackDevicesRequest, statusOkay+emptyDeviceList)
+	return proxyAddress, mock, release, device, tracker
+}
+
+func TestGivenAPushFetchInFlightWhenTheDeviceDetachesThenTheTrackerReadsTheEmptyListNext(t *testing.T) {
+	_, mock, _, device, tracker := startHeldBackProxy(t)
+	attachTo(t, device, mock.URL)
+	waitFor(t, func() bool { return mock.ConnectionsAccepted() == 1 }, "the push never fetched")
+
+	_, cleared := device.Clear()
+
+	require.True(t, cleared)
+	assertPushed(t, tracker, emptyDeviceList)
+	assertHeldQuiet(t, tracker)
+}
+
+func TestGivenATrackerClientThatLeavesDuringAPushFetchWhenTheFetchEndsThenTheCopyStillFills(t *testing.T) {
+	// The push's fetch is shared with every waiter on the list, so the client's leave must not fail it.
+	proxyAddress, mock, release, device, tracker := startHeldBackProxy(t)
+	attachTo(t, device, mock.URL)
+	waitFor(t, func() bool { return mock.ConnectionsAccepted() == 1 }, "the push never fetched")
+	// A byte ends the hold, and the daemon's close is read back: the hold is gone before the fetch may end.
+	writeAll(t, tracker, []byte("x"))
+	rest, err := io.ReadAll(tracker)
+	require.NoError(t, err, "the daemon must close the tracker")
+	assert.Empty(t, rest, "nothing is pushed to a tracker that left")
+
+	release()
+
+	assert.Equal(t, serverDevicesReply, askHost(t, proxyAddress, hostDevicesRequest), "the list query reads the copy")
+	assert.Equal(t, 1, mock.ConnectionsAccepted(), "the push's fetch filled the copy; nothing fetched again")
+}
+
+// trackerOpening is the opening of a lone tracker request.
+func trackerOpening(service string) opening {
+	return opening{service: service, pending: framed(service)}
+}
+
+// writeEntered wraps a conn and signals each Write before it may block.
+type writeEntered struct {
+	net.Conn
+	entered chan struct{}
+}
+
+func (conn *writeEntered) Write(data []byte) (int, error) {
+	conn.entered <- struct{}{}
+	return conn.Conn.Write(data)
+}
+
+// awaitWrite waits for the next Write on conn to start.
+func awaitWrite(t *testing.T, conn *writeEntered) {
+	t.Helper()
+	select {
+	case <-conn.entered:
+	case <-time.After(testTimeout):
+		t.Fatal("the hold wrote nothing")
+	}
+}
+
+func TestGivenAPushStuckOnAnUnreadClientWhenTheDeviceDetachesThenClearReturnsAtOnce(t *testing.T) {
+	// net.Pipe: a write blocks until the other end reads, as a full socket buffer would.
+	clientEnd, daemonEnd := net.Pipe()
+	t.Cleanup(func() { _ = clientEnd.Close() })
+	daemon := &writeEntered{Conn: daemonEnd, entered: make(chan struct{}, 8)}
+	mock := hostReplyMock(t, cannedHostReplies)
+	device := newForwardingDevice(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	holdEnded := make(chan struct{})
+	go func() {
+		serveDeviceTracker(ctx, daemon, trackerOpening("host:track-devices"), device, noopLogger())
+		close(holdEnded)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-holdEnded:
+		case <-time.After(testWait):
+			t.Error("the hold did not end with its context")
+		}
+	})
+	require.NoError(t, clientEnd.SetDeadline(time.Now().Add(testTimeout)))
+	awaitWrite(t, daemon)
+	assertPushed(t, clientEnd, statusOkay+emptyDeviceList)
+	require.True(t, device.Set(DeviceInfo{ARN: testDeviceARN, Endpoint: mock.URL}))
+	awaitWrite(t, daemon) // the push's Write has started and cannot finish: nothing reads the pipe
+
+	cleared := make(chan bool, 1)
+	go func() { _, ok := device.Clear(); cleared <- ok }()
+
+	select {
+	case ok := <-cleared:
+		require.True(t, ok)
+	case <-time.After(testWait):
+		t.Fatal("Clear waited on a tracker's blocked push")
+	}
+	assertPushed(t, clientEnd, pushedList(serverDevicesReply))
+	assertPushed(t, clientEnd, emptyDeviceList)
 }
 
 func TestGivenAHeldTrackerWhenTheClientWritesThenTheDaemonClosesIt(t *testing.T) {
