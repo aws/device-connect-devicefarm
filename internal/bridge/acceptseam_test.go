@@ -85,9 +85,10 @@ func assertSessionReceived(t *testing.T, mock *testsupport.SessionMockWSS, want 
 
 func TestGivenATransportSelectWhenAnsweredThenTheReplyShapeFollowsItsSpelling(t *testing.T) {
 	// A tport: select waits for the transport id as 8 raw bytes, and a short reply makes the
-	// client report a failure to read one. A transport-id select takes a bare OKAY, and 12
-	// bytes would leave the client one reply ahead for the rest of the connection. Any id is
-	// accepted because `adb devices -l` prints the remote adb server's own.
+	// client report a failure to read one. A transport-id select and the older spellings
+	// Android Studio sends take a bare OKAY, and 12 bytes would leave the client one reply
+	// ahead for the rest of the connection. Any id is accepted because `adb devices -l` prints
+	// the remote adb server's own.
 	tests := []struct {
 		name         string
 		request      string
@@ -100,6 +101,12 @@ func TestGivenATransportSelectWhenAnsweredThenTheReplyShapeFollowsItsSpelling(t 
 			wantSelector: adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorSerial, Serial: "dev-1"}},
 		{name: "a transport id", request: "host:transport-id:97", want: "OKAY",
 			wantSelector: adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorTransportID, TransportID: 97}},
+		{name: "the older serial spelling", request: "host:transport:dev-1", want: "OKAY",
+			wantSelector: adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorSerial, Serial: "dev-1"}},
+		{name: "the older any spelling", request: "host:transport-any", want: "OKAY",
+			wantSelector: adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorAny}},
+		{name: "the older usb spelling", request: "host:transport-usb", want: "OKAY",
+			wantSelector: adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorUSB}},
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -124,8 +131,9 @@ func TestGivenARequestThatIsNotAPlainSelectWhenAnsweredThenItIsNotClaimed(t *tes
 		// A prefixed select names its device in the prefix, which this seam does not read,
 		// so it goes to the device untouched rather than being answered on a guess.
 		{name: "a select behind a device-selecting prefix", request: "host-serial:other-device:tport:any"},
-		// The older spelling. The client never sends it; unread, it relays like any other request.
-		{name: "the older any spelling", request: "host:transport-any"},
+		{name: "an older select behind a device-selecting prefix", request: "host-serial:other-device:transport:dev-1"},
+		// The older serial spelling with no serial is no select.
+		{name: "the older serial spelling with no serial", request: "host:transport:"},
 		// Every other host service is the device's to answer.
 		{name: "a host service that selects nothing", request: "host:devices"},
 	}
@@ -211,10 +219,17 @@ func TestGivenAClientsOpeningWhenItIsReadThenOnlyTheUnansweredBytesArePending(t 
 			wantService: "host-serial:dev-1:features",
 		},
 		{
-			// An older select spelling. The seam does not read it, so the device gets it as framed.
-			name: "the older any spelling, unread", said: "0012host:transport-any",
-			wantPending: "0012host:transport-any",
-			wantService: "host:transport-any",
+			// An older spelling takes a bare OKAY; the service behind it is read as behind tport:.
+			name: "the older any spelling and its service", said: "0012host:transport-any0008shell:ls",
+			wantPending: "0008shell:ls", wantService: "shell:ls", wantSelected: true,
+			wantReplies: "OKAY",
+		},
+		{
+			// Android Studio's select, then a bare reverse request: read behind the select, so
+			// the reverse screens see it.
+			name: "the older serial spelling and a reverse request", said: "0014host:transport:dev-1001breverse:forward:tcp:1;tcp:2",
+			deviceSerial: "dev-1", wantPending: "001breverse:forward:tcp:1;tcp:2", wantService: "reverse:forward:tcp:1;tcp:2",
+			wantSelected: true, wantReplies: "OKAY",
 		},
 		{
 			// Bytes with no length prefix the parser can read are relayed, not refused: the
@@ -602,19 +617,66 @@ func TestGivenAHostCommandWithNoSelectWhenItArrivesThenNoSelectIsAddedToTheSessi
 	assertSessionReceived(t, mock, "001ahost-serial:dev-1:features")
 }
 
-func TestGivenAnOlderSelectSpellingWhenItArrivesThenItReachesTheSessionVerbatimWithNoSelectAdded(t *testing.T) {
-	// The seam does not read host:transport-usb, so the select and the request behind it
-	// reach the device as framed, and the device answers the select. No select consumed
-	// here, so none added: the mock echoes both requests, and the client reads that echo,
-	// not an OKAY the daemon made up.
-	client, mock := startSelectAwareProxy(t)
+func TestGivenAnOlderSelectSpellingThatMatchesWhenReceivedThenBareOkayAndTheServiceRelaysBehindTheCanonicalSelect(t *testing.T) {
+	// Android Studio selects with these and reads a bare OKAY. Reading the echo of the second
+	// request straight after the 4 bytes proves no id followed them; the session sees the
+	// daemon's own select, never the client's.
+	tests := []struct {
+		name          string
+		deviceSerial  string
+		selectRequest string
+	}{
+		{name: "the serial spelling", deviceSerial: "dev-1", selectRequest: "0014host:transport:dev-1"},
+		{name: "the any spelling", deviceSerial: "dev-1", selectRequest: "0012host:transport-any"},
+		{name: "the usb spelling", deviceSerial: "dev-1", selectRequest: "0012host:transport-usb"},
+		{name: "the local spelling", deviceSerial: "emulator-5554", selectRequest: "0014host:transport-local"},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			proxyAddress, mock, _ := startAttachedProxyWithSerial(t, testPolicy(), testCase.deviceSerial)
+			client := dialClient(t, proxyAddress)
 
-	writeAll(t, client, []byte("0012host:transport-usb"))
-	writeAll(t, client, []byte("0008shell:ls"))
+			writeAll(t, client, []byte(testCase.selectRequest))
+			assert.Equal(t, "OKAY", string(readN(t, client, 4)), "an older spelling is answered with a bare OKAY")
+			assert.Equal(t, 0, mock.ConnectionsAccepted(), "answering a select dials nothing")
 
-	want := "0012host:transport-usb0008shell:ls"
-	assertSessionReceived(t, mock, want)
-	assert.Equal(t, want, string(readN(t, client, len(want))), "the client reads the device's echo")
+			writeAll(t, client, []byte("0008shell:ls"))
+			assert.Equal(t, "0008shell:ls", string(readN(t, client, 12)),
+				"the next bytes the client reads are its own service's echo, not a transport id")
+			assertSessionReceived(t, mock, canonicalSelect+"0008shell:ls")
+		})
+	}
+}
+
+func TestGivenAnOlderSelectSpellingThatMissesWhenReceivedThenAdbsFailAndTheCloseAndNoDial(t *testing.T) {
+	// The select is resolved here, so an Android Studio select for a device this attachment
+	// does not hold fails one hop early, with adb's text.
+	tests := []struct {
+		name          string
+		deviceSerial  string
+		selectRequest string
+		wantReply     string
+	}{
+		{name: "another serial", deviceSerial: "dev-1", selectRequest: "001bhost:transport:other-device",
+			wantReply: "FAIL001fdevice 'other-device' not found"},
+		{name: "usb against an emulator", deviceSerial: "emulator-5554", selectRequest: "0012host:transport-usb",
+			wantReply: "FAIL0010no devices found"},
+		{name: "local against a usb device", deviceSerial: "dev-1", selectRequest: "0014host:transport-local",
+			wantReply: "FAIL0012no emulators found"},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			proxyAddress, mock, _ := startAttachedProxyWithSerial(t, testPolicy(), testCase.deviceSerial)
+			client := dialClient(t, proxyAddress)
+
+			writeAll(t, client, []byte(testCase.selectRequest))
+
+			assert.Equal(t, testCase.wantReply, string(readN(t, client, len(testCase.wantReply))))
+			_, err := client.Read(make([]byte, 1))
+			assert.ErrorIs(t, err, io.EOF, "the daemon closes a connection it refused")
+			assert.Zero(t, mock.ConnectionsAccepted(), "a refused select dials nothing")
+		})
+	}
 }
 
 func TestGivenARequestPipelinedWithAppBytesWhenDeclinedThenBothReachTheSessionInOrder(t *testing.T) {
@@ -758,7 +820,7 @@ func startReverseOffProxy(t *testing.T) (proxyAddress string, mock *testsupport.
 	params := forwardingParams()
 	params.ReverseEnabled = false
 	device = newAttachedDevice(t, params)
-	require.True(t, device.Set(DeviceInfo{ARN: "arn:test", Endpoint: mock.URL, Label: "Test Device - OS 1"}))
+	require.True(t, device.Set(DeviceInfo{ARN: "arn:test", Endpoint: mock.URL, Label: "Test Device - OS 1", Serial: "dev-1"}))
 	proxyAddress, _ = runProxy(t, device, testPolicy())
 	return proxyAddress, mock, device
 }
@@ -775,14 +837,19 @@ func assertRefusedReverseOff(t *testing.T, client net.Conn, mock *testsupport.Se
 }
 
 func TestGivenReverseOffWhenAReverseRequestArrivesThenTheDaemonFailsItLocallyAndDialsNothing(t *testing.T) {
-	// Shapes a client puts the family in: behind the `any` select adb sends, and alone, with
-	// and without a host prefix, as a raw client may.
+	// Shapes a client puts the family in: behind the `any` select adb sends, behind the serial
+	// select Android Studio sends, and alone, with and without a host prefix, as a raw client may.
 	shapes := []struct {
 		name string
 		send func(t *testing.T, client net.Conn, service string)
 	}{
 		{name: "behind host:tport:any", send: func(t *testing.T, client net.Conn, service string) {
 			selectAnyTransport(t, client)
+			writeAll(t, client, framed(service))
+		}},
+		{name: "behind host:transport:<serial>", send: func(t *testing.T, client net.Conn, service string) {
+			writeAll(t, client, framed("host:transport:dev-1"))
+			require.Equal(t, "OKAY", string(readN(t, client, 4)), "the select is answered first, with no id")
 			writeAll(t, client, framed(service))
 		}},
 		{name: "alone behind host:", send: func(t *testing.T, client net.Conn, service string) {

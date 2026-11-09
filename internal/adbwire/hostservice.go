@@ -18,7 +18,8 @@ const (
 	AdbSelectorAny AdbSelectorKind = iota
 	// AdbSelectorUSB is "host-usb:": any single USB device.
 	AdbSelectorUSB
-	// AdbSelectorLocal is "host-local:": any single TCP/emulator device.
+	// AdbSelectorLocal is "host-local:": any single TCP/emulator device. The
+	// daemon resolves it by the emulator- serial prefix (forward.SelectorMiss).
 	AdbSelectorLocal
 	// AdbSelectorSerial is "host-serial:<serial>:": the named device.
 	AdbSelectorSerial
@@ -68,7 +69,10 @@ var unsupportedSerialPrefixes = []string{
 // (`--list` included) comes bare behind the same select, unclaimed by this
 // splitter. The set and remove forms also open a separate connection asking
 // host:features, host-serial:<s>:features or host-transport-id:<n>:features,
-// and a FAIL there kills the command before any forward request.
+// and a FAIL there kills the command before any forward request. Android
+// Studio's adb libraries select with host:transport:<serial> before every device
+// service and reverse:* request; a forward from them is one
+// host-serial:<s>:forward:... request, no select.
 func SplitHostPrefix(request string) (AdbDeviceSelector, string, bool) {
 	var selector AdbDeviceSelector
 	var service string
@@ -104,17 +108,17 @@ func SplitHostPrefix(request string) (AdbDeviceSelector, string, bool) {
 // select, the request that moves a connection off the host services and onto
 // one device's own. carriesID reports which reply the client waits for: a
 // tport: spelling wants OKAY plus the 8-byte transport id
-// (WriteTransportSelect), transport-id:<n> a bare OKAY (WriteOkay). ok is
+// (WriteTransportSelect), every other spelling a bare OKAY (WriteOkay). ok is
 // false for every other service, and for a select whose target this parser does
 // not implement; the byte-blind path owns those, so a refused select must reach
 // the device verbatim or a client waiting for an id waits forever.
 //
 // adb's model: the forms are switch_socket_transport's (adb_client.cpp): the
-// tport: spellings for a transport type or a serial, transport-id:<n> for `-t`.
-// The older transport-any|usb|local and transport:<serial> spellings are not
-// read here. The client never sends them; one that arrives relays verbatim
-// like any unread request. All forms are frozen, so they are matched whole and
-// no arm depends on being tried before another. Any transport id is accepted:
+// tport: spellings for a transport type or a serial, transport-id:<n> for `-t`,
+// and the older transport-any|usb|local and transport:<serial>, which adb's
+// server answers (adb.cpp handle_host_request) and Android Studio's adb
+// libraries send. All forms are frozen, so they are matched whole and no arm
+// depends on being tried before another. Any transport id is accepted:
 // `adb devices -l` prints the remote adb server's ids, so a client may pass
 // one back.
 func ParseTransportSelect(service string) (selector AdbDeviceSelector, carriesID bool, ok bool) {
@@ -125,6 +129,12 @@ func ParseTransportSelect(service string) (selector AdbDeviceSelector, carriesID
 		return AdbDeviceSelector{Kind: AdbSelectorUSB}, true, true
 	case "tport:local":
 		return AdbDeviceSelector{Kind: AdbSelectorLocal}, true, true
+	case "transport-any":
+		return AdbDeviceSelector{Kind: AdbSelectorAny}, false, true
+	case "transport-usb":
+		return AdbDeviceSelector{Kind: AdbSelectorUSB}, false, true
+	case "transport-local":
+		return AdbDeviceSelector{Kind: AdbSelectorLocal}, false, true
 	}
 	if serial, found := strings.CutPrefix(service, "tport:serial:"); found {
 		selector, ok = serialSelector(serial)
@@ -132,6 +142,10 @@ func ParseTransportSelect(service string) (selector AdbDeviceSelector, carriesID
 			return AdbDeviceSelector{}, false, false
 		}
 		return selector, true, true
+	}
+	if serial, found := strings.CutPrefix(service, "transport:"); found {
+		selector, ok = serialSelector(serial)
+		return selector, false, ok
 	}
 	if digits, found := strings.CutPrefix(service, "transport-id:"); found {
 		transportID, err := strconv.ParseUint(digits, 10, 64)
