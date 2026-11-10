@@ -350,7 +350,7 @@ func (c *adbConn) dropPoisonedPredecessor(poisoned WSConn) {
 // state, retrying once. Reports whether reads may continue.
 //
 // Lossy: the server drops the chunk in flight when a websocket dies abnormally, so up to
-// one read chunk is missing.
+// one read chunk is missing. The outcome, resumed or not, is logged at Warn.
 func (c *adbConn) reconnectReactively(readErr error) bool {
 	c.seam.Lock()
 	if c.phase != phaseSteady {
@@ -369,11 +369,11 @@ func (c *adbConn) reconnectReactively(readErr error) bool {
 	// mid-recovery.
 	successor, err := c.attachSuccessorRetrying(ctx, sessionUUID)
 	if err != nil {
-		c.logger.Debug("could not resume the adb session", "error", err)
-		// Teardown first, as in refresh.
+		// Teardown first, as in refresh: a Close mid-attach is no failure to warn about.
 		if c.unwindIfClosedLocked(successor, refreshFailed) {
 			return false
 		}
+		c.logger.Warn("could not resume the adb session", "session", sessionUUID, "error", err)
 		c.failRefreshLocked(refreshFailed)
 		// The dead predecessor returns to service only to fail its next read, so the stream is
 		// over: ask about the session as refresh does.
@@ -398,6 +398,7 @@ func (c *adbConn) reconnectReactively(readErr error) bool {
 	close(nextReady)
 
 	c.sockets.forget(dead)
-	c.logger.Debug("resumed the adb session on a new websocket", "session", sessionUUID)
+	c.logger.Warn("resumed the adb session on a new websocket (bytes in flight may be lost)",
+		"session", sessionUUID, "error", readErr)
 	return true
 }

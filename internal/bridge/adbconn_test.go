@@ -25,9 +25,6 @@ import (
 // neverCleanCutDelay outlives every test, so the mock keeps a predecessor open and writable.
 const neverCleanCutDelay = time.Minute
 
-// refreshCyclesToSpan is how many refresh cycles a test waits through.
-const refreshCyclesToSpan = 20
-
 // abnormalCloseCode is what a websocket API reports for a connection lost with no close frame.
 // A peer must not send it, but one that does gets no special case.
 const abnormalCloseCode = 1006
@@ -664,7 +661,8 @@ func TestGivenClosedConnectionWhenRefreshDialIsRefusedThenConnectionIsLeftTornDo
 func TestGivenClosedConnectionWhenReactiveReconnectIsRefusedThenConnectionIsLeftTornDown(t *testing.T) {
 	// Same teardown-first check on the reactive path.
 	mock := testsupport.NewSessionEchoWSS(t)
-	conn := newTestAdbConn(t, mock.URL, fastPolicy())
+	logs := &lockedBuffer{}
+	conn := newTestAdbConnOnRoute(t, mock.URL, fastPolicy(), RouteAdb, slog.New(slog.NewTextHandler(logs, nil)))
 	handshake(t, conn)
 
 	conn.sockets.mutex.Lock()
@@ -675,6 +673,7 @@ func TestGivenClosedConnectionWhenReactiveReconnectIsRefusedThenConnectionIsLeft
 		assert.False(t, conn.reconnectReactively(io.EOF),
 			"a torn-down connection must not report a successful resume")
 	})
+	assert.NotContains(t, logs.String(), "level=WARN", "a teardown is no failed resume")
 }
 
 func TestGivenClosedConnectionWhenFreshSessionFallbackRunsThenConnectionIsLeftTornDown(t *testing.T) {
@@ -1385,8 +1384,8 @@ func TestGivenAStalledDrainWhenTheGuardFiresThenTheConnectionEnds(t *testing.T) 
 	assert.True(t, isBenignPipeEnd(sendErr), "a write after the guard's cut must not be logged again, got %v", sendErr)
 	assert.Contains(t, logs.String(), errSwapCut.Error(), "the end must be logged with its cause")
 	assert.Equal(t, 2, mock.ConnectionsAccepted(), "no resume may follow the drop")
-	// The peer answers the guard's close frame with its own 1000; that must not pass for the
-	// server's close.
+	// The peer answers the guard's close frame with its own 1000. The guard set phaseClosed
+	// before it closed the socket, so the reader finds no drain to commit.
 	swapped, err := conn.awaitSuccessor(&wsCloseError{code: supersededCloseCode})
 	assert.False(t, swapped, "the echo of the guard's own close must not commit the swap")
 	assert.NoError(t, err)
@@ -1856,19 +1855,15 @@ func TestGivenABlockedSendWhenQuietForIsReadThenTheConnectionCountsAsActive(t *t
 	assert.Equal(t, 5*time.Second, activity.quietFor(), "the finished write must stop counting")
 }
 
-func TestGivenASuccessorWhoseSendBlocksWhenTheRefresherPollsInPhaseDrainingThenReceiveStillReadsThePredecessor(t *testing.T) {
+func TestGivenASuccessorWhoseSendBlocksWhenTheRefresherDecidesInPhaseDrainingThenReceiveStillReadsThePredecessor(t *testing.T) {
 	// The server parks input to the successor until the predecessor closes. It closes the
-	// predecessor only after the client reads its output. A refresher poll that queues for the
-	// exclusive seam behind the parked Send blocks the reader's RLock, so the reader and the
+	// predecessor only after the client reads its output. A refresher decision that queues for
+	// the exclusive seam behind the parked Send blocks the reader's RLock, so the reader and the
 	// server wait on each other.
 	predecessor := newFakeWS()
 	successor := &blockingWSConn{entered: make(chan struct{}, 1), release: make(chan struct{})}
 	t.Cleanup(func() { close(successor.release) })
-	// Short cycles, so the sleep below spans many forced refresh attempts, not one.
 	policy := fastPolicy()
-	policy.Interval = 5 * time.Millisecond
-	policy.FreeSecondWait = 5 * time.Millisecond
-	policy.PollInterval = time.Millisecond
 	conn := newAdbConn(newTestDialer(testTimeout), NewActiveDevice(), testDeviceARN, RouteAdb, predecessor,
 		policy, newActivityTracker(nil), noopLogger())
 	t.Cleanup(func() { conn.Close() })
@@ -1887,11 +1882,19 @@ func TestGivenASuccessorWhoseSendBlocksWhenTheRefresherPollsInPhaseDrainingThenR
 
 	go conn.Send([]byte("input the server parks"))
 	await(t, successor.entered, "the Send to park on the successor")
-	stop := make(chan struct{})
-	t.Cleanup(func() { close(stop) })
-	go runRefresher(context.Background(), conn, policy, stop)
-	// Wait for deadline polls and forced refresh attempts after each hunt expires.
-	time.Sleep(refreshCyclesToSpan * (policy.Interval + policy.FreeSecondWait))
+	// The refresher's two decisions: the deadline poll and a forced refresh. Both must return
+	// while the Send is parked; one that takes the exclusive seam never does.
+	var guardFired bool
+	var refreshErr error
+	decided := make(chan struct{})
+	go func() {
+		defer close(decided)
+		guardFired = conn.enforceWSDeadline(policy.wsDeadline())
+		refreshErr = conn.refresh(context.Background(), nil)
+	}()
+	await(t, decided, "the refresher's decisions to return behind the parked Send")
+	assert.False(t, guardFired, "a fresh drain must not trip the guard")
+	assert.NoError(t, refreshErr, "a refresh outside phaseSteady returns nil")
 
 	predecessor.reads <- receivedMessage{message: []byte("output still draining")}
 	result := await(t, receiveInBackground(conn), "the predecessor's message")
