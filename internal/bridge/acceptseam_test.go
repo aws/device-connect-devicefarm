@@ -295,6 +295,39 @@ func TestGivenAClientsOpeningWhenItIsReadThenOnlyTheUnansweredBytesArePending(t 
 	}
 }
 
+func TestGivenAnOpeningWhenItIsMadeReadyForTheRelayThenOnlyALoneTransportIDRequestIsReframed(t *testing.T) {
+	transportIDOne := adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorTransportID, TransportID: 1}
+	tests := []struct {
+		name    string
+		opening opening
+		want    opening
+	}{
+		{
+			// As `adb -t 1 get-state` sends: the server denies the prefix, so the request rides
+			// re-framed behind the daemon's switch; pipelined bytes stay.
+			name:    "a host command under a transport-id prefix",
+			opening: opening{service: "host-transport-id:1:get-state", pending: []byte("001dhost-transport-id:1:get-statepayload")},
+			want: opening{service: "get-state", selector: transportIDOne, pending: []byte("000ehost:get-statepayload"),
+				selected: true, reframed: true},
+		},
+		{
+			name:    "a host command under a serial prefix",
+			opening: opening{service: "host-serial:dev-1:get-state", pending: []byte("001bhost-serial:dev-1:get-state")},
+			want:    opening{service: "host-serial:dev-1:get-state", pending: []byte("001bhost-serial:dev-1:get-state")},
+		},
+		{
+			name:    "a service behind an answered select",
+			opening: opening{service: "shell:ls", selector: transportIDOne, pending: []byte("0008shell:ls"), selected: true},
+			want:    opening{service: "shell:ls", selector: transportIDOne, pending: []byte("0008shell:ls"), selected: true},
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			assert.Equal(t, testCase.want, loneOpening(testCase.opening))
+		})
+	}
+}
+
 func TestGivenAnOpeningWhenItsServiceIsUnwrappedThenOnlyALoneParsableHostPrefixIsStripped(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -333,6 +366,8 @@ func TestGivenAnOpeningWhenItAsksForThePreSelectedSocketThenOnlyANonReverseServi
 		// The bounded first read must not cut an install that waits on the server's tunnel setup.
 		{name: "a reverse install behind a select", opening: opening{service: "reverse:forward:tcp:4;tcp:5", selected: true}},
 		{name: "a malformed reverse request behind a select", opening: opening{service: "reverse:", selected: true}},
+		// A lone host request needs a session in host mode, re-framed or not.
+		{name: "a re-framed host request", opening: opening{service: "get-state", selected: true, reframed: true}},
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {

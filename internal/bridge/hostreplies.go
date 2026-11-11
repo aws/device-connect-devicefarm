@@ -224,7 +224,44 @@ func (fetcher *hostReplyFetcher) fetch(ctx context.Context, request string) ([]b
 	if errors.As(err, &replyErr) {
 		return nil, nil
 	}
+	if request == hostDevicesLongRequest {
+		reply = rewriteListedTransportIDs(reply, syntheticTransportID)
+	}
 	return reply, err
+}
+
+// transportIDField precedes the id that ends every devices-l row (transport.cpp
+// append_transport_info).
+const transportIDField = " transport_id:"
+
+// rewriteListedTransportIDs returns a whole devices-l reply with each row under transportID,
+// the daemon's own id, re-framed. The server's rows carry its adb server's ids, which `adb -t`
+// would pass back and the daemon does not hold. A device host lists one device. A reply that is
+// no whole OKAY reply comes back as it is.
+func rewriteListedTransportIDs(reply []byte, transportID uint64) []byte {
+	if len(reply) <= hostReplyHeaderLen || string(reply[:statusWordLen]) != statusOkay {
+		return reply
+	}
+	var payload strings.Builder
+	for _, row := range strings.Split(strings.TrimSuffix(string(reply[hostReplyHeaderLen:]), "\n"), "\n") {
+		payload.WriteString(rewriteTransportID(row, transportID) + "\n")
+	}
+	return fmt.Appendf(nil, "%s%04x%s", statusOkay, payload.Len(), payload.String())
+}
+
+// rewriteTransportID replaces the transport_id field that ends a devices-l row, the server's
+// own id, with transportID. adb writes the field last (transport.cpp append_transport_info), so
+// the last one with digits behind it is the field; a product name may hold the word. A row
+// without the field gets it appended.
+func rewriteTransportID(row string, transportID uint64) string {
+	if at := strings.LastIndex(row, transportIDField); at >= 0 && allDigits(row[at+len(transportIDField):]) {
+		row = row[:at]
+	}
+	return fmt.Sprintf("%s%s%d", row, transportIDField, transportID)
+}
+
+func allDigits(text string) bool {
+	return text != "" && strings.Trim(text, "0123456789") == ""
 }
 
 // answerServerQuery answers, with no device attached, the lone host requests an adb server

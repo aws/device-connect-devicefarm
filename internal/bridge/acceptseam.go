@@ -96,13 +96,17 @@ type opening struct {
 	// prefix and all, or the bare service when it followed a select. Empty when its bytes
 	// are not a smart-socket request.
 	service string
-	// selector is what an answered select named. It comes from the select, not from
-	// service, which is stored bare behind one. The zero value is the any selector.
+	// selector is the device an answered select, or a re-framed host-transport-id: prefix,
+	// named. service is bare behind a select. Zero value: the any selector.
 	selector adbwire.AdbDeviceSelector
-	// pending is every byte the device must receive, an answered select excluded.
+	// pending is every byte the device must receive: the client's bytes less an answered
+	// select, or the re-framed request.
 	pending []byte
-	// selected says a select was answered, so the session still needs its own switch.
+	// selected: a select was answered, or a host-transport-id: prefix re-framed. The session
+	// needs its own switch.
 	selected bool
+	// reframed: the request is a lone host request re-framed behind the switch (loneOpening).
+	reframed bool
 }
 
 // requestedService is the service the client came for and the selector it named: the select's
@@ -136,7 +140,7 @@ func (clientOpening opening) reverseFamily() bool {
 // bounded first read must not cut, and that read would take the status word the pipe's rule
 // watch settles the request on.
 func (clientOpening opening) ridesPreSelected() bool {
-	return clientOpening.selected && !clientOpening.reverseFamily()
+	return clientOpening.selected && !clientOpening.reframed && !clientOpening.reverseFamily()
 }
 
 // readOpening reads everything the client says before anything is dialed: its service
@@ -178,6 +182,21 @@ func readOpening(ctx context.Context, tcpConn net.Conn, attached *DeviceInfo) (c
 	}
 	service = strings.TrimPrefix(service, "host:")
 	return opening{service: service, selector: selector, pending: scanner.pending(), selected: true}, nil
+}
+
+// loneOpening is the opening a lone host-transport-id:<n>:<cmd> request is relayed with: a
+// select for that id, and the request re-framed as host:<cmd> behind the daemon's switch. The
+// server denies every transport-id form; the ids are the daemon's own. Any other opening comes
+// back as it is. The caller judged the id first.
+func loneOpening(clientOpening opening) opening {
+	prefix, bare, ok := adbwire.SplitHostPrefix(clientOpening.service)
+	if clientOpening.selected || !ok || prefix.Kind != adbwire.AdbSelectorTransportID {
+		return clientOpening
+	}
+	// The re-framed request is shorter than the one that framed it, so the encoder cannot fail.
+	reframed, _ := adbwire.EncodeRequest("host:" + bare)
+	behind := clientOpening.pending[replyLengthDigits+len(clientOpening.service):]
+	return opening{service: bare, selector: prefix, pending: append(reframed, behind...), selected: true, reframed: true}
 }
 
 // answerTransportSelect answers request itself when it is a transport select, which a

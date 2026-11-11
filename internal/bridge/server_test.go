@@ -273,6 +273,16 @@ func TestGivenNoDeviceAttachedWhenBareBytesArriveThenZeroBytesAndTheClose(t *tes
 	assert.Empty(t, drainClosed(t, client), "a refused non-request opener must get zero bytes")
 }
 
+func TestGivenALoneRequestUnderTheDaemonsTransportIDWhenRelayedThenTheDeviceGetsThePlainRequestBehindTheSwitch(t *testing.T) {
+	// `adb -t 1 get-state`: the server denies every transport-id form, so the device gets the
+	// plain request behind the daemon's own switch.
+	client, mock := startSelectAwareProxy(t)
+
+	writeAll(t, client, framed("host-transport-id:1:get-state"))
+
+	assertSessionReceived(t, mock, canonicalSelect+string(framed("host:get-state")))
+}
+
 func TestGivenALoneRequestUnderAnotherTransportIDWhenReceivedThenAdbsMissTextAndNoDial(t *testing.T) {
 	client, mock := startSelectAwareProxy(t)
 

@@ -45,6 +45,9 @@ var (
 	serverDevicesReply     = string(okayDevicesReply(testSerial + "\tdevice\n"))
 	serverDevicesLongReply = string(okayDevicesReply(
 		testSerial + "            device product:a1 model:Pixel device:a1 transport_id:3\n"))
+	// listedDevicesLongReply is serverDevicesLongReply as a client reads it: under the daemon's id.
+	listedDevicesLongReply = string(okayDevicesReply(
+		testSerial + "            device product:a1 model:Pixel device:a1 transport_id:1\n"))
 	serverFeaturesReply = "OKAY" + string(framed("shell_v2,cmd,stat_v2,ls_v2,fixed_push_mkdir,apex,abb,abb_exec"))
 )
 
@@ -54,6 +57,15 @@ var cannedHostReplies = map[string]string{
 	hostDevicesRequest:     serverDevicesReply,
 	hostDevicesLongRequest: serverDevicesLongReply,
 	hostFeaturesRequest:    serverFeaturesReply,
+}
+
+// listedReply is what a client reads for a canned reply: the server's bytes, a long list under the
+// daemon's transport id.
+func listedReply(request, reply string) string {
+	if request == hostDevicesLongRequest {
+		return listedDevicesLongReply
+	}
+	return reply
 }
 
 // hostReplyMock answers each message in canned with its reply and echoes any other.
@@ -172,10 +184,10 @@ func TestGivenAServerThatAnswersWhenADeviceAttachesThenEachReplyIsFetchedOnceAnd
 		"the attach must open one session per reply, each sending its request alone")
 	proxyAddress, _ := runProxy(t, device, testPolicy())
 	for request, reply := range cannedHostReplies {
-		assert.Equal(t, reply, askHost(t, proxyAddress, request), "the server's reply, byte for byte")
+		assert.Equal(t, listedReply(request, reply), askHost(t, proxyAddress, request), "the server's reply, byte for byte")
 	}
 	openTracker(t, proxyAddress, trackDevicesRequest, serverDevicesReply)
-	openTracker(t, proxyAddress, trackDevicesLongRequest, serverDevicesLongReply)
+	openTracker(t, proxyAddress, trackDevicesLongRequest, listedDevicesLongReply)
 	assert.Never(t, func() bool { return mock.ConnectionsAccepted() > len(prefetchedHostRequests) }, notifierSettle,
 		notifierPoll, "the prefetched copies answer with no dial, and nothing retries")
 }
@@ -299,7 +311,7 @@ func TestGivenRepeatedHostQueriesWhenAnsweredThenEachIsFetchedOnceAndRepliedVerb
 			proxyAddress, mock, _ := startHostReplyProxy(t, cannedHostReplies)
 
 			for range 3 {
-				assert.Equal(t, reply, askHost(t, proxyAddress, request), "the server's reply, byte for byte")
+				assert.Equal(t, listedReply(request, reply), askHost(t, proxyAddress, request), "the server's reply, byte for byte")
 			}
 
 			assert.Equal(t, 1, mock.ConnectionsAccepted(), "one fetch serves every later request")
@@ -320,6 +332,44 @@ func TestGivenADetachWhenTheDeviceAttachesAgainThenTheRepliesAreFetchedAgain(t *
 	assert.Equal(t, serverVersionReply, askHost(t, proxyAddress, hostVersionRequest))
 
 	assert.Equal(t, 2, mock.ConnectionsAccepted(), "the new attachment must fetch its own reply")
+}
+
+func TestGivenRowsWhenTheTransportIDIsRewrittenThenOnlyTheTrailingFieldChanges(t *testing.T) {
+	tests := []struct {
+		name string
+		row  string
+		want string
+	}{
+		{name: "the field present", row: "R3CN30ABCDE            device product:a1 model:Pixel device:a1 transport_id:3",
+			want: "R3CN30ABCDE            device product:a1 model:Pixel device:a1 transport_id:7"},
+		{name: "the field absent", row: "R3CN30ABCDE            device product:a1",
+			want: "R3CN30ABCDE            device product:a1 transport_id:7"},
+		{name: "a product naming the field", row: "R3CN30ABCDE            device product:x transport_id:9 model:P transport_id:3",
+			want: "R3CN30ABCDE            device product:x transport_id:9 model:P transport_id:7"},
+		{name: "the word last with no digits", row: "R3CN30ABCDE            device product:x transport_id:none",
+			want: "R3CN30ABCDE            device product:x transport_id:none transport_id:7"},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			assert.Equal(t, testCase.want, rewriteTransportID(testCase.row, 7))
+		})
+	}
+}
+
+func TestGivenAReplyThatIsNoWholeListWhenTheListedIDsAreRewrittenThenItComesBackAsItIs(t *testing.T) {
+	for _, reply := range []string{"", "OKAY0000", "FAIL000bunsupported"} {
+		assert.Equal(t, reply, string(rewriteListedTransportIDs([]byte(reply), 1)))
+	}
+}
+
+func TestGivenAServerListingItsOwnTransportIDWhenTheLongListIsAskedThenTheRowCarriesTheDaemonsIDAndThatIDSelects(t *testing.T) {
+	// `adb devices -l`, then `adb -t <listed id>`: the listed id must be one the daemon holds.
+	proxyAddress, _, _ := startHostReplyProxy(t, cannedHostReplies)
+
+	assert.Equal(t, listedDevicesLongReply, askHost(t, proxyAddress, hostDevicesLongRequest))
+
+	client := sendOnly(t, proxyAddress, "0013host:transport-id:1")
+	assert.Equal(t, "OKAY", string(readN(t, client, 4)), "the listed id selects the device")
 }
 
 func TestGivenAServerOnAnotherAdbVersionWhenHostVersionIsAskedThenTheServersVersionAnswersFromOneFetch(t *testing.T) {
@@ -458,7 +508,6 @@ func TestGivenATrackerWhoseFirstFetchFailsWhenAnsweredThenTheClientClosesAfterOn
 func TestGivenAHostRequestNotAnsweredLocallyWhenSentThenItIsRelayed(t *testing.T) {
 	for name, service := range map[string]string{
 		"a serial prefix":                   "host-serial:R3CN30ABCDE:version",
-		"a transport id prefix":             "host-transport-id:1:devices",
 		"the features of any usb device":    "host-usb:features",
 		"the features of any local device":  "host-local:features",
 		"the host features":                 "host:host-features",
@@ -602,7 +651,7 @@ func TestGivenATransportSelectWhenAHostQueryFollowsThenItIsRelayedBehindTheDaemo
 func TestGivenATrackerWhenTheDeviceDetachesThenItReadsTheEmptyListAndStaysOpen(t *testing.T) {
 	for request, firstMessage := range map[string]string{
 		trackDevicesRequest:     serverDevicesReply,
-		trackDevicesLongRequest: serverDevicesLongReply,
+		trackDevicesLongRequest: listedDevicesLongReply,
 	} {
 		t.Run(request, func(t *testing.T) {
 			proxyAddress, mock, device := startHostReplyProxy(t, cannedHostReplies)
@@ -623,7 +672,7 @@ func TestGivenATrackerWhenTheDeviceDetachesThenItReadsTheEmptyListAndStaysOpen(t
 func TestGivenATrackerOpenedWithNoDeviceWhenADeviceAttachesThenItReadsTheEmptyListThenTheList(t *testing.T) {
 	for request, serverReply := range map[string]string{
 		trackDevicesRequest:     serverDevicesReply,
-		trackDevicesLongRequest: serverDevicesLongReply,
+		trackDevicesLongRequest: listedDevicesLongReply,
 	} {
 		t.Run(request, func(t *testing.T) {
 			proxyAddress, mock, device := startEmptyProxy(t)
@@ -664,7 +713,7 @@ func TestGivenTwoHeldTrackersWhenADeviceAttachesThenBothReadTheList(t *testing.T
 	attachTo(t, device, mock.URL)
 
 	assertPushed(t, first, pushedList(serverDevicesReply))
-	assertPushed(t, second, pushedList(serverDevicesLongReply))
+	assertPushed(t, second, pushedList(listedDevicesLongReply))
 }
 
 func TestGivenAHeldTrackerWithNoDeviceWhenTheDaemonStopsThenItEndsAtOnce(t *testing.T) {
