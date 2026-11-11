@@ -8,9 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/aws/device-connect-devicefarm/internal/bridge"
@@ -54,7 +57,8 @@ func (s *controlHandlerSuite) SetupTest() {
 func (s *controlHandlerSuite) attachedArnOne() []control.AttachedDevice {
 	bound, _ := s.device.Current()
 	return []control.AttachedDevice{{SessionARN: testSessionArnOne, Label: "Pixel 10 (OS 17)", Serial: attachSerial,
-		AttachedAt: bound.AttachedAt, SessionStartedAt: testSessionStartedAt, SessionExpiresAt: testSessionExpiresAt}}
+		AttachedAt: bound.AttachedAt, SessionStartedAt: bound.SessionStartedAt,
+		SessionExpiresAt: bound.SessionExpiresAt}}
 }
 
 func TestControlHandlerSuite(t *testing.T) {
@@ -73,10 +77,13 @@ func (s *controlHandlerSuite) TestNoDeviceAttachedAddResolvesAttachesAndReportsL
 	s.Equal(testSessionArnOne, current.ARN)
 	s.Equal(s.mock.URL, current.Endpoint, "the resolved endpoint must be stored verbatim")
 	s.Equal(attachSerial, current.Serial, "the add must bind the device with the serial it fetched")
-	s.Equal(testSessionStartedAt, current.SessionStartedAt, "the add binds the session times it resolved")
-	s.Equal(testSessionExpiresAt, current.SessionExpiresAt)
+	s.WithinDuration(time.Now().Add(statusTimeLeft), current.SessionExpiresAt, 5*time.Second,
+		"the expiry is the status read's time plus the mock's time left")
+	s.Equal(current.SessionExpiresAt.Add(-session.MaxSessionLength), current.SessionStartedAt,
+		"the start is the expiry minus the session length")
 	s.WithinDuration(time.Now(), current.AttachedAt, time.Minute)
-	s.Equal([]string{hostDevicesRequest}, sessionInbounds(s.mock), "the fetch sends host:devices alone")
+	s.Equal([]string{hostDevicesRequest, statusRequestFrame}, sortedInbounds(s.mock),
+		"the fetch sends host:devices alone; the status read follows on its own session")
 }
 
 func (s *controlHandlerSuite) TestSerialFetchDialFailsAddRejectedAndNothingAttached() {
@@ -530,4 +537,76 @@ func (s *controlHandlerSuite) TestStatusAndListCarryNoDetachAfterARemoveByTheUse
 		s.Empty(resp.LastDetachReason, string(op))
 		s.True(resp.LastDetachAt.IsZero(), string(op))
 	}
+}
+
+// statusHandlerFixture builds an add handler whose endpoint serves the status route too, with
+// the status mock a test tunes before the add.
+func statusHandlerFixture(t *testing.T, loggerHandler slog.Handler) (*testsupport.StatusMockWSS,
+	control.Handler, *bridge.ActiveDevice) {
+	t.Helper()
+	sessions, _, status := testsupport.NewServerMockWSS(t, testsupport.SessionMockConfig{OnMessage: answerAttach})
+	mgr := newTestManagerLogging(t, config.Default(), newFakeClient(sessions.URL, "Pixel 10 (OS 17)"), loggerHandler)
+	device := bridge.NewActiveDevice()
+	return status, mgr.controlHandler(context.Background(), device, mgr.newDialer(), func() {}), device
+}
+
+func TestGivenAnAddWhenTheStatusAnswersThenTheDeviceCarriesTheExpiryAndTheDerivedStart(t *testing.T) {
+	status, handler, device := statusHandlerFixture(t, slog.DiscardHandler)
+	status.SetTimeLeft(140 * time.Minute)
+	before := time.Now()
+
+	resp := handler(addReq(testSessionArnOne))
+
+	require.True(t, resp.OK, resp.Error)
+	current, present := device.Current()
+	require.True(t, present)
+	assert.WithinDuration(t, before.Add(140*time.Minute), current.SessionExpiresAt, 5*time.Second,
+		"the expiry is the read time plus the reported time left")
+	assert.Equal(t, current.SessionExpiresAt.Add(-session.MaxSessionLength), current.SessionStartedAt,
+		"the start is the expiry minus the session length")
+}
+
+func TestGivenAnAddWhenTheStatusIsSilentThenTheAddSucceedsWithUnknownTimesInsideTheResolveBound(t *testing.T) {
+	previous := sessionStatusTimeout
+	sessionStatusTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { sessionStatusTimeout = previous })
+	status, handler, device := statusHandlerFixture(t, slog.DiscardHandler)
+	status.StaySilent()
+	started := time.Now()
+
+	resp := handler(addReq(testSessionArnOne))
+
+	require.True(t, resp.OK, resp.Error)
+	assert.Less(t, time.Since(started), 10*sessionStatusTimeout,
+		"a silent status route holds the add for its own bound only")
+	current, present := device.Current()
+	require.True(t, present)
+	assert.True(t, current.SessionStartedAt.IsZero())
+	assert.True(t, current.SessionExpiresAt.IsZero())
+	assert.NotEmpty(t, status.Requests(), "the add asked before giving up")
+}
+
+func TestGivenAnAddWhenTheStatusRouteIsRefusedThenTheAddSucceedsAndOneWarningIsLogged(t *testing.T) {
+	logs := &lockedBuffer{}
+	status, handler, device := statusHandlerFixture(t, slog.NewTextHandler(logs, nil))
+	status.RefuseDials()
+
+	resp := handler(addReq(testSessionArnOne))
+
+	require.True(t, resp.OK, resp.Error)
+	current, present := device.Current()
+	require.True(t, present)
+	assert.True(t, current.SessionExpiresAt.IsZero())
+	assert.Equal(t, 1, strings.Count(logs.String(), "could not read the session's time left"),
+		"one warning per failed read")
+}
+
+func TestGivenAnAttachedSessionWhenAddedAgainThenNoStatusIsRead(t *testing.T) {
+	status, handler, _ := statusHandlerFixture(t, slog.DiscardHandler)
+	require.True(t, handler(addReq(testSessionArnOne)).OK)
+
+	resp := handler(addReq(testSessionArnOne))
+
+	require.True(t, resp.OK, "a re-add of the attached session is a no-op")
+	assert.Len(t, status.Requests(), 1, "one status read per new attachment")
 }

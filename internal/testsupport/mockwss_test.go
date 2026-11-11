@@ -104,7 +104,7 @@ func TestGivenAnAcceptCounterWhenAConnectionArrivesThenItIsCountedAndClosed(t *t
 }
 
 func TestGivenAServerMockWhenEachRouteIsDialedThenItReachesItsOwnMock(t *testing.T) {
-	sessions, reverse := NewServerMockWSS(t, SessionMockConfig{})
+	sessions, reverse, _ := NewServerMockWSS(t, SessionMockConfig{})
 	require.Equal(t, sessions.URL, reverse.URL, "one endpoint serves both routes")
 
 	session := dialTestWSS(t, sessions.URL+"?path=adb")
@@ -138,4 +138,18 @@ func startTCPEcho(t *testing.T) string {
 		}
 	}()
 	return listener.Addr().String()
+}
+
+func TestGivenTheControlPathWhenTheServerMockIsDialedThenTheSessionMockDoesNotSeeIt(t *testing.T) {
+	sessions, _, status := NewServerMockWSS(t, SessionMockConfig{})
+	ws := dialTestWSS(t, status.URL+"?path=control")
+	ws.PayloadType = websocket.BinaryFrame
+
+	require.NoError(t, websocket.Message.Send(ws, []byte(`{"message":"StatusMessage","parameters":{}}`)))
+
+	var reply string
+	require.NoError(t, websocket.Message.Receive(ws, &reply))
+	assert.Contains(t, reply, "timeLeft", "the status route answers the request")
+	assert.Len(t, status.Requests(), 1)
+	assert.Empty(t, sessions.RoutesDialed(), "the control path never reaches the session mock")
 }

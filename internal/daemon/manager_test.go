@@ -63,6 +63,13 @@ func newTestManagerWithConfig(t *testing.T, cfg config.ProxyConfig) *DaemonManag
 // and error they control.
 func newTestManagerWithClient(t *testing.T, cfg config.ProxyConfig, client session.RemoteAccessClient) *DaemonManager {
 	t.Helper()
+	return newTestManagerLogging(t, cfg, client, slog.DiscardHandler)
+}
+
+// newTestManagerLogging is newTestManagerWithClient writing the daemon log through loggerHandler.
+func newTestManagerLogging(t *testing.T, cfg config.ProxyConfig, client session.RemoteAccessClient,
+	loggerHandler slog.Handler) *DaemonManager {
+	t.Helper()
 	dir := t.TempDir()
 	paths := Paths{
 		RuntimeDir:    dir,
@@ -70,7 +77,7 @@ func newTestManagerWithClient(t *testing.T, cfg config.ProxyConfig, client sessi
 		LogFile:       filepath.Join(dir, "devicefarm-connect.log"),
 		ControlSocket: filepath.Join(dir, "devicefarm-connect.sock"),
 	}
-	mgr := NewManager(cfg, paths, client, slog.New(slog.DiscardHandler))
+	mgr := NewManager(cfg, paths, client, slog.New(loggerHandler))
 	mgr.websocketRoots = testsupport.TestRoots()
 	return mgr
 }
@@ -1127,6 +1134,21 @@ const transportSelectRequest = "0012host:transport-any"
 // attachSessions is attachFetches plus the park's session, in byte order.
 var attachSessions = append(slices.Clone(attachFetches), transportSelectRequest)
 
+// statusRequestFrame is the add's status read. A plain session mock serves it as one more
+// session; the server mock routes it to the status mock instead.
+const statusRequestFrame = `{"message":"StatusMessage","parameters":{}}`
+
+// statusTimeLeft and statusReplyFrame are answerAttach's status answer, in the server's
+// double-encoded shape, so a plain-mock add completes its status read at once.
+const statusTimeLeft = 140 * time.Minute
+
+var statusReplyFrame = fmt.Sprintf(
+	`{"status": "SUCCESS", "message": null, "value": "{\"status\": \"running\", \"timeLeft\": %.1f}"}`,
+	statusTimeLeft.Seconds())
+
+// attachSessionsWithStatus is attachSessions plus the status read, in byte order.
+var attachSessionsWithStatus = append(slices.Clone(attachSessions), statusRequestFrame)
+
 // attachSerial is the serial the mocks' one device row names.
 const attachSerial = "R3CN30ABCDE"
 
@@ -1134,13 +1156,15 @@ const attachSerial = "R3CN30ABCDE"
 var hostDevicesReply = fmt.Sprintf("OKAY%04x%s", len(attachSerial+"\tdevice\n"), attachSerial+"\tdevice\n")
 
 // answerAttach plays the server for an attach and a relayed command: one device row to
-// host:devices, OKAY to a select, echo for the rest.
+// host:devices, OKAY to a select, the status reply to the status request, echo for the rest.
 func answerAttach(_ *testsupport.MockSession, data []byte) []byte {
 	switch string(data) {
 	case hostDevicesRequest:
 		return []byte(hostDevicesReply)
 	case transportSelectRequest:
 		return []byte("OKAY")
+	case statusRequestFrame:
+		return []byte(statusReplyFrame)
 	}
 	return data
 }
@@ -1174,7 +1198,7 @@ func TestGivenARunningDaemonWhenADeviceIsAddedThenANotifierOpensAndFollowsTheAtt
 	// add fetches the serial, the attach fetches the host replies, opens a notifier on the
 	// reverse route and clears the server's reverse rules once it is ready, and the shutdown
 	// detach closes the notifier.
-	sessions, mock := testsupport.NewServerMockWSS(t, testsupport.SessionMockConfig{OnMessage: answerReverseClear})
+	sessions, mock, _ := testsupport.NewServerMockWSS(t, testsupport.SessionMockConfig{OnMessage: answerReverseClear})
 	cfg := config.Default()
 	cfg.ListenPort = freePort(t)
 	cfg.ReverseEnabled = true
@@ -1220,14 +1244,15 @@ func TestGivenAnAttachedDeviceWhenIdleThenItsOnlySessionsAreTheHostFetchesAndThe
 	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: testSessionArnOne})
 	require.NoError(t, err)
 	require.True(t, addResp.OK, "add over the live control socket must succeed: %s", addResp.Error)
-	sessions := len(attachSessions)
+	sessions := len(attachSessionsWithStatus)
 	require.Eventually(t, func() bool {
 		return mock.SessionsOpened() == sessions && mock.ConnectionsAccepted() == sessions
 	}, testTimeout, testPollInterval, "the add must fetch each host reply and park a websocket")
 
 	assert.Never(t, func() bool { return mock.SessionsOpened() > sessions || mock.ConnectionsAccepted() > sessions },
 		500*time.Millisecond, testPollInterval, "an idle attachment dials nothing more")
-	assert.Equal(t, attachSessions, sortedInbounds(mock), "each fetch sends its request alone, the park its select")
+	assert.Equal(t, attachSessionsWithStatus, sortedInbounds(mock),
+		"each fetch sends its request alone, the park its select, the status read its request")
 
 	cancel()
 
@@ -1252,7 +1277,7 @@ func TestGivenAnAttachedDeviceWhenAnAdbCommandArrivesThenItRidesTheWebsocketPark
 	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: testSessionArnOne})
 	require.NoError(t, err)
 	require.True(t, addResp.OK, "add over the live control socket must succeed: %s", addResp.Error)
-	sessions := len(attachSessions)
+	sessions := len(attachSessionsWithStatus)
 	require.Eventually(t, func() bool {
 		return mock.ConnectionsAccepted() == sessions && mock.SessionsOpened() == sessions
 	}, testTimeout, testPollInterval, "attaching a device must park one adb websocket ahead of any command")
@@ -1311,7 +1336,7 @@ func adbCommand(t *testing.T, listenPort int, service string) string {
 func TestGivenReverseOffWhenTheDaemonAttachesThenNoNotifierOpensAndOnlyReverseIsRefused(t *testing.T) {
 	// The default must reach the attachment, not just the config: the proof is a server that sees
 	// no notifier while the daemon still installs a forward rule and refuses a reverse one itself.
-	_, mock := testsupport.NewServerMockWSS(t, testsupport.SessionMockConfig{OnMessage: answerAttach})
+	_, mock, _ := testsupport.NewServerMockWSS(t, testsupport.SessionMockConfig{OnMessage: answerAttach})
 	cfg := config.Default()
 	cfg.ListenPort = freePort(t)
 	mgr := newTestManagerWithClient(t, cfg, newFakeClient(mock.URL, "Pixel 10 (OS 17)"))
