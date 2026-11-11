@@ -44,7 +44,7 @@ const (
 )
 
 // resolveTimeout bounds one session lookup (GetRemoteAccessSession with its retries) on
-// refresh, and the lookup plus the serial fetch on add. The SDK's retry budget caps
+// refresh, and the add's lookups (up to two) plus the serial fetch. The SDK's retry budget caps
 // attempts, not wall time, and add runs on the inline control loop, so a stalled step would
 // wedge every later control command. It sits below the control channel's deadline so a slow
 // step surfaces as an add error to the CLI, not a dead socket. A var so tests can shrink it.
@@ -507,18 +507,21 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 	return func(req control.Request) control.Response {
 		switch req.Op {
 		case control.OpAdd:
+			// Validate first: a bad ARN gets the ARN error, not the attached
+			// refusal, and makes no service call.
+			if err := session.ValidateSessionARN(req.ARN); err != nil {
+				return refusedReply(err)
+			}
 			// Enforce the one-device limit BEFORE resolving, so a re-add of the current
 			// device (an idempotent no-op) or a rejected different device never makes a
 			// needless AWS call. Only a genuinely new attachment reaches resolution.
 			if current, present := device.Current(); present {
-				if req.ARN != "" && req.ARN == current.ARN {
-					m.logger.Info("device already attached; add is a no-op", "device", current.Label)
-					return control.Response{OK: true, DeviceLabel: current.Label, Port: m.config.ListenPort}
-				}
-				return refusedReply(differentDeviceAttached(current.Label))
+				return m.attachedAddReply(current, req.ARN)
 			}
 
-			resolved, serial, err := m.resolveForAttach(ctx, dialer, req.ARN)
+			resolveCtx, cancelResolve := context.WithTimeout(ctx, resolveTimeout)
+			defer cancelResolve()
+			resolved, storedARN, err := m.resolveForAttach(resolveCtx, req.ARN)
 			if err != nil {
 				m.logger.Warn("failed to attach the device on add", "error", err, "arn", req.ARN)
 				if fix := m.addFix(err, req.ARN); fix != "" {
@@ -526,18 +529,29 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 				}
 				return refusedReply(err)
 			}
+			// Defense in depth, as the Set branch: an attach that landed during the
+			// resolve under storedARN is the same no-op, with no fetch.
+			if current, present := device.Current(); present {
+				return m.attachedAddReply(current, storedARN)
+			}
+			serial, err := dialer.FetchDeviceSerial(resolveCtx, resolved.Endpoint)
+			if err != nil {
+				err = fmt.Errorf("fetch the device serial: %w", err)
+				m.logger.Warn("failed to attach the device on add", "error", err, "arn", storedARN)
+				return refusedReply(err)
+			}
 			// Control commands are serialized on the inline accept loop and nothing
 			// else calls Set, so nothing can attach between the check above and here;
 			// this Set is expected to succeed. The failure branch is kept only as
 			// defense-in-depth against a future concurrent caller, and treats the
 			// race like the already-attached path.
-			if !device.Set(bridge.DeviceInfo{ARN: req.ARN, Endpoint: resolved.Endpoint, Label: resolved.Label,
+			if !device.Set(bridge.DeviceInfo{ARN: storedARN, Endpoint: resolved.Endpoint, Label: resolved.Label,
 				Serial: serial, SessionStartedAt: resolved.StartedAt, SessionExpiresAt: resolved.ExpiresAt}) {
 				current, _ := device.Current()
-				return refusedReply(differentDeviceAttached(current.Label))
+				return m.attachedAddReply(current, storedARN)
 			}
 			m.logger.Info("device attached", "device", resolved.Label)
-			return control.Response{OK: true, DeviceLabel: resolved.Label, Port: m.config.ListenPort}
+			return control.Response{OK: true, DeviceLabel: resolved.Label, ARN: storedARN, Port: m.config.ListenPort}
 
 		case control.OpRemove:
 			current, present := device.Current()
@@ -598,21 +612,37 @@ func withLastDetach(resp control.Response, device *bridge.ActiveDevice) control.
 	return resp
 }
 
-// resolveForAttach resolves sessionARN, then fetches the device's adb serial from the
-// endpoint, both under one resolveTimeout so the add stays under the control deadline.
-func (m *DaemonManager) resolveForAttach(ctx context.Context, dialer *bridge.WSDialer,
-	sessionARN string) (session.RemoteAccessInfo, string, error) {
-	ctx, cancel := context.WithTimeout(ctx, resolveTimeout)
-	defer cancel()
-	resolved, err := m.remoteAccessClient.GetSession(ctx, sessionARN)
+// attachedAddReply answers an add while a device is attached: the no-op success
+// when arn names it, else the refusal.
+func (m *DaemonManager) attachedAddReply(current bridge.DeviceInfo, arn string) control.Response {
+	if arn == current.ARN {
+		m.logger.Info("device already attached; add is a no-op", "device", current.Label)
+		return control.Response{OK: true, DeviceLabel: current.Label, ARN: current.ARN, Port: m.config.ListenPort}
+	}
+	return refusedReply(differentDeviceAttached(current.Label))
+}
+
+// resolveForAttach resolves typedARN for an add. The service finds the session by
+// the caller's account and may answer with another ARN. It signs the endpoint for
+// the ARN it was sent, so a differing answer gets one more lookup, never a third.
+// The returned ARN is the answer's (the asked one when the answer has none); the
+// attachment and the refresh loop key on it.
+func (m *DaemonManager) resolveForAttach(ctx context.Context,
+	typedARN string) (session.RemoteAccessInfo, string, error) {
+	resolved, err := m.remoteAccessClient.GetSession(ctx, typedARN)
 	if err != nil {
 		return session.RemoteAccessInfo{}, "", fmt.Errorf("resolve session: %w", err)
 	}
-	serial, err := dialer.FetchDeviceSerial(ctx, resolved.Endpoint)
-	if err != nil {
-		return session.RemoteAccessInfo{}, "", fmt.Errorf("fetch the device serial: %w", err)
+	askedARN := typedARN
+	if resolved.ARN != "" && resolved.ARN != typedARN {
+		askedARN = resolved.ARN
+		m.logger.Info("the service names this session by another ARN; resolving once more",
+			"typed", typedARN, "returned", askedARN)
+		if resolved, err = m.remoteAccessClient.GetSession(ctx, askedARN); err != nil {
+			return session.RemoteAccessInfo{}, "", fmt.Errorf("resolve session: %w", err)
+		}
 	}
-	return resolved, serial, nil
+	return resolved, resolved.ReturnedARN(askedARN), nil
 }
 
 // lookUpSession resolves sessionARN under resolveTimeout and judges the answer for the attached

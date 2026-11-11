@@ -258,6 +258,12 @@ func withoutEndpoint(err error) error {
 	return err
 }
 
+// ErrUpgradeRefused: the server answered the websocket upgrade with an HTTP
+// error. The websocket library does not expose the status, so the text names the
+// possible causes instead.
+var ErrUpgradeRefused = errors.New("the server refused the websocket upgrade: the session may have ended, " +
+	"its endpoint URL may have expired, or the session ARN may name another account")
+
 // Dial opens one websocket to endpoint on route, with its inbound per-message cap
 // armed. The caller owns closing it.
 func (d *WSDialer) Dial(ctx context.Context, endpoint string, route Route) (WSConn, error) {
@@ -283,8 +289,13 @@ func (d *WSDialer) Dial(ctx context.Context, endpoint string, route Route) (WSCo
 
 	ws, err := cfg.DialContext(dialCtx)
 	if err != nil {
+		cause := withoutEndpoint(err)
+		if errors.Is(cause, websocket.ErrBadStatus) {
+			// "bad status" reaches no user; the sentinel names the causes instead.
+			cause = ErrUpgradeRefused
+		}
 		return nil, fmt.Errorf("websocket dial %s://%s route %s: %w",
-			cfg.Location.Scheme, cfg.Location.Host, route, withoutEndpoint(err))
+			cfg.Location.Scheme, cfg.Location.Host, route, cause)
 	}
 	ws.MaxPayloadBytes = maxInboundMessageBytes
 	return &wsConn{conn: ws, writeDeadline: d.writeDeadline}, nil

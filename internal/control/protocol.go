@@ -50,10 +50,11 @@ type Request struct {
 // knows (failure.Split); the CLI prints each as a fix line. DeviceLabel and Port
 // describe the daemon's resulting state so the CLI can print the listening line
 // without a second round trip. Devices is one entry per connected device; OpStatus
-// and OpList both fill it. An OpList reply carries no Port. OpStatus also fills ARN
-// (the attached session) and ReverseEnabled (--allow-adb-reverse was set).
-// LastDetachReason and LastDetachAt say why and when the daemon last detached a
-// device on its own (a session gone or ended);
+// and OpList both fill it. An OpList reply carries no Port. OpStatus fills ARN with
+// the attached session; an OpAdd success fills it with the stored ARN, which can
+// differ from the typed one. OpStatus also fills ReverseEnabled (--allow-adb-reverse
+// was set). LastDetachReason and LastDetachAt say why and when the daemon last
+// detached a device on its own (a session gone or ended);
 // OpStatus and OpList carry them while no device is attached, and a remove by the user
 // leaves them empty.
 type Response struct {

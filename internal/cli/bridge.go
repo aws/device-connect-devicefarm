@@ -14,6 +14,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/failure"
 	"github.com/aws/device-connect-devicefarm/internal/report"
+	"github.com/aws/device-connect-devicefarm/internal/session"
 )
 
 // newBridgeCommand groups the daemon-lifecycle subcommands under one parent:
@@ -51,10 +52,11 @@ func newBridgeCommand(state *rootState) *cobra.Command {
 // up (the daemon resolves the ARN); without it, this command attaches nothing
 // and a later "device add" connects one.
 //
-// The daemon resolves the ARN, so a session that does not resolve fails only after
-// the listener is up. By design the listener stays up with no device, as on the
-// no-ARN path, and the error tells the user to fix the issue and run this command
-// again.
+// A malformed --session-arn is a usage error before anything stops or starts, so it
+// never stops a working bridge. The daemon resolves the ARN, so a session that does
+// not resolve fails only after the listener is up. By design the listener stays up
+// with no device, as on the no-ARN path, and the error tells the user to fix the
+// issue and run this command again.
 func newBridgeStartCommand(state *rootState) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "start",
@@ -63,6 +65,14 @@ func newBridgeStartCommand(state *rootState) *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := state.cfg.Validate(); err != nil {
 				return usageError(cmd, err)
+			}
+			if blankSessionArn(cmd, state) {
+				return usageError(cmd, errors.New("--session-arn is blank"))
+			}
+			if state.sessionARN != "" {
+				if err := session.ValidateSessionARN(state.sessionARN); err != nil {
+					return usageError(cmd, err)
+				}
 			}
 			if err := restartBridge(cmd, state); err != nil {
 				return err

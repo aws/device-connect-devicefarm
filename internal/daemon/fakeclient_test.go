@@ -5,6 +5,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -15,6 +16,15 @@ import (
 var (
 	testSessionStartedAt = time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
 	testSessionExpiresAt = testSessionStartedAt.Add(150 * time.Minute)
+)
+
+// Well-formed session ARNs for every add the daemon tests send: the add handler
+// validates the ARN before anything else, so a shorthand like "arn:1" is refused.
+const (
+	testSessionArnOne   = "arn:aws:devicefarm:us-west-2:111122223333:session:aaaaaaaa-1111-4111-a111-111111111111"
+	testSessionArnTwo   = "arn:aws:devicefarm:us-west-2:111122223333:session:bbbbbbbb-2222-4222-a222-222222222222"
+	testSessionArnThree = "arn:aws:devicefarm:us-west-2:111122223333:session:cccccccc-3333-4333-a333-333333333333"
+	testSessionArnOther = "arn:aws:devicefarm:us-west-2:111122223333:session:dddddddd-4444-4444-a444-444444444444"
 )
 
 // Resolved endpoints for the daemon tests. The daemon stores whatever the
@@ -43,6 +53,9 @@ type fakeRemoteAccessClient struct {
 	label    string
 	err      error
 	arns     []string
+	// returnedArns maps an asked ARN to the ARN the answer names. An ARN not in the
+	// map answers with no ARN, so the add makes one lookup.
+	returnedArns map[string]string
 }
 
 // newFakeClient builds a client that resolves to the given endpoint and label.
@@ -60,6 +73,16 @@ func (f *fakeRemoteAccessClient) set(endpoint string, err error) {
 	f.err = err
 }
 
+// returnArnFor makes lookups of asked answer with returned as the session ARN.
+func (f *fakeRemoteAccessClient) returnArnFor(asked, returned string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.returnedArns == nil {
+		f.returnedArns = map[string]string{}
+	}
+	f.returnedArns[asked] = returned
+}
+
 // resolvedARNs returns the ARNs GetSession was called with, in order.
 func (f *fakeRemoteAccessClient) resolvedARNs() []string {
 	f.mu.Lock()
@@ -74,7 +97,7 @@ func (f *fakeRemoteAccessClient) GetSession(_ context.Context, sessionARN string
 	if f.err != nil {
 		return session.RemoteAccessInfo{}, f.err
 	}
-	return session.RemoteAccessInfo{Endpoint: f.endpoint, Label: f.label,
+	return session.RemoteAccessInfo{Endpoint: f.endpoint, ARN: f.returnedArns[sessionARN], Label: f.label,
 		StartedAt: testSessionStartedAt, ExpiresAt: testSessionExpiresAt}, nil
 }
 
@@ -89,4 +112,19 @@ type attachDuringResolve struct {
 func (a *attachDuringResolve) GetSession(ctx context.Context, sessionARN string) (session.RemoteAccessInfo, error) {
 	a.attach()
 	return a.inner.GetSession(ctx, sessionARN)
+}
+
+// failSecondLookup delegates the first GetSession and fails every later one, so a
+// test can drive the error branch of the add's one re-resolve.
+type failSecondLookup struct {
+	inner session.RemoteAccessClient
+	calls int
+}
+
+func (failing *failSecondLookup) GetSession(ctx context.Context, sessionARN string) (session.RemoteAccessInfo, error) {
+	failing.calls++
+	if failing.calls > 1 {
+		return session.RemoteAccessInfo{}, errors.New("second lookup failed for the test")
+	}
+	return failing.inner.GetSession(ctx, sessionARN)
 }

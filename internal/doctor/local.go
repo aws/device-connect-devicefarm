@@ -209,6 +209,12 @@ type runState struct {
 	daemonPID    int
 	// endpoint of the resolved session. It is a credential; no row prints it.
 	endpoint string
+	// returnedARN: what the service returned for the resolved session. It can differ from the
+	// asked ARN.
+	returnedARN string
+	// lookupOnce guards lookup, the run's one session lookup (lookUpSession).
+	lookupOnce sync.Once
+	lookup     sessionLookup
 	// sessionUUID: opened by relay.session, resumed by relay.reattach.
 	sessionUUID string
 }
@@ -227,13 +233,14 @@ func (state *runState) daemon() (control.Response, int) {
 	return state.daemonStatus, state.daemonPID
 }
 
-// localChecks are the rows that touch only this machine, in run order.
+// localChecks are the Local machine rows, in run order. They touch only this machine, but the
+// bridge row can make the run's session lookup (lookUpReturnedARN).
 func localChecks(inputs Inputs, state *runState) []Check {
 	return []Check{
 		{ID: checkRuntimeDir, Title: "working directory", Category: CategoryLocal, Timeout: localTimeout,
 			Run: func(context.Context) Result { return checkRuntimeDirectory(state) }},
 		{ID: checkDaemon, Title: "bridge", Category: CategoryLocal, Needs: []string{checkRuntimeDir}, Timeout: daemonTimeout,
-			Run: func(context.Context) Result { return checkRunningDaemon(inputs, state) }},
+			Run: func(ctx context.Context) Result { return checkRunningDaemon(ctx, inputs, state) }},
 		{ID: checkListenPort, Title: "listen port", Category: CategoryLocal, Needs: []string{checkDaemon}, Timeout: listenPortTimeout,
 			Run: func(context.Context) Result { return checkListenPortFree(inputs, state) }},
 		{ID: checkForwardTable, Title: "adb forward", Category: CategoryLocal, Timeout: localTimeout,
@@ -281,7 +288,7 @@ func causeWithoutSocketPath(err error) string {
 
 // checkRunningDaemon reads the pidfile, then asks a running daemon for its status. A locked
 // pidfile with a dead socket is a FAIL: device add and device list start nothing and fail.
-func checkRunningDaemon(inputs Inputs, state *runState) Result {
+func checkRunningDaemon(ctx context.Context, inputs Inputs, state *runState) Result {
 	pid, running := daemon.NewManager(inputs.Config, state.paths, nil, inputs.Logger).Status()
 	if !running {
 		return Result{Status: Pass, Summary: "not running; bridge start, device add or device list will launch it"}
@@ -299,13 +306,43 @@ func checkRunningDaemon(inputs Inputs, state *runState) Result {
 			Hint: deadDaemonHint}
 	}
 	state.setDaemon(reply, pid)
-	return bridgeRowResult(strings.TrimSpace(inputs.SessionARN), reply, pid)
+	askedARN := strings.TrimSpace(inputs.SessionARN)
+	returnedARN := lookUpReturnedARN(ctx, inputs, state, askedARN, reply)
+	return bridgeRowResult(askedARN, returnedARN, reply, pid)
+}
+
+// lookUpReturnedARN is the ARN the service returns for the asked session; askedARN with no
+// answer. It asks for the run's session lookup only when the bridge holds a session or a detach
+// reason that the asked ARN does not name. The row needs no credentials or network: with no
+// answer it compares the asked ARN. A session that is not RUNNING gives no answer.
+func lookUpReturnedARN(ctx context.Context, inputs Inputs, state *runState, askedARN string, reply control.Response) string {
+	nothingHeld := reply.ARN == "" && reply.LastDetachReason == ""
+	askedNamesIt := askedARN == reply.ARN || strings.Contains(reply.LastDetachReason, askedARN)
+	if askedARN == "" || nothingHeld || askedNamesIt {
+		return askedARN
+	}
+	// Ask only while the row's deadline leaves the lookup its whole bound. A lookup cut short
+	// would fail this row, and the session row would read the cut answer.
+	if deadline, ok := ctx.Deadline(); ctx.Err() != nil || ok && time.Until(deadline) < remoteTimeout+probeMargin {
+		return askedARN
+	}
+	if lookup := state.lookUpSession(ctx, inputs); lookup.err == nil {
+		return lookup.info.ReturnedARN(askedARN)
+	}
+	return askedARN
+}
+
+// attachedIsAsked reports whether the attached session is the asked one. The bridge attaches
+// under the ARN the service returns, so either ARN matches.
+func attachedIsAsked(attachedARN, askedARN, returnedARN string) bool {
+	return attachedARN != "" && (attachedARN == askedARN || attachedARN == returnedARN)
 }
 
 // bridgeRowResult builds the row for a bridge that answered status. WARN on the first match: a
 // detached device (unless the reason is about another session than the asked one), the asked
-// session not attached, reverse off. Never FAIL: the bridge runs.
-func bridgeRowResult(askedARN string, reply control.Response, pid int) Result {
+// session not attached, reverse off. Never FAIL: the bridge runs. askedARN and returnedARN (see
+// lookUpReturnedARN) both name the asked session.
+func bridgeRowResult(askedARN, returnedARN string, reply control.Response, pid int) Result {
 	device := "no device"
 	if reply.DeviceLabel != "" {
 		device = fmt.Sprintf("device %s, session %s", safeValue(reply.DeviceLabel), safeValue(reply.ARN))
@@ -319,12 +356,13 @@ func bridgeRowResult(askedARN string, reply control.Response, pid int) Result {
 	if reply.LastDetachReason != "" {
 		summary += "; the bridge detached the last device"
 	}
-	askedMissing := askedARN != "" && askedARN != reply.ARN
+	askedMissing := askedARN != "" && !attachedIsAsked(reply.ARN, askedARN, returnedARN)
 	if askedMissing {
 		summary += fmt.Sprintf("; session %s is not attached", safeValue(askedARN))
 	}
 	// Every detach reason names its session.
-	detachAnswersAsk := askedARN == "" || strings.Contains(reply.LastDetachReason, askedARN)
+	detachAnswersAsk := askedARN == "" || strings.Contains(reply.LastDetachReason, askedARN) ||
+		returnedARN != "" && strings.Contains(reply.LastDetachReason, returnedARN)
 	switch {
 	case reply.LastDetachReason != "" && detachAnswersAsk:
 		return Result{Status: Warn, Summary: summary, Hint: detachedHint(reply.LastDetachReason)}

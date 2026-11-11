@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -639,6 +640,62 @@ func TestGivenARunningDaemonWithOneDeviceWhenDiagnosedWithNoSessionArnThenTheJso
 	assert.Equal(t, Pass, sessionRow.Status, sessionRow.Summary)
 	assert.Equal(t, "RUNNING: Pixel 9 (OS 16) (the session the bridge holds: "+testSessionARN+")", sessionRow.Summary)
 	assert.Zero(t, results.Failed(), "a healthy machine with an attached device fails nothing")
+}
+
+func TestGivenASessionArnTheBridgeHoldsUnderAnotherArnWhenDiagnosedThenOneLookupServesEveryRow(t *testing.T) {
+	notFound := fmt.Errorf("GetRemoteAccessSession: %w", session.ErrSessionNotFound)
+	tests := []struct {
+		name string
+		// err fails the lookup; nil answers with returnedSessionARN.
+		err         error
+		wantBridge  Status
+		wantSession Status
+		wantReverse Status
+	}{
+		{name: "the lookup answers with that ARN", wantBridge: Pass, wantSession: Pass, wantReverse: Pass},
+		{name: "the lookup fails", err: notFound, wantBridge: Warn, wantSession: Fail, wantReverse: Skip},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateLocalAdb(t)
+			sessions, reverse, dialer := relayMock(t, testsupport.SessionMockConfig{
+				OnMessage: func(_ *testsupport.MockSession, data []byte) []byte {
+					if string(data) == "000chost:version" {
+						return []byte("OKAY00040029")
+					}
+					return []byte("OKAY")
+				},
+			})
+			inputs := localInputs(t)
+			inputs.SessionARN = testSessionARN
+			fakeDaemon(t, control.Response{OK: true, Port: inputs.Config.ListenPort, ARN: returnedSessionARN, ReverseEnabled: true,
+				DeviceLabel: "Pixel 9 (OS 16)",
+				Devices:     []control.AttachedDevice{{SessionARN: returnedSessionARN, Label: "Pixel 9 (OS 16)"}}})
+			inputs.Credentials = func(context.Context) (session.CredentialSummary, error) {
+				return session.CredentialSummary{Source: "StaticCredentials"}, nil
+			}
+			resolver := &fakeResolver{err: tc.err}
+			if tc.err == nil {
+				resolver.info = session.RemoteAccessInfo{Endpoint: sessions.URL, ARN: returnedSessionARN, Label: "Pixel 9 (OS 16)"}
+			}
+			inputs.Resolver, inputs.Dialer = resolver, dialer
+
+			results := Diagnose(context.Background(), inputs)
+
+			bridgeRow, sessionRow := rowByID(t, results, checkDaemon), rowByID(t, results, checkSession)
+			reverseRow := rowByID(t, results, checkReverse)
+			assert.Equal(t, tc.wantBridge, bridgeRow.Status, bridgeRow.Summary)
+			assert.Equal(t, tc.wantBridge == Warn, strings.Contains(bridgeRow.Summary, "session "+testSessionARN+" is not attached"),
+				"a failed lookup compares the typed ARN: %s", bridgeRow.Summary)
+			assert.Equal(t, tc.wantSession, sessionRow.Status, sessionRow.Summary)
+			assert.Equal(t, tc.wantReverse, reverseRow.Status, reverseRow.Summary)
+			if tc.wantReverse == Pass {
+				assert.Equal(t, reverseOnSummary, reverseRow.Summary)
+			}
+			assert.Zero(t, reverse.NotifiersAccepted(), "no reverse probe: the bridge holds the slot, or the row did not run")
+			assert.Equal(t, []string{testSessionARN}, resolver.arns, "one lookup, of the typed ARN")
+		})
+	}
 }
 
 // rowByID finds the row named by id in results.
