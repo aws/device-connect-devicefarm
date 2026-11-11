@@ -102,14 +102,18 @@ func newBridgeStopCommand(state *rootState) *cobra.Command {
 		Short: "Stop the running bridge",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if _, running := state.newManager().Status(); !running {
-				cmd.Println(notListeningMessage)
-				return nil
-			}
-			if err := state.newManager().Stop(); err != nil {
+			result, err := stopBridge(state.newManager())
+			if err != nil {
 				return &failure.Explained{Problem: "could not stop the bridge", Cause: err}
 			}
-			cmd.Println(config.BinaryName + " stopped")
+			if !result.WasRunning {
+				cmd.PrintErrln(notListeningMessage)
+				return nil
+			}
+			if result.Killed {
+				cmd.PrintErrf("* the bridge (pid %d) did not stop cleanly and was killed\n", result.PID)
+			}
+			cmd.PrintErrln(config.BinaryName + " stopped")
 			return nil
 		},
 	}

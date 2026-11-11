@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,11 +25,14 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/daemon"
 )
 
-// TestMain blocks the real bridge start: a test that needs one uses fakeBridgeStart;
-// any other test that reaches it has a bug.
+// TestMain blocks the real bridge start and stop: a test that needs one uses
+// fakeBridgeStart or fakeBridgeStop; any other test that reaches them has a bug.
 func TestMain(m *testing.M) {
-	startBridge = func(*daemon.DaemonManager) error {
+	startBridge = func(*daemon.DaemonManager) (daemon.StartResult, error) {
 		panic("a test reached the real bridge start; use fakeBridgeStart")
+	}
+	stopBridge = func(*daemon.DaemonManager) (daemon.StopResult, error) {
+		panic("a test reached the real bridge stop; use fakeBridgeStop")
 	}
 	os.Exit(m.Run())
 }
@@ -94,21 +98,41 @@ func fakeDaemon(t *testing.T, handler control.Handler) {
 }
 
 // stubBridgeStart replaces the bridge start for one test.
-func stubBridgeStart(t *testing.T, start func(*daemon.DaemonManager) error) {
+func stubBridgeStart(t *testing.T, start func(*daemon.DaemonManager) (daemon.StartResult, error)) {
 	t.Helper()
 	previous := startBridge
 	startBridge = start
 	t.Cleanup(func() { startBridge = previous })
 }
 
+// fakeBridgeStop replaces the bridge stop for one test; returns a call count.
+func fakeBridgeStop(t *testing.T, result daemon.StopResult, err error) *int {
+	t.Helper()
+	previous := stopBridge
+	calls := 0
+	stopBridge = func(*daemon.DaemonManager) (daemon.StopResult, error) {
+		calls++
+		return result, err
+	}
+	t.Cleanup(func() { stopBridge = previous })
+	return &calls
+}
+
 // fakeBridgeStart makes a bridge start write the live pidfile and serve handler at paths
-// instead of forking.
+// instead of forking. The result names this process's pid and the paths' logfile,
+// as the real Start would.
 func fakeBridgeStart(t *testing.T, paths daemon.Paths, handler control.Handler) {
 	t.Helper()
-	stubBridgeStart(t, func(*daemon.DaemonManager) error {
+	fakeBridgeStartWithResult(t, paths, handler, daemon.StartResult{PID: os.Getpid(), LogFile: paths.LogFile})
+}
+
+// fakeBridgeStartWithResult is fakeBridgeStart with a caller-supplied result.
+func fakeBridgeStartWithResult(t *testing.T, paths daemon.Paths, handler control.Handler, result daemon.StartResult) {
+	t.Helper()
+	stubBridgeStart(t, func(*daemon.DaemonManager) (daemon.StartResult, error) {
 		writeLivePidfile(t, paths)
 		serveControl(t, paths, handler)
-		return nil
+		return result, nil
 	})
 }
 
@@ -182,7 +206,7 @@ func TestGivenNoBridgeWhenAddDeviceInvokedThenStartsTheBridgeAndAttaches(t *test
 func TestGivenBridgeStartFailsWhenAddDeviceInvokedThenErrorsWithTheStartFailure(t *testing.T) {
 	shortRuntimeDir(t)
 	startFailure := errors.New("spawn bridge: exec format error")
-	stubBridgeStart(t, func(*daemon.DaemonManager) error { return startFailure })
+	stubBridgeStart(t, func(*daemon.DaemonManager) (daemon.StartResult, error) { return daemon.StartResult{}, startFailure })
 
 	out, err := execRoot(t, "device", "add", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
 
@@ -381,7 +405,8 @@ func TestGivenNoBridgeWhenListDevicesInvokedWithJSONThenStdoutHoldsOnlyTheObject
 	require.NoError(t, root.Execute())
 
 	assert.Equal(t, `{"devices":[]}`+"\n", stdout.String())
-	assert.Equal(t, "* bridge not running; starting it now\n", stderr.String())
+	assert.Equal(t, "* bridge not running; starting it now\n"+
+		fmt.Sprintf("* bridge started (pid %d); log file: %s\n", os.Getpid(), paths.LogFile), stderr.String())
 }
 
 func TestGivenNoBridgeWhenListDevicesInvokedThenStartsTheBridge(t *testing.T) {
@@ -494,7 +519,7 @@ func TestGivenBridgeStartFailsWhenStartBridgeInvokedWithARNThenErrorsWithTheStar
 	// The start error must not be dressed up as "bridge started but attaching failed".
 	shortRuntimeDir(t)
 	startFailure := errors.New("spawn bridge: exec format error")
-	stubBridgeStart(t, func(*daemon.DaemonManager) error { return startFailure })
+	stubBridgeStart(t, func(*daemon.DaemonManager) (daemon.StartResult, error) { return daemon.StartResult{}, startFailure })
 
 	_, err := execRoot(t, "bridge", "start", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
 
@@ -549,4 +574,98 @@ func TestGivenSessionARNButDaemonCannotResolveWhenStartBridgeInvokedThenErrorsBu
 	assert.Contains(t, err.Error(), "bridge started")
 	assert.Contains(t, err.Error(), "retry 'device add'")
 	assert.Contains(t, err.Error(), "session not RUNNING")
+}
+
+func TestGivenNoBridgeWhenStartBridgeInvokedThenPrintsThePidAndLogFileAsAPlainLine(t *testing.T) {
+	paths := shortRuntimeDir(t)
+	fakeBridgeStart(t, paths, func(control.Request) control.Response {
+		return control.Response{OK: true, Port: 5037}
+	})
+	root := newRootCommand()
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.SetArgs([]string{"bridge", "start"})
+
+	require.NoError(t, root.Execute())
+
+	assert.Contains(t, stderr.String(), fmt.Sprintf("* bridge started (pid %d); log file: %s\n", os.Getpid(), paths.LogFile))
+	assert.NotContains(t, stdout.String(), "* bridge started", "result lines stay off stdout")
+	assert.NotContains(t, stderr.String(), "level=", "a plain line, not a log record")
+}
+
+func TestGivenAnAdbServerWasStoppedWhenStartBridgeInvokedThenSaysSoBeforeTheStartedLine(t *testing.T) {
+	paths := shortRuntimeDir(t)
+	fakeBridgeStartWithResult(t, paths, func(control.Request) control.Response {
+		return control.Response{OK: true, Port: 5037}
+	}, daemon.StartResult{PID: 4242, LogFile: paths.LogFile, StoppedAdbServer: "127.0.0.1:5037"})
+
+	out, err := execRoot(t, "bridge", "start")
+
+	require.NoError(t, err)
+	stopped := strings.Index(out.String(), "* stopped the adb server on 127.0.0.1:5037, as 'adb kill-server' does")
+	started := strings.Index(out.String(), "* bridge started (pid 4242); log file: "+paths.LogFile)
+	require.GreaterOrEqual(t, stopped, 0, out.String())
+	require.GreaterOrEqual(t, started, 0, out.String())
+	assert.Less(t, stopped, started, "the stop notice comes before the started line")
+}
+
+func TestGivenTheBridgeAlreadyRanWhenStartReturnsThenNoStartedLineIsPrinted(t *testing.T) {
+	// Two starts can race: Start then reports the winner. No started line, nothing new to say.
+	paths := shortRuntimeDir(t)
+	fakeBridgeStartWithResult(t, paths, func(control.Request) control.Response {
+		return control.Response{OK: true, Port: 5037}
+	}, daemon.StartResult{PID: 4242, LogFile: paths.LogFile, AlreadyRunning: true})
+
+	out, err := execRoot(t, "bridge", "start")
+
+	require.NoError(t, err)
+	assert.NotContains(t, out.String(), "* bridge started")
+}
+
+func TestGivenTheBridgeWasKilledWhenStopBridgeInvokedThenSaysSoBeforeStopped(t *testing.T) {
+	fakeBridgeStop(t, daemon.StopResult{PID: 4242, WasRunning: true, Killed: true}, nil)
+
+	out, err := runRoot(t, "bridge", "stop")
+
+	require.NoError(t, err)
+	killed := strings.Index(out.String(), "* the bridge (pid 4242) did not stop cleanly and was killed")
+	stopped := strings.Index(out.String(), config.BinaryName+" stopped")
+	require.GreaterOrEqual(t, killed, 0, out.String())
+	require.GreaterOrEqual(t, stopped, 0, out.String())
+	assert.Less(t, killed, stopped)
+}
+
+func TestGivenTheBridgeExitedMeanwhileWhenStopBridgeInvokedThenSaysNotListening(t *testing.T) {
+	fakeBridgeStop(t, daemon.StopResult{PID: 4242}, nil)
+
+	out, err := runRoot(t, "bridge", "stop")
+
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), notListeningMessage)
+	assert.NotContains(t, out.String(), "stopped\n")
+}
+
+func TestGivenStopFailsWhenStopBridgeInvokedThenTheFailureNamesTheProblem(t *testing.T) {
+	fakeBridgeStop(t, daemon.StopResult{PID: 4242, WasRunning: true}, errors.New("bridge (pid 4242) survived kill after 2s; pidfile left in place"))
+
+	_, err := runRoot(t, "bridge", "stop")
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "could not stop the bridge")
+	assert.ErrorContains(t, err, "survived kill")
+}
+
+func TestGivenAnAdbServerWasStoppedWhenTheStartThenFailsThenTheStopNoticeStillPrints(t *testing.T) {
+	shortRuntimeDir(t)
+	startFailure := errors.New("spawn bridge: exec format error")
+	stubBridgeStart(t, func(*daemon.DaemonManager) (daemon.StartResult, error) {
+		return daemon.StartResult{StoppedAdbServer: "127.0.0.1:5037"}, startFailure
+	})
+
+	out, err := execRoot(t, "bridge", "start")
+
+	require.ErrorIs(t, err, startFailure)
+	assert.Contains(t, out.String(), "* stopped the adb server on 127.0.0.1:5037, as 'adb kill-server' does")
+	assert.NotContains(t, out.String(), "* bridge started")
 }

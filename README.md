@@ -383,7 +383,7 @@ Run `devicefarm-connect <command> --help` to see the flags of a command.
 
 | Flag | Command | What it does |
 |---|---|---|
-| `--debug` | every command | Debug-level logs. The default is info. |
+| `--debug` | every command | Prints the command's log records on stderr; a bridge it starts logs at debug level. Without it a command prints no log records. |
 | `--version`, `-v` | `devicefarm-connect` alone | Prints the release version. |
 | `--port` | `bridge start`, `doctor` | The local TCP port for adb clients. Default `5037`, adb's own default. |
 | `--log` | `bridge start` | The bridge log file. Default `devicefarm-connect.log` in the runtime directory. |

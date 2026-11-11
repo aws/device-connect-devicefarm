@@ -102,60 +102,89 @@ func NewManager(
 	}
 }
 
+// StartResult is what Start found and did. PID is the child's, or the running
+// daemon's when AlreadyRunning. StoppedAdbServer is the host:port of an adb
+// server Start stopped before the spawn, else empty.
+type StartResult struct {
+	PID              int
+	LogFile          string
+	AlreadyRunning   bool
+	StoppedAdbServer string
+}
+
+// StopResult is what Stop found and did. WasRunning is false when Stop found no
+// daemon to stop. Killed is true when Stop called Kill and the daemon was gone
+// after it.
+type StopResult struct {
+	PID        int
+	WasRunning bool
+	Killed     bool
+}
+
 // Start launches the daemon as a detached background process and waits for it to
 // report ready (by writing its pidfile). If a daemon is already running it is a
 // no-op, matching adb's start-server behavior. Before the spawn it clears the
 // listen port (clearListenPort). A child that exits or never reports ready is
 // reported with the last error line it logged.
-func (m *DaemonManager) Start() error {
+func (m *DaemonManager) Start() (StartResult, error) {
 	if pid, running := m.pidFile.RunningPID(); running {
 		m.logger.Info("daemon already running", "pid", pid)
-		return nil
+		return StartResult{PID: pid, LogFile: m.paths.LogFile, AlreadyRunning: true}, nil
 	}
 
 	self, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("locate own executable: %w", err)
+		return StartResult{}, fmt.Errorf("locate own executable: %w", err)
 	}
 
 	// openNoFollow refuses a symlink where the OS can.
 	logOut, err := os.OpenFile(m.paths.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND|openNoFollow, 0o600)
 	if err != nil {
-		return fmt.Errorf("open bridge logfile %q: %w", m.paths.LogFile, err)
+		return StartResult{}, fmt.Errorf("open bridge logfile %q: %w", m.paths.LogFile, err)
 	}
 	// The child inherits the underlying fd, so closing the parent's handle after
 	// the spawn does not affect the child's logging.
 	defer logOut.Close()
 
-	if err := m.clearListenPort(); err != nil {
-		return m.unlessRunning(err)
+	stoppedAdbServer, err := m.clearListenPort()
+	if err != nil {
+		return m.unlessRunning("", err)
 	}
 	// The child appends after this offset, so an older run's error line is never read.
 	offset, _ := logOut.Seek(0, io.SeekEnd)
 	args := append([]string{DaemonSubcommand}, m.config.AsDaemonArgs()...)
 	child, exited, err := spawnDaemon(self, args, logOut)
 	if err != nil {
-		return fmt.Errorf("spawn bridge: %w", err)
+		return StartResult{StoppedAdbServer: stoppedAdbServer}, fmt.Errorf("spawn bridge: %w", err)
 	}
 
 	if err := m.waitUntilRunning(startupTimeout, exited); err != nil {
 		// A hung child may still hold the listen port: kill it, best-effort, so the
 		// next start is not wedged.
 		killOrphan(child)
-		return m.unlessRunning(m.startupError(err, offset))
+		return m.unlessRunning(stoppedAdbServer, m.startupError(err, offset))
+	}
+	// The ready pidfile may be a racing start's winner, not this child; report
+	// the pid that serves.
+	if pid, running := m.pidFile.RunningPID(); running && pid != child.Pid {
+		m.logger.Info("daemon already running", "pid", pid)
+		return StartResult{PID: pid, LogFile: m.paths.LogFile, AlreadyRunning: true,
+			StoppedAdbServer: stoppedAdbServer}, nil
 	}
 	m.logger.Info("daemon started", "pid", child.Pid, "logfile", m.paths.LogFile)
-	return nil
+	return StartResult{PID: child.Pid, LogFile: m.paths.LogFile, StoppedAdbServer: stoppedAdbServer}, nil
 }
 
-// unlessRunning returns nil when a daemon runs by now, else err. Two starts can pass
+// unlessRunning swallows err when a daemon runs by now. Two starts can pass
 // the pidfile check together; the loser's failure then means the winner serves.
-func (m *DaemonManager) unlessRunning(err error) error {
+// Both results carry stoppedAdbServer.
+func (m *DaemonManager) unlessRunning(stoppedAdbServer string, err error) (StartResult, error) {
 	if pid, running := m.pidFile.RunningPID(); running {
 		m.logger.Info("daemon already running", "pid", pid)
-		return nil
+		return StartResult{PID: pid, LogFile: m.paths.LogFile, AlreadyRunning: true,
+			StoppedAdbServer: stoppedAdbServer}, nil
 	}
-	return err
+	return StartResult{StoppedAdbServer: stoppedAdbServer}, err
 }
 
 // listenErrorPrefix starts the child's error when its TCP bind fails (bridge.AdbProxyServer.Listen).
@@ -223,11 +252,11 @@ func errorValue(line string) (string, bool) {
 // Stop sends shutdown over the control socket, waits up to the stop timeout for
 // the daemon to exit, kills it if it stays, and clears the pidfile. No-op when
 // no daemon runs.
-func (m *DaemonManager) Stop() error {
+func (m *DaemonManager) Stop() (StopResult, error) {
 	pid, running := m.pidFile.RunningPID()
 	if !running {
 		m.logger.Info("daemon not running")
-		return nil
+		return StopResult{}, nil
 	}
 
 	proc, err := findProcess(pid)
@@ -237,12 +266,12 @@ func (m *DaemonManager) Stop() error {
 		if m.stillRunning(pid) {
 			lookupFailed := fmt.Errorf("find bridge process %d: %w", pid, err)
 			if errors.Is(err, os.ErrPermission) {
-				return failure.WithFix(lookupFailed, "stop it from an elevated shell")
+				return StopResult{}, failure.WithFix(lookupFailed, "stop it from an elevated shell")
 			}
-			return lookupFailed
+			return StopResult{}, lookupFailed
 		}
 		m.logger.Info("daemon exited before shutdown was sent", "pid", pid)
-		return nil
+		return StopResult{PID: pid}, nil
 	}
 	// os.FindProcess opens a pidfd on Linux (Go 1.23+); release it on return so
 	// the fd is not leaked across the polling waits below.
@@ -252,9 +281,10 @@ func (m *DaemonManager) Stop() error {
 	// without pidfd) keeps a small window between this probe and the kill.
 	if !m.stillRunning(pid) {
 		m.logger.Info("daemon not running; nothing sent", "pid", pid)
-		return nil
+		return StopResult{PID: pid}, nil
 	}
 
+	result := StopResult{PID: pid, WasRunning: true}
 	resp, err := control.NewDaemonClient(m.paths.ControlSocket).Send(control.Request{Op: control.OpShutdown})
 	grace := m.config.StopTimeout
 	switch {
@@ -274,7 +304,7 @@ func (m *DaemonManager) Stop() error {
 	if !m.waitUntilStopped(pid, grace) {
 		if !m.stillRunning(pid) {
 			m.logger.Info("daemon record released; not escalating", "pid", pid)
-			return nil
+			return result, nil
 		}
 		if grace > 0 {
 			m.logger.Warn("daemon did not stop gracefully; killing it", "pid", pid)
@@ -285,14 +315,15 @@ func (m *DaemonManager) Stop() error {
 		if !m.waitUntilStopped(pid, killTimeout) {
 			// Keep the pidfile: the process lives and holds the listen port, so
 			// status must not report "not running".
-			return fmt.Errorf("bridge (pid %d) survived kill after %s; pidfile left in place", pid, killTimeout)
+			return StopResult{}, fmt.Errorf("bridge (pid %d) survived kill after %s; pidfile left in place", pid, killTimeout)
 		}
+		result.Killed = true
 	}
 	m.logger.Info("daemon stopped", "pid", pid)
 	// A killed daemon leaves its record unlocked; clear it. The probe removes
 	// only an unlocked file, so a successor's record stays.
 	_, _ = m.pidFile.RunningPID()
-	return nil
+	return result, nil
 }
 
 // Status reports the daemon's pid and whether it is running. It is the Manager's
