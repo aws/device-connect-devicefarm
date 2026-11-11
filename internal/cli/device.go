@@ -131,15 +131,27 @@ func deviceTable(devices []control.AttachedDevice, now time.Time) report.Table {
 	return table
 }
 
-// deviceListLine renders one attached device, tab-separated: the session ARN, the label,
-// "serial <serial>", "attached <age> ago", "session started <age> ago", "session expires in
-// <span>". An empty serial or a zero time reads "unknown"; a passed expiry reads "session expired".
+// deviceListLine renders one attached device as unlabeled tab-separated values,
+// ARN first. An empty serial or a zero time reads "unknown"; a passed expiry
+// reads "expired".
 func deviceListLine(attached control.AttachedDevice, now time.Time) string {
-	return fmt.Sprintf("%s\t%s\tserial %s\tattached %s\tsession started %s\tsession %s",
+	return fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s",
 		attached.SessionARN, attached.Label, cmp.Or(attached.Serial, "unknown"),
 		agoOrUnknown(attached.AttachedAt, now),
 		agoOrUnknown(attached.SessionStartedAt, now),
-		sessionExpiry(attached.SessionExpiresAt, now))
+		expiryValue(attached.SessionExpiresAt, now))
+}
+
+// expiryValue is sessionExpiry as a bare value: "unknown", "expired" or "in <span>".
+func expiryValue(expiresAt, now time.Time) string {
+	switch {
+	case expiresAt.IsZero():
+		return "unknown"
+	case !now.Before(expiresAt):
+		return "expired"
+	default:
+		return "in " + humanSpan(expiresAt.Sub(now))
+	}
 }
 
 // jsonDeviceList is the --json shape: the daemon's devices, always an array, and the last detach
