@@ -6,7 +6,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 
 	"github.com/spf13/cobra"
@@ -100,7 +99,7 @@ func newRootCommandWithState(state *rootState) *cobra.Command {
 		// subcommand runs. The doctor replaces this hook: see newDoctorCommand.
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			state.commandLineAccepted = true
-			initLogging(cmd.ErrOrStderr(), state.cfg.Debug)
+			initLogging(cmd, state.cfg.Debug)
 			paths, err := daemon.DefaultPaths()
 			if err != nil {
 				return &failure.Explained{Problem: "cannot use the working directory", Cause: err}
@@ -158,7 +157,8 @@ func hiddenHelpCommand(root *cobra.Command) *cobra.Command {
 // are intentionally not exposed: they are fixed runtime constants (see
 // config.Default) to keep the command surface small.
 func bindPersistentFlags(cmd *cobra.Command, cfg *config.ProxyConfig) {
-	cmd.PersistentFlags().BoolVar(&cfg.Debug, "debug", cfg.Debug, "enable debug-level logging (default is info)")
+	cmd.PersistentFlags().BoolVar(&cfg.Debug, "debug", cfg.Debug,
+		"print this command's log records on stderr; a bridge it starts also logs at debug level")
 }
 
 // bindListenerFlags wires the daemon's listener flags (--port, --listen-addr) to
@@ -183,16 +183,22 @@ func bindReverseFlag(cmd *cobra.Command, cfg *config.ProxyConfig) {
 		"allow device-originated reverse connections ('adb reverse'); off by default")
 }
 
-// initLogging installs the global slog text handler on errOut at info level,
-// debug with --debug. errOut is the command's stderr, so logs never mix with
-// command output on stdout; a test passes a buffer.
-func initLogging(errOut io.Writer, debug bool) {
+// initLogging installs the process-wide slog handler for cmd. The daemon body's
+// stderr is its logfile: it logs at info, debug with --debug, and lastChildError
+// parses those records. Every other command writes to a terminal: it discards
+// records unless --debug, which prints them at debug level on stderr. SetDefault
+// also routes the standard log package to this handler.
+func initLogging(cmd *cobra.Command, debug bool) {
+	daemonBody := cmd.Name() == daemon.DaemonSubcommand
+	if !daemonBody && !debug {
+		slog.SetDefault(slog.New(slog.DiscardHandler))
+		return
+	}
 	level := slog.LevelInfo
 	if debug {
 		level = slog.LevelDebug
 	}
-	handler := slog.NewTextHandler(errOut, &slog.HandlerOptions{Level: level})
-	slog.SetDefault(slog.New(handler))
+	slog.SetDefault(slog.New(slog.NewTextHandler(cmd.ErrOrStderr(), &slog.HandlerOptions{Level: level})))
 }
 
 // newManager builds a daemon.DaemonManager for the commands that start, stop or probe

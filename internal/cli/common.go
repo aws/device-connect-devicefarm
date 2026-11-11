@@ -91,7 +91,12 @@ func humanSpan(span time.Duration) string {
 
 // startBridge starts the bridge daemon. A package var so a test can swap in a fake
 // that does not fork.
-var startBridge = func(manager *daemon.DaemonManager) error { return manager.Start() }
+var startBridge = func(manager *daemon.DaemonManager) (daemon.StartResult, error) { return manager.Start() }
+
+// stopBridge stops the bridge daemon. A package var beside startBridge: the cli
+// tests fake a running daemon with this process's own pid, so a real Stop there
+// would kill the test binary.
+var stopBridge = func(manager *daemon.DaemonManager) (daemon.StopResult, error) { return manager.Stop() }
 
 // startBridgeIfNotRunning starts the bridge daemon with the default settings when none
 // runs, as adb starts its server on the first command.
@@ -101,10 +106,29 @@ func startBridgeIfNotRunning(cmd *cobra.Command, state *rootState) error {
 		return nil
 	}
 	cmd.PrintErrln("* bridge not running; starting it now")
-	if err := startBridge(manager); err != nil {
+	result, err := startBridge(manager)
+	// Print it even when the start failed: the user's adb server is gone.
+	printAdbServerStopped(cmd, result.StoppedAdbServer)
+	if err != nil {
 		return &failure.Explained{Problem: "could not start the bridge", Cause: err}
 	}
+	printStartResult(cmd, result)
 	return nil
+}
+
+// printAdbServerStopped tells the user that Start stopped their adb server.
+func printAdbServerStopped(cmd *cobra.Command, address string) {
+	if address != "" {
+		cmd.PrintErrln("* stopped the adb server on " + address + ", as 'adb kill-server' does")
+	}
+}
+
+// printStartResult prints a new daemon's pid and log file. On success no other
+// line names the log file.
+func printStartResult(cmd *cobra.Command, result daemon.StartResult) {
+	if !result.AlreadyRunning {
+		cmd.PrintErrf("* bridge started (pid %d); log file: %s\n", result.PID, result.LogFile)
+	}
 }
 
 // send sends req to the daemon. A dial failure returns errNotListening and logs

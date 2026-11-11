@@ -254,25 +254,24 @@ func bindErrorInUse(err error, goos string) bool {
 	return errors.Is(err, syscall.EADDRINUSE)
 }
 
-// clearListenPort runs before the spawn: a free port passes, an adb server is stopped, anything
-// else is Start's error.
-func (m *DaemonManager) clearListenPort() error {
+// clearListenPort runs before the spawn: a free port passes, an adb server is stopped and its
+// address returned, anything else is Start's error.
+func (m *DaemonManager) clearListenPort() (stoppedAdbServer string, err error) {
 	listenAddr, port := m.config.ListenAddr, m.config.ListenPort
 	occupant, host, bindErr := probeListenPort(listenAddr, port)
 	if occupant != portAdbServer {
-		return portError(occupant, bindErr, listenAddr, port)
+		return "", portError(occupant, bindErr, listenAddr, port)
 	}
 	// A concurrent start's daemon answers host:version too. Never stop it.
 	if _, running := m.pidFile.RunningPID(); running {
-		return errStartedMeanwhile
+		return "", errStartedMeanwhile
 	}
 	address := net.JoinHostPort(listenAddr, strconv.Itoa(port))
-	m.logger.Info(fmt.Sprintf("an adb server is listening on %s; stopping it before the daemon starts, as 'adb kill-server' would", address))
 	if cause := StopAdbServer(host, port, stopReplyTimeout); cause != nil {
-		return fmt.Errorf("an adb server on %s was asked to stop, as 'adb kill-server' asks, and did not (%v). %s", address, cause,
+		return "", fmt.Errorf("an adb server on %s was asked to stop, as 'adb kill-server' asks, and did not (%v). %s", address, cause,
 			AdbServerKeepsPortFix(listenAddr, port, LeadNamesNothing))
 	}
-	return nil
+	return address, nil
 }
 
 // lostBindError words a child whose bind failed after the pre-check passed: the port is probed

@@ -11,7 +11,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -360,6 +363,37 @@ func TestGivenValidARNWhenSessionFetchedThenCallsThroughToTheAPI(t *testing.T) {
 
 	require.Error(t, err, "a call to a closed endpoint must surface as an error")
 	assert.Contains(t, err.Error(), "GetRemoteAccessSession", "the error must come from the API call, not client construction")
+}
+
+func TestGivenAResponseWithAMalformedDateHeaderWhenSessionFetchedThenTheSDKWritesNothingToStderr(t *testing.T) {
+	// The SDK logger keeps the os.Stderr it saw when the config loaded, so the test
+	// swaps stderr first.
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		writer.Header().Set("Date", "not-a-date")
+		writer.Header().Set("Content-Type", "application/x-amz-json-1.1")
+		_, _ = writer.Write([]byte("{}"))
+	}))
+	t.Cleanup(server.Close)
+	testsupport.HermeticAWSEnv(t)
+	t.Setenv("AWS_ENDPOINT_URL_DEVICE_FARM", server.URL)
+	stderrFile, err := os.CreateTemp(t.TempDir(), "stderr")
+	require.NoError(t, err)
+	realStderr := os.Stderr
+	os.Stderr = stderrFile
+	t.Cleanup(func() { os.Stderr = realStderr })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client, err := NewRemoteAccessClient(ctx, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	_, _ = client.GetSession(ctx, testSessionARN)
+
+	require.Positive(t, requests.Load(), "the call must reach the endpoint")
+	written, err := os.ReadFile(stderrFile.Name())
+	require.NoError(t, err)
+	assert.Empty(t, string(written))
 }
 
 func TestGivenUnusableARNWhenSessionFetchedThenFailsFastWithoutCallingTheAPI(t *testing.T) {

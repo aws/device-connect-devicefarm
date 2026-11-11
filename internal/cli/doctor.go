@@ -61,7 +61,7 @@ timeout; a run in which every check times out ends in under two minutes.`, awsNa
 		Args: cobra.NoArgs,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			state.commandLineAccepted = true
-			initLogging(cmd.ErrOrStderr(), state.cfg.Debug)
+			initLogging(cmd, state.cfg.Debug)
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
