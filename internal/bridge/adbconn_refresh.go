@@ -87,6 +87,11 @@ func (c *adbConn) refresh(ctx context.Context, gate func() bool) error {
 		if c.unwindIfClosedLocked(successor, refreshFailed) {
 			return err
 		}
+		// The relay's stopping close detached the device: nothing to fall back to or drop.
+		if IsSessionStopping(err) {
+			c.failRefreshLocked(refreshFailed)
+			return err
+		}
 		// Test indeterminate before refusal: a refusal after an indeterminate attempt
 		// carries both errors, and the fresh-session fallback assumes an unsuperseded
 		// predecessor. Capture poisoned under the lock.
@@ -140,6 +145,9 @@ func (c *adbConn) attachSuccessorRetrying(ctx context.Context, sessionUUID strin
 		// Retry only failures a second try could answer differently. A cancelled ctx needs no
 		// check: the next dial fails at once.
 		if errors.Is(err, ErrSessionGone) || errors.Is(err, errAdbConnClosed) {
+			return nil, keepIndeterminateTaint(indeterminate, err)
+		}
+		if _, stopping := c.device.detachIfSessionStopping(c.arn, err); stopping {
 			return nil, keepIndeterminateTaint(indeterminate, err)
 		}
 		if attempt < attachAttempts {
@@ -371,6 +379,11 @@ func (c *adbConn) reconnectReactively(readErr error) bool {
 	if err != nil {
 		// Teardown first, as in refresh: a Close mid-attach is no failure to warn about.
 		if c.unwindIfClosedLocked(successor, refreshFailed) {
+			return false
+		}
+		// The relay's stopping close detached the device; the detach's Warn already says why.
+		if IsSessionStopping(err) {
+			c.failRefreshLocked(refreshFailed)
 			return false
 		}
 		c.logger.Warn("could not resume the adb session", "session", sessionUUID, "error", err)

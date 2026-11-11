@@ -159,7 +159,11 @@ func (keeper *warmSocketKeeper) run(ctx context.Context) {
 		maxAge := min(keeper.cfg.policy.nextInterval(), warmSocketMaxAge)
 		turn := maxAge
 		var failedDial *dialFailure
-		switch err := keeper.parkOne(ctx, maxAge); {
+		err := keeper.parkOne(ctx, maxAge)
+		if IsSessionStopping(err) {
+			return
+		}
+		switch {
 		case err == nil:
 			retrying = false
 		case errors.As(err, &failedDial):
@@ -209,6 +213,8 @@ func (keeper *warmSocketKeeper) parkOne(ctx context.Context, maxAge time.Duratio
 	}
 	if err != nil {
 		ws.Close()
+		// Detach before the waiter wakes: its context ends, so it dials nothing.
+		keeper.device.detachIfSessionStopping(keeper.arn, err)
 		keeper.land(nil)
 		if !recorder.answered.Load() {
 			return fmt.Errorf("%w: %w", errPreSelectUnanswered, err)

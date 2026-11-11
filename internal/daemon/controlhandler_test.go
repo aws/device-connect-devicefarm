@@ -91,6 +91,31 @@ func (s *controlHandlerSuite) TestSerialFetchDialFailsAddRejectedAndNothingAttac
 	s.False(present, "nothing must be attached when the serial fetch fails")
 }
 
+func (s *controlHandlerSuite) TestSerialFetchMeetsTheSessionStoppingCloseAddFailsWithTheStoppingCauseAndItsFixApart() {
+	// The relay closes the fetch's websocket with the stopping code; its cause replaces the fetch's error.
+	s.mock.CloseNewConnections(4001, "remote access session is stopping")
+
+	resp := s.handler(addReq(testSessionArnOne))
+
+	s.False(resp.OK)
+	s.Equal("remote access session "+testSessionArnOne+" is stopping", resp.Error, "the cause carries no fix text")
+	s.Equal([]string{"start a new session and run '" + config.BinaryName + " device add --session-arn <new ARN>'"}, resp.Fixes)
+	_, present := s.device.Current()
+	s.False(present, "nothing must be attached when the session is stopping")
+}
+
+func (s *controlHandlerSuite) TestSerialFetchMeetsTheSessionStoppingCloseUnderAReturnedArnTheCauseNamesTheReturnedArn() {
+	s.client.returnArnFor(testSessionArnOne, testSessionArnTwo)
+	s.client.returnArnFor(testSessionArnTwo, testSessionArnTwo)
+	s.mock.CloseNewConnections(4001, "remote access session is stopping")
+
+	resp := s.handler(addReq(testSessionArnOne))
+
+	s.False(resp.OK)
+	s.Equal("remote access session "+testSessionArnTwo+" is stopping", resp.Error,
+		"the cause names the ARN the service returned")
+}
+
 func (s *controlHandlerSuite) TestSerialFetchFailsAtAPresignedEndpointAddErrorAndLogCarryNoCredential() {
 	// The fetch's error reaches the CLI and the daemon log; neither may carry the URL's query.
 	s.client.set(testsupport.PresignedUnreachableEndpoint, nil)

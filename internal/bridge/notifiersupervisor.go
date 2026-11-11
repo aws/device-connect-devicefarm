@@ -143,7 +143,9 @@ func (supervisor *notifierSupervisor) run(ctx context.Context) {
 	delay := supervisor.cfg.params.NotifierBackoffInitial
 	for ctx.Err() == nil {
 		served, err := supervisor.serveOne(ctx)
-		if ctx.Err() != nil {
+		// A stopping close detaches the device; the supervisor redials nothing.
+		_, stopping := supervisor.device.detachIfSessionStopping(supervisor.arn, err)
+		if stopping || ctx.Err() != nil {
 			return
 		}
 		supervisor.cfg.logger.Warn("the reverse notifier ended; redialing", "device", supervisor.arn, "servedFor", served, "reason", err)
@@ -220,6 +222,8 @@ func (supervisor *notifierSupervisor) clearServerRulesOnce(ctx context.Context) 
 		return
 	}
 	err := runReverseClear(ctx, supervisor.cfg.dialer, endpoint)
+	// Detach before the gate opens, so a held reverse request meets no device.
+	supervisor.device.detachIfSessionStopping(supervisor.arn, err)
 	switch {
 	case ctx.Err() != nil: // a detach mid-clear is no fault
 	case err != nil:
@@ -284,6 +288,7 @@ func (supervisor *notifierSupervisor) announce(ctx context.Context, token string
 	}
 	defer supervisor.budget.release()
 	err := openConnector(ctx, supervisor.cfg, supervisor.device, supervisor.arn, token, customerPort)
+	supervisor.device.detachIfSessionStopping(supervisor.arn, err)
 	// A gone session, a detached device or a severed attachment is how a connector is meant to end,
 	// so none of them is a fault. A cancelled attachment surfaces as whatever error the dial or the
 	// splice was in the middle of, so the context is what says so, not the error.

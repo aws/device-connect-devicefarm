@@ -106,6 +106,10 @@ func openSession(ctx context.Context, device *ActiveDevice, arn string, gate *re
 		if err == nil {
 			return conn, "", nil
 		}
+		// The detach cancels ctx, so check the stopping close before any ctx check.
+		if reason, stopping := device.detachIfSessionStopping(arn, err); stopping {
+			return nil, reason, err
+		}
 		if !isRefusedOpening(err) || ctx.Err() != nil {
 			return nil, "", err
 		}
