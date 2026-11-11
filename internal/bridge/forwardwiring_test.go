@@ -184,18 +184,61 @@ func TestGivenALocalabstractRuleWhenAConnectionIsAcceptedThenTheDeviceServiceIsT
 	assert.Equal(t, 1, mock.SessionsOpened(), "one forwarded connection is one session")
 }
 
-func TestGivenASerialSelectorNamingAnotherDeviceWhenForwardingThenItFailsWithDeviceNotFound(t *testing.T) {
+func TestGivenAForwardRequestNamingAnotherDeviceWhenAnsweredThenAdbsMissTextAndTheRuleStays(t *testing.T) {
 	// The seam is asked directly: this pins the refusal itself, the end-to-end case below
-	// pins the wiring that reaches it.
-	_, forwarding := forwardingFor(t)
-	client := newScriptedConn("")
-	clientOpening := opening{service: "host-serial:other:forward:tcp:0;tcp:9999"}
+	// pins the wiring that reaches it. adb acquires the transport first, so the miss outranks a
+	// missing listener and a norebind collision, and the last two would have succeeded for the
+	// attached device.
+	tests := []struct {
+		name    string
+		service func(local string) string
+		want    string
+	}{
+		{name: "an install for another serial", want: "FAIL0018device 'other' not found",
+			service: func(string) string { return "host-serial:other:forward:tcp:0;tcp:9999" }},
+		{name: "a remove of a missing listener for another serial", want: "FAIL0018device 'other' not found",
+			service: func(string) string { return "host-serial:other:killforward:tcp:1" }},
+		{name: "a norebind collision for another serial", want: "FAIL0018device 'other' not found",
+			service: func(local string) string { return "host-serial:other:forward:norebind:" + local + ";tcp:5555" }},
+		{name: "a remove of the rule for another serial", want: "FAIL0018device 'other' not found",
+			service: func(local string) string { return "host-serial:other:killforward:" + local }},
+		{name: "an install for another transport id", want: "FAIL" + string(framed("no device with transport id '7'")),
+			service: func(string) string { return "host-transport-id:7:forward:tcp:0;tcp:9999" }},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, forwarding := forwardingFor(t)
+			installed := forwarding.table.Install("tcp:0", "tcp:5555", false)
+			require.Equal(t, forward.AdbInstallOK, installed.Status)
+			local := fmt.Sprintf("tcp:%d", installed.ResolvedPort)
+			client := newScriptedConn("")
 
-	answered := respondForwardLocally(client, clientOpening, forwarding, "dev-1", noopLogger())
+			answered := respondForwardLocally(client, opening{service: testCase.service(local)}, forwarding, "dev-1", noopLogger())
 
-	assert.True(t, answered, "a request for another device is refused here, not sent to the device")
-	assert.Equal(t, "FAIL0018device 'other' not found", client.replies.String())
-	assert.Empty(t, forwarding.table.List(), "a refused request installs nothing")
+			assert.True(t, answered, "a request for another device is refused here, not sent to the device")
+			assert.Equal(t, testCase.want, client.replies.String())
+			rules := forwarding.table.List()
+			require.Len(t, rules, 1, "a refused request installs and removes nothing")
+			assert.Equal(t, local, rules[0].Local)
+		})
+	}
+}
+
+func TestGivenAGlobalForwardRequestUnderAnotherTransportIDWhenSentThenItIsAnsweredForEveryRule(t *testing.T) {
+	// killforward-all and list-forward acquire no transport, so a prefix naming another device
+	// still gets the global answer, as adb gives it.
+	proxyAddress, mock, table := startForwardingProxyWithSerial(t, "dev-1")
+	installed := table.Install("tcp:0", "tcp:5555", false)
+	require.Equal(t, forward.AdbInstallOK, installed.Status)
+	rows := fmt.Sprintf("dev-1 tcp:%d tcp:5555\n", installed.ResolvedPort)
+
+	listed := askHost(t, proxyAddress, string(framed("host-transport-id:7:list-forward")))
+	removed := askHost(t, proxyAddress, string(framed("host-transport-id:7:killforward-all")))
+
+	assert.Equal(t, "OKAY"+string(framed(rows)), listed)
+	assert.Equal(t, "OKAYOKAY", removed)
+	assert.Empty(t, table.List(), "killforward-all removes every rule")
+	assertNoWebsocketDialed(t, mock)
 }
 
 func TestGivenAMalformedForwardBehindAnotherDevicesSerialWhenAnsweredThenTheDeviceMissOutranksIt(t *testing.T) {

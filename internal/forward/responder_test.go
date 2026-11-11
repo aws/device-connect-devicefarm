@@ -21,13 +21,14 @@ import (
 // attachedSerial is the bound device's serial.
 const attachedSerial = "R3CN30XXXX"
 
+// attachedTransportID is the transport id the daemon reports for the bound device.
+const attachedTransportID = 1
+
 var (
 	anySelector           = adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorAny}
 	listForwardRequest    = adbwire.AdbForwardRequest{Action: adbwire.AdbActionListForward}
 	killForwardAllRequest = adbwire.AdbForwardRequest{Action: adbwire.AdbActionKillForwardAll}
 	errWriteRefused       = errors.New("write refused")
-	deviceMissReply       = "FAIL" + protoString(adbwire.FailDeviceNotFound(otherDeviceSelector.Serial))
-	otherDeviceSelector   = adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorSerial, Serial: "other-device"}
 )
 
 // replyConn collects the reply bytes and counts closes: every answer must close
@@ -71,6 +72,10 @@ func serialSelector(serial string) adbwire.AdbDeviceSelector {
 	return adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorSerial, Serial: serial}
 }
 
+func transportIDSelector(transportID uint64) adbwire.AdbDeviceSelector {
+	return adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorTransportID, TransportID: transportID}
+}
+
 func forwardRequest(local, remote string, noRebind bool) adbwire.AdbForwardRequest {
 	return adbwire.AdbForwardRequest{Action: adbwire.AdbActionForward, Local: local, Remote: remote, NoRebind: noRebind}
 }
@@ -80,10 +85,10 @@ func killForwardRequest(local string) adbwire.AdbForwardRequest {
 }
 
 // respond answers request and returns the bytes that reached the wire.
-func respond(t *testing.T, table *ForwardRulesTable, selector adbwire.AdbDeviceSelector, request adbwire.AdbForwardRequest, deviceSerial string) string {
+func respond(t *testing.T, table *ForwardRulesTable, request adbwire.AdbForwardRequest, deviceSerial string) string {
 	t.Helper()
 	conn := &replyConn{}
-	require.NoError(t, Respond(conn, selector, request, deviceSerial, table))
+	require.NoError(t, Respond(conn, request, deviceSerial, table))
 	require.Equal(t, 1, conn.closes, "the reply must close the connection")
 	return conn.String()
 }
@@ -91,7 +96,7 @@ func respond(t *testing.T, table *ForwardRulesTable, selector adbwire.AdbDeviceS
 func TestGivenAForwardWhenRespondedThenOnlyTcpZeroReportsAResolvedPort(t *testing.T) {
 	table := newTestTable(t)
 
-	reply := respond(t, table, anySelector, forwardRequest("tcp:0", "tcp:5555", false), attachedSerial)
+	reply := respond(t, table, forwardRequest("tcp:0", "tcp:5555", false), attachedSerial)
 	rows := table.List()
 	require.Len(t, rows, 1)
 	resolvedPort := strings.TrimPrefix(rows[0].Local, "tcp:")
@@ -105,7 +110,7 @@ func TestGivenAForwardWhenRespondedThenOnlyTcpZeroReportsAResolvedPort(t *testin
 
 	// Rebinding the port tcp:0 resolved is a client-chosen local port, and needs
 	// no second socket to test the reply for one.
-	reply = respond(t, table, anySelector, forwardRequest(fmt.Sprintf("tcp:%s", resolvedPort), "tcp:8080", false), attachedSerial)
+	reply = respond(t, table, forwardRequest(fmt.Sprintf("tcp:%s", resolvedPort), "tcp:8080", false), attachedSerial)
 	assert.Equal(t, "OKAYOKAY", reply, "a client-chosen port gets no extra protocol string")
 	assert.Equal(t, 1, table.ruleCount())
 }
@@ -130,7 +135,7 @@ func TestGivenAnUninstallableForwardWhenRespondedThenOneFailWithAdbsText(t *test
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			reply := respond(t, table, anySelector, testCase.request, attachedSerial)
+			reply := respond(t, table, testCase.request, attachedSerial)
 			assert.Equal(t, "FAIL"+protoString(testCase.failText), reply, "a refusal is one FAIL, never OKAY then FAIL")
 		})
 	}
@@ -140,13 +145,13 @@ func TestGivenAnUninstallableForwardWhenRespondedThenOneFailWithAdbsText(t *test
 func TestGivenALocalabstractForwardWhenRespondedThenOkayOkayAndTheListShowsTheSpec(t *testing.T) {
 	table := newTestTable(t)
 
-	reply := respond(t, table, anySelector, forwardRequest("tcp:0", "localabstract:chrome_devtools_remote", false), attachedSerial)
+	reply := respond(t, table, forwardRequest("tcp:0", "localabstract:chrome_devtools_remote", false), attachedSerial)
 
 	// The resolved port rides the reply as a protocol string, as for a tcp remote.
 	require.Greater(t, len(reply), len("OKAYOKAY")+4, reply)
 	resolvedPort := reply[len("OKAYOKAY")+4:]
 	require.Equal(t, "OKAYOKAY"+protoString(resolvedPort), reply, "a socket remote installs like a tcp one")
-	listed := respond(t, table, anySelector, listForwardRequest, attachedSerial)
+	listed := respond(t, table, listForwardRequest, attachedSerial)
 	row := fmt.Sprintf("%s tcp:%s localabstract:chrome_devtools_remote\n", attachedSerial, resolvedPort)
 	assert.Equal(t, "OKAY"+protoString(row), listed, "list-forward renders the remote as spelled")
 }
@@ -155,21 +160,19 @@ func TestGivenKillForwardWhenRespondedThenTheRuleGoesAndASecondRemovalMisses(t *
 	table := newTestTable(t)
 	local := tcpSpec(installResolved(t, table, "tcp:5555"))
 
-	assert.Equal(t, "OKAYOKAY", respond(t, table, anySelector, killForwardRequest(local), attachedSerial))
+	assert.Equal(t, "OKAYOKAY", respond(t, table, killForwardRequest(local), attachedSerial))
 	assert.Zero(t, table.ruleCount())
 
-	reply := respond(t, table, anySelector, killForwardRequest(local), attachedSerial)
+	reply := respond(t, table, killForwardRequest(local), attachedSerial)
 	assert.Equal(t, "FAIL"+protoString(adbwire.FailListenerNotFound(local)), reply)
 }
 
-func TestGivenKillForwardAllWhenAnotherDeviceIsSelectedThenEveryRuleStillGoes(t *testing.T) {
+func TestGivenKillForwardAllWhenRespondedThenEveryRuleGoes(t *testing.T) {
 	table := newTestTable(t)
 	installResolved(t, table, "tcp:5555")
 	installResolved(t, table, "tcp:8080")
 
-	// adb answers killforward-all without acquiring a transport, so the
-	// selector cannot refuse it.
-	assert.Equal(t, "OKAYOKAY", respond(t, table, otherDeviceSelector, killForwardAllRequest, attachedSerial))
+	assert.Equal(t, "OKAYOKAY", respond(t, table, killForwardAllRequest, attachedSerial))
 	assert.Zero(t, table.ruleCount())
 }
 
@@ -178,43 +181,18 @@ func TestGivenRulesWhenListedThenEveryRowCarriesTheAttachedSerial(t *testing.T) 
 	first := installResolved(t, table, "tcp:5555")
 	second := installResolved(t, table, "tcp:8080")
 
-	// A selector naming another device is ignored: adb lists globally.
-	reply := respond(t, table, otherDeviceSelector, listForwardRequest, attachedSerial)
+	reply := respond(t, table, listForwardRequest, attachedSerial)
 
 	rows := fmt.Sprintf("%s tcp:%d tcp:5555\n%s tcp:%d tcp:8080\n", attachedSerial, first, attachedSerial, second)
 	assert.Equal(t, "OKAY"+protoString(rows), reply)
 }
 
 func TestGivenNoRulesWhenListedThenOkayAndAnEmptyTable(t *testing.T) {
-	reply := respond(t, newTestTable(t), anySelector, listForwardRequest, attachedSerial)
+	reply := respond(t, newTestTable(t), listForwardRequest, attachedSerial)
 	assert.Equal(t, "OKAY0000", reply, "an empty table is still OKAY plus a zero-length string")
 }
 
-func TestGivenADeviceMissWhenTheListenerWouldAlsoMissThenTheDeviceTextWins(t *testing.T) {
-	table := newTestTable(t)
-	local := tcpSpec(installResolved(t, table, "tcp:5555"))
-
-	// adb acquires the transport first, so the device text outranks a missing
-	// listener and a norebind collision, and the last two requests would have
-	// succeeded for the attached device.
-	assert.Equal(t, deviceMissReply, respond(t, table, otherDeviceSelector, killForwardRequest("tcp:1"), attachedSerial))
-	assert.Equal(t, deviceMissReply, respond(t, table, otherDeviceSelector, forwardRequest(local, "tcp:5555", true), attachedSerial))
-	assert.Equal(t, deviceMissReply, respond(t, table, otherDeviceSelector, killForwardRequest(local), attachedSerial))
-	assert.Equal(t, deviceMissReply, respond(t, table, otherDeviceSelector, forwardRequest("tcp:0", "tcp:9999", false), attachedSerial))
-	assert.Equal(t, 1, table.ruleCount())
-	assert.Equal(t, local, table.List()[0].Local)
-}
-
-func TestGivenTransportIDSelectorWhenRespondedThenItMatchesTheSingleDevice(t *testing.T) {
-	table := newTestTable(t)
-	selector := adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorTransportID, TransportID: 7}
-
-	reply := respond(t, table, selector, forwardRequest("tcp:0", "tcp:5555", false), attachedSerial)
-	assert.True(t, strings.HasPrefix(reply, "OKAYOKAY"), reply)
-	assert.Equal(t, 1, table.ruleCount())
-}
-
-func TestGivenSelectorKindsWhenCheckedThenAdbsMissTextsFollowTheSerialAndKind(t *testing.T) {
+func TestGivenSelectorKindsWhenCheckedThenAdbsMissTextsFollowTheSerialKindAndTransportID(t *testing.T) {
 	// The device's kind is read off its serial: emulator-<port> is local, anything else usb.
 	const emulatorSerial = "emulator-5554"
 	usbSelector := adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorUSB}
@@ -232,15 +210,36 @@ func TestGivenSelectorKindsWhenCheckedThenAdbsMissTextsFollowTheSerialAndKind(t 
 		{"any local device", localSelector, attachedSerial, "no emulators found"},
 		{"any local device, an emulator attached", localSelector, emulatorSerial, ""},
 		{"the attached serial", serialSelector(attachedSerial), attachedSerial, ""},
-		{"a transport id", adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorTransportID, TransportID: 7}, attachedSerial, ""},
-		{"the unset transport id", adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorTransportID}, attachedSerial, ""},
+		{"the device's transport id", transportIDSelector(attachedTransportID), attachedSerial, ""},
+		{"the unset transport id", transportIDSelector(0), attachedSerial, ""},
+		{"another transport id", transportIDSelector(7), attachedSerial, "no device with transport id '7'"},
 		{"another serial", serialSelector("other-device"), attachedSerial, adbwire.FailDeviceNotFound("other-device")},
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			failText, selectorMissed := SelectorMiss(testCase.selector, testCase.deviceSerial)
+			failText, selectorMissed := SelectorMiss(testCase.selector, testCase.deviceSerial, attachedTransportID)
 			assert.Equal(t, testCase.failText != "", selectorMissed)
 			assert.Equal(t, testCase.failText, failText)
+		})
+	}
+}
+
+func TestGivenNoDeviceWhenEachSelectorIsCheckedThenAdbsMissTextNamesIt(t *testing.T) {
+	tests := []struct {
+		name     string
+		selector adbwire.AdbDeviceSelector
+		failText string
+	}{
+		{"any device", anySelector, "no devices/emulators found"},
+		{"any usb device", adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorUSB}, "no devices found"},
+		{"any local device", adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorLocal}, "no emulators found"},
+		{"a serial", serialSelector("R3CN30XXXX"), "device 'R3CN30XXXX' not found"},
+		{"a transport id", transportIDSelector(1), "no device with transport id '1'"},
+		{"the unset transport id", transportIDSelector(0), "no devices/emulators found"},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			assert.Equal(t, testCase.failText, MissReason(testCase.selector))
 		})
 	}
 }
@@ -250,20 +249,19 @@ func TestGivenAConnThatRefusesWritesWhenRespondedThenTheErrorSurfacesAndItCloses
 	local := tcpSpec(installResolved(t, table, "tcp:5555"))
 
 	tests := []struct {
-		name     string
-		selector adbwire.AdbDeviceSelector
-		request  adbwire.AdbForwardRequest
+		name    string
+		request adbwire.AdbForwardRequest
 	}{
-		{"forward", anySelector, forwardRequest("tcp:0", "tcp:5555", false)},
-		{"a refused forward", anySelector, forwardRequest("udp:1", "tcp:5555", false)},
-		{"killforward", anySelector, killForwardRequest(local)},
-		{"killforward-all", anySelector, killForwardAllRequest},
-		{"list-forward", anySelector, listForwardRequest},
+		{"forward", forwardRequest("tcp:0", "tcp:5555", false)},
+		{"a refused forward", forwardRequest("udp:1", "tcp:5555", false)},
+		{"killforward", killForwardRequest(local)},
+		{"killforward-all", killForwardAllRequest},
+		{"list-forward", listForwardRequest},
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
 			conn := &brokenConn{}
-			assert.ErrorIs(t, Respond(conn, testCase.selector, testCase.request, attachedSerial, table), errWriteRefused)
+			assert.ErrorIs(t, Respond(conn, testCase.request, attachedSerial, table), errWriteRefused)
 			assert.Equal(t, 1, conn.closes)
 		})
 	}
@@ -273,7 +271,7 @@ func TestGivenAnUnknownActionWhenRespondedThenNothingIsWritten(t *testing.T) {
 	conn := &replyConn{}
 	request := adbwire.AdbForwardRequest{Action: adbwire.AdbForwardAction(99)}
 
-	assert.Error(t, Respond(conn, anySelector, request, attachedSerial, newTestTable(t)))
+	assert.Error(t, Respond(conn, request, attachedSerial, newTestTable(t)))
 	assert.Empty(t, conn.String(), "an action with no reply must not half-answer")
 	assert.Equal(t, 1, conn.closes)
 }
