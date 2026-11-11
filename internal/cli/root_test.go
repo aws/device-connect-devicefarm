@@ -235,8 +235,8 @@ func TestGivenListenerFlagsAfterBridgeStartPathWhenInvokedThenParsed(t *testing.
 	// Callers invoke the binary as
 	// `devicefarm-connect bridge start --port N --log P --session-arn ...`: the
 	// listener/log flags are flags of `bridge start`, not global. This test guards
-	// that contract. fakeDaemon writes a live pidfile, so Manager.Start
-	// short-circuits (a daemon is "already running") instead of forking a child;
+	// that contract. fakeDaemon writes a live pidfile, so `bridge start` restarts
+	// through the faked stop and start;
 	// reaching the add request over the control socket proves the flags parsed and
 	// `bridge start` ran.
 	addSeen := false
@@ -247,6 +247,8 @@ func TestGivenListenerFlagsAfterBridgeStartPathWhenInvokedThenParsed(t *testing.
 		}
 		return control.Response{OK: true, DeviceLabel: "Pixel", Port: 5599}
 	})
+	fakeBridgeStop(t, daemon.StopResult{PID: 4242, WasRunning: true}, nil)
+	countingBridgeStart(t)
 
 	_, err := execRoot(t, "bridge", "start", "--port", "5599", "--listen-addr", "127.0.0.1",
 		"--log", t.TempDir()+"/d.log", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")

@@ -42,17 +42,18 @@ func newBridgeCommand(state *rootState) *cobra.Command {
 }
 
 // newBridgeStartCommand launches the background daemon and, when a session ARN is
-// supplied, attaches that device. It validates the configuration up front so a
-// misconfigured invocation fails before a child is ever spawned. --session-arn is
-// optional: with it, "bridge start" runs the attach logic immediately after the
-// daemon is up (the daemon resolves the ARN); without it, this command attaches
-// nothing and a later "device add" connects one.
+// supplied, attaches that device. It first stops a running bridge in this runtime
+// directory (restartBridge), so the flags and this shell's AWS settings always
+// apply. It validates the configuration up front so a misconfigured
+// invocation fails before a child is ever spawned. --session-arn is optional:
+// with it, "bridge start" runs the attach logic immediately after the daemon is
+// up (the daemon resolves the ARN); without it, this command attaches nothing
+// and a later "device add" connects one.
 //
-// Resolution now happens in the daemon, not before the spawn, so a bad ARN or an
-// unreachable session no longer fails before the listener exists: the daemon
-// starts and the attach then fails. That is intentional: the listener is left
-// running and the error tells the user to retry "device add", matching the
-// no-ARN path that also leaves the daemon up with no device.
+// The daemon resolves the ARN, so a session that does not resolve fails only after
+// the listener is up. By design the listener stays up with no device, as on the
+// no-ARN path, and the error tells the user to fix the issue and run this command
+// again.
 func newBridgeStartCommand(state *rootState) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "start",
@@ -62,19 +63,19 @@ func newBridgeStartCommand(state *rootState) *cobra.Command {
 			if err := state.cfg.Validate(); err != nil {
 				return usageError(cmd, err)
 			}
-			if err := startBridgeIfNotRunning(cmd, state); err != nil {
+			if err := restartBridge(cmd, state); err != nil {
 				return err
 			}
 
 			if state.sessionARN != "" {
 				return attachDevice(cmd, state, failure.Explained{
 					Problem: "the bridge started but could not attach the device",
-					Fix:     "fix the issue and retry 'device add'",
+					Fix:     "fix the issue, then run this command again; 'bridge start' restarts the bridge, so it reads this shell's AWS settings",
 				})
 			}
 
-			// A daemon that already ran may differ from the flags in port and device,
-			// so ask it.
+			// The port comes from the daemon, not the flags: only the daemon knows
+			// what it bound, and a racing start may have won.
 			statusResponse, err := sendToBridge(cmd, state, control.Request{Op: control.OpStatus})
 			if err != nil {
 				return err

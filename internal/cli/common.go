@@ -106,8 +106,37 @@ func startBridgeIfNotRunning(cmd *cobra.Command, state *rootState) error {
 		return nil
 	}
 	cmd.PrintErrln("* bridge not running; starting it now")
+	return startAndReport(cmd, manager)
+}
+
+// restartBridge stops any running bridge in this runtime directory, then starts one
+// with the given flags. It restarts even when the flags match. "device add" and
+// "device list" keep a running bridge (startBridgeIfNotRunning).
+func restartBridge(cmd *cobra.Command, state *rootState) error {
+	manager := state.newManager()
+	if _, running := manager.Status(); !running {
+		cmd.PrintErrln("* bridge not running; starting it now")
+		return startAndReport(cmd, manager)
+	}
+	result, err := stopBridge(manager)
+	if err != nil {
+		// A fix on the stop error (the elevated-shell one) rides the chain.
+		return &failure.Explained{Problem: "could not stop the running bridge", Cause: err}
+	}
+	if result.WasRunning {
+		line := fmt.Sprintf("* a bridge was running (pid %d) and was stopped", result.PID)
+		if result.Killed {
+			line = fmt.Sprintf("* a bridge was running (pid %d), did not stop cleanly and was killed", result.PID)
+		}
+		cmd.PrintErrln(line + "; its attached devices, forward rules and reverse rules were dropped")
+	}
+	return startAndReport(cmd, manager)
+}
+
+// startAndReport starts the daemon and prints the result. It prints the adb-server
+// notice even when the start fails.
+func startAndReport(cmd *cobra.Command, manager *daemon.DaemonManager) error {
 	result, err := startBridge(manager)
-	// Print it even when the start failed: the user's adb server is gone.
 	printAdbServerStopped(cmd, result.StoppedAdbServer)
 	if err != nil {
 		return &failure.Explained{Problem: "could not start the bridge", Cause: err}
@@ -165,11 +194,24 @@ func attachDevice(cmd *cobra.Command, state *rootState, refused failure.Explaine
 		return err
 	}
 	if !resp.OK {
-		refused.Cause = errors.New(resp.Error)
+		refused.Cause = daemonRefusal(resp)
+		if len(resp.Fixes) > 0 {
+			refused.Fix = "" // the daemon's fix is the specific one
+		}
 		return &refused
 	}
 	printListeningLine(cmd, resp)
 	return nil
+}
+
+// daemonRefusal rebuilds the daemon's error from a refused reply: its text wrapped in each
+// fix, so failure.Write prints them as fix lines.
+func daemonRefusal(resp control.Response) error {
+	refusal := errors.New(resp.Error)
+	for _, fix := range resp.Fixes {
+		refusal = failure.WithFix(refusal, fix)
+	}
+	return refusal
 }
 
 // printListeningLine prints the daemon's listen port and device label from a
