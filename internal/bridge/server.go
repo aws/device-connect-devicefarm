@@ -159,11 +159,12 @@ func (s *AdbProxyServer) Run(ctx context.Context) error {
 // A wait-for request that names no attached
 // device is answered and held until one it names attaches (serveWaitFor). Another request that
 // names no attached device, and any other request with no device, gets adb's FAIL for its
-// selector; bytes that form no request get the close alone (refuseUnresolved). A lone
-// host-transport-id: request for the daemon's id is re-framed for the device (loneOpening).
-// While reverse is off, a reverse-family request gets a local FAIL and never dials either. With
-// reverse on, a reverse-family request waits until the attachment's clear of the server's reverse
-// rules settles, or gets a local FAIL at the bound. While the server's notifier
+// selector, then the last detach reason while one stands (withDetachReason); bytes that form no
+// request get the close alone (refuseUnresolved). A lone host-transport-id: request for the
+// daemon's id is re-framed for the device (loneOpening). While reverse is off, a reverse-family
+// request gets a local FAIL and never dials either. With reverse on, a reverse-family request
+// waits until the attachment's clear of the server's reverse rules settles, or gets a local FAIL
+// at the bound. While the server's notifier
 // slot is held elsewhere, it gets a local FAIL at once, on arrival or mid-wait. Every other
 // request takes one of the attachment's device-stream slots before the dial. No free slot, no
 // dial. A reverse install past the attachment's rule limit is refused after that, still with no
@@ -187,7 +188,7 @@ func (s *AdbProxyServer) handleConn(ctx context.Context, tcp net.Conn) {
 	}
 
 	// The serial comes from the same snapshot as the forwarding.
-	clientOpening, err := readOpening(connCtx, tcp, attached)
+	clientOpening, err := readOpening(connCtx, tcp, attached, s.device.withDetachReason)
 	if err != nil {
 		if errors.Is(err, errSelectRefused) {
 			connLogger.Warn("refused a transport select; closing", "error", err)
@@ -216,7 +217,7 @@ func (s *AdbProxyServer) handleConn(ctx context.Context, tcp net.Conn) {
 	if !ok {
 		// A device attached since the accept is not this connection's; the client's next one sees it.
 		selector, _, _ := clientOpening.requestedService()
-		refuseUnresolved(tcp, clientOpening, forward.MissReason(selector), connLogger)
+		refuseUnresolved(tcp, clientOpening, s.device.withDetachReason(forward.MissReason(selector)), connLogger)
 		return
 	}
 	if respondForwardLocally(tcp, clientOpening, forwarding, info.Serial, connLogger) {
@@ -231,7 +232,7 @@ func (s *AdbProxyServer) handleConn(ctx context.Context, tcp net.Conn) {
 	// denies every relayed transport-id form, so the daemon judges the rest here.
 	if selector, _, _ := clientOpening.requestedService(); selector.Kind == adbwire.AdbSelectorTransportID {
 		if failReason, missed := forward.SelectorMiss(selector, info.Serial, syntheticTransportID); missed {
-			refuseUnresolved(tcp, clientOpening, failReason, connLogger)
+			refuseUnresolved(tcp, clientOpening, s.device.withDetachReason(failReason), connLogger)
 			return
 		}
 	}

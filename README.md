@@ -462,7 +462,9 @@ build follows in a later release. If you build the Windows binary yourself:
   starts reaches your computer.
 - **Credential scope.** The bridge needs only `devicefarm:GetRemoteAccessSession`. It uses the credentials
   it inherited at start and stores none. When they expire, the next refresh fails and the bridge detaches the
-  device. Run `bridge stop`, then `bridge start` from a shell with fresh credentials.
+  device. `device list`, `bridge status` and every adb command the bridge refuses for want of a device then
+  say `the AWS credentials the bridge started with have expired`. Run `bridge stop`, then `bridge start` from
+  a shell with fresh credentials, then `device add` the session again.
 - **`bridge stop` does not stop billing.** `bridge stop` and `device remove` act on your computer only. The
   remote access session keeps running, and keeps costing, until you stop it in Device Farm.
 
