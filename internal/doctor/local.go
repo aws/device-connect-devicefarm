@@ -59,8 +59,8 @@ const (
 	runtimeDirHint = "the client cannot use this working directory, so '" + bridgeStartCommand + "' cannot launch the bridge. " +
 		"Set '" + daemon.RuntimeDirEnvVar + "' to a directory with a short path that only this user can write, then rerun '" + doctorCommand +
 		"'. Every " + config.BinaryName + " command reads that variable, so 'bridge start' and the bridge it launches use the new directory too."
-	deadDaemonHint = "a bridge is registered but did not report its status, so '" + bridgeStartCommand + "' starts nothing. Run '" +
-		restartDaemonHint + "'. The stop ends that bridge and the start launches a new one."
+	deadDaemonHint = "a bridge is registered but did not report its status. Run '" + restartDaemonHint +
+		"'. The stop ends that bridge and the start launches a new one."
 )
 
 // daemonFlags renders the listener flags a restart keeps.
@@ -193,9 +193,9 @@ func heldPortPair(listenAddr string, port int) (summary, hint string) {
 // otherPortDaemonHint moves the running daemon to the probed port, its flags and device kept, or
 // points adb at the port it holds.
 func otherPortDaemonHint(reply control.Response, port int) string {
-	return caveatIf(fmt.Sprintf("the running bridge listens on port %d, not %d, and '%s' starts nothing while it runs. "+
+	return caveatIf(fmt.Sprintf("the running bridge listens on port %d, not %d. "+
 		"Run '%s' to move it to port %d, or point adb at it with 'adb -P %d'.",
-		reply.Port, port, bridgeStartCommand, restartWith(reply, port, reply.ReverseEnabled), port, reply.Port), reply.ReverseEnabled)
+		reply.Port, port, restartWith(reply, port, reply.ReverseEnabled), port, reply.Port), reply.ReverseEnabled)
 }
 
 // runState is what earlier checks leave for later ones.
@@ -280,7 +280,7 @@ func causeWithoutSocketPath(err error) string {
 }
 
 // checkRunningDaemon reads the pidfile, then asks a running daemon for its status. A locked
-// pidfile with a dead socket is a FAIL: bridge start sees the pidfile and no-ops.
+// pidfile with a dead socket is a FAIL: device add and device list start nothing and fail.
 func checkRunningDaemon(inputs Inputs, state *runState) Result {
 	pid, running := daemon.NewManager(inputs.Config, state.paths, nil, inputs.Logger).Status()
 	if !running {
@@ -368,7 +368,7 @@ func checkListenPortFree(inputs Inputs, state *runState) Result {
 		if daemonReply.Port == cfg.ListenPort {
 			return Result{Status: Pass, Summary: fmt.Sprintf("%s is held by the running bridge (pid %d)", address, daemonPID)}
 		}
-		// bridge start no-ops on the locked pidfile, so a free port proves nothing here.
+		// A daemon on another port is the finding; no bind.
 		return Result{Status: Warn, Summary: fmt.Sprintf("the running bridge (pid %d) listens on port %d, not %d",
 			daemonPID, daemonReply.Port, cfg.ListenPort), Hint: otherPortDaemonHint(daemonReply, cfg.ListenPort)}
 	}

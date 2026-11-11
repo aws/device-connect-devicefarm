@@ -23,6 +23,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/config"
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/daemon"
+	"github.com/aws/device-connect-devicefarm/internal/failure"
 )
 
 // TestMain blocks the real bridge start and stop: a test that needs one uses
@@ -158,7 +159,7 @@ func TestGivenRunningDaemonWhenAddDeviceInvokedThenPrintsListeningLineWithLabelA
 
 func TestGivenDaemonRejectsAddWhenAddDeviceInvokedThenErrorsWithDaemonReason(t *testing.T) {
 	fakeDaemon(t, func(control.Request) control.Response {
-		return control.Response{OK: false, Error: "a different device is already attached (Other); remove it first"}
+		return control.Response{OK: false, Error: "a different device is already attached (Other)"}
 	})
 
 	_, err := execRoot(t, "device", "add", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
@@ -470,17 +471,35 @@ func TestGivenPidfileButNoControlSocketWhenStatusInvokedThenReportsNotRunning(t 
 	assert.Equal(t, config.BinaryName+" bridge is not running\n", out.String())
 }
 
+// fakeRestart fakes the whole restart under a running daemon: a stop that
+// returns result, a start of pid 4343, and handler on the control socket. It
+// returns the stop-call and start-call counters.
+func fakeRestart(t *testing.T, handler control.Handler, result daemon.StopResult) (stops *int, starts *int) {
+	t.Helper()
+	fakeDaemon(t, handler)
+	return fakeBridgeStop(t, result, nil), countingBridgeStart(t)
+}
+
+// countingBridgeStart installs a start stub that returns pid 4343 with /tmp/d.log
+// and counts its calls. It serves no control socket.
+func countingBridgeStart(t *testing.T) *int {
+	t.Helper()
+	startCalls := 0
+	stubBridgeStart(t, func(*daemon.DaemonManager) (daemon.StartResult, error) {
+		startCalls++
+		return daemon.StartResult{PID: 4343, LogFile: "/tmp/d.log"}, nil
+	})
+	return &startCalls
+}
+
 func TestGivenNoSessionARNWhenStartBridgeInvokedThenStartsWithoutAttaching(t *testing.T) {
-	// fakeDaemon writes a live pidfile, so Manager.Start short-circuits to a no-op
-	// (a daemon is "already running") rather than forking a real child. This lets
-	// the no-ARN bridge start path be exercised at the unit level. The daemon's
-	// control handler must never see an add when no ARN is given.
-	fakeDaemon(t, func(req control.Request) control.Response {
+	// The daemon's control handler must never see an add when no ARN is given.
+	fakeRestart(t, func(req control.Request) control.Response {
 		if req.Op == control.OpAdd {
 			t.Error("bridge start without --session-arn must not attach a device")
 		}
 		return control.Response{OK: true, Port: 6000}
-	})
+	}, daemon.StopResult{PID: 4242, WasRunning: true})
 
 	out, err := execRoot(t, "bridge", "start", "--port", "5038")
 
@@ -489,11 +508,111 @@ func TestGivenNoSessionARNWhenStartBridgeInvokedThenStartsWithoutAttaching(t *te
 	assert.NotContains(t, out.String(), "5038", "the port must come from the daemon, not the --port flag")
 }
 
-func TestGivenRunningDaemonWithDeviceWhenStartBridgeInvokedWithoutARNThenPrintsAttachedDevice(t *testing.T) {
-	fakeDaemon(t, func(request control.Request) control.Response {
+func TestGivenRunningDaemonWhenStartBridgeInvokedThenStopsItSaysSoThenStarts(t *testing.T) {
+	stops, starts := fakeRestart(t, func(control.Request) control.Response {
+		return control.Response{OK: true, Port: 5037}
+	}, daemon.StopResult{PID: 4242, WasRunning: true})
+
+	out, err := execRoot(t, "bridge", "start")
+
+	require.NoError(t, err)
+	stopped := strings.Index(out.String(),
+		"* a bridge was running (pid 4242) and was stopped; its attached devices, forward rules and reverse rules were dropped")
+	started := strings.Index(out.String(), "* bridge started (pid 4343); log file: /tmp/d.log")
+	listening := strings.Index(out.String(), "listening on port 5037")
+	require.GreaterOrEqual(t, stopped, 0, out.String())
+	require.GreaterOrEqual(t, started, 0, out.String())
+	require.GreaterOrEqual(t, listening, 0, out.String())
+	assert.Less(t, stopped, started, "the stopped line comes first")
+	assert.Less(t, started, listening, "the listening line comes last")
+	assert.Equal(t, 1, *stops)
+	assert.Equal(t, 1, *starts)
+}
+
+func TestGivenRunningDaemonThatHadToBeKilledWhenStartBridgeInvokedThenTheLineSaysKilled(t *testing.T) {
+	fakeRestart(t, func(control.Request) control.Response {
+		return control.Response{OK: true, Port: 5037}
+	}, daemon.StopResult{PID: 4242, WasRunning: true, Killed: true})
+
+	out, err := execRoot(t, "bridge", "start")
+
+	require.NoError(t, err)
+	assert.Contains(t, out.String(),
+		"* a bridge was running (pid 4242), did not stop cleanly and was killed; its attached devices, forward rules and reverse rules were dropped")
+}
+
+func TestGivenRunningDaemonThatSurvivesTheStopWhenStartBridgeInvokedThenErrorsAndStartsNothing(t *testing.T) {
+	fakeRuntimePaths(t)
+	stopFailure := failure.WithFix(errors.New("find bridge process 4242: access is denied"), "stop it from an elevated shell")
+	fakeBridgeStop(t, daemon.StopResult{}, stopFailure)
+	starts := countingBridgeStart(t)
+
+	_, err := execRoot(t, "bridge", "start")
+
+	require.ErrorIs(t, err, stopFailure)
+	assert.ErrorContains(t, err, "could not stop the running bridge")
+	assert.ErrorContains(t, err, "stop it from an elevated shell", "the stop error's fix must ride the chain")
+	assert.Equal(t, 0, *starts, "a failed stop must start nothing")
+}
+
+func TestGivenTheDaemonExitedBeforeTheStopWhenStartBridgeInvokedThenNoStoppedLineAndStarts(t *testing.T) {
+	_, starts := fakeRestart(t, func(control.Request) control.Response {
+		return control.Response{OK: true, Port: 5037}
+	}, daemon.StopResult{PID: 4242})
+
+	out, err := execRoot(t, "bridge", "start")
+
+	require.NoError(t, err)
+	assert.NotContains(t, out.String(), "a bridge was running")
+	assert.Equal(t, 1, *starts)
+}
+
+func TestGivenNoBridgeWhenStartBridgeInvokedThenStopIsNeverCalled(t *testing.T) {
+	paths := shortRuntimeDir(t)
+	stops := fakeBridgeStop(t, daemon.StopResult{}, nil)
+	fakeBridgeStart(t, paths, func(control.Request) control.Response {
+		return control.Response{OK: true, Port: 5037}
+	})
+
+	_, err := execRoot(t, "bridge", "start")
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, *stops, "with no running bridge there is nothing to stop")
+}
+
+func TestGivenRunningDaemonWhenAddDeviceInvokedThenNeitherStopNorStartIsCalled(t *testing.T) {
+	fakeDaemon(t, func(control.Request) control.Response {
+		return control.Response{OK: true, DeviceLabel: "Pixel", Port: 5037}
+	})
+	stops := fakeBridgeStop(t, daemon.StopResult{}, nil)
+	starts := countingBridgeStart(t)
+
+	_, err := execRoot(t, "device", "add", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, *stops, "device add keeps the running bridge")
+	assert.Equal(t, 0, *starts)
+}
+
+func TestGivenRunningDaemonWhenListDevicesInvokedThenNeitherStopNorStartIsCalled(t *testing.T) {
+	fakeDaemon(t, func(control.Request) control.Response {
+		return control.Response{OK: true}
+	})
+	stops := fakeBridgeStop(t, daemon.StopResult{}, nil)
+	starts := countingBridgeStart(t)
+
+	_, err := execRoot(t, "device", "list")
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, *stops, "device list keeps the running bridge")
+	assert.Equal(t, 0, *starts)
+}
+
+func TestGivenRunningDaemonWhenStartBridgeInvokedWithoutARNThenPrintsTheNewDaemonsStatus(t *testing.T) {
+	fakeRestart(t, func(request control.Request) control.Response {
 		assert.Equal(t, control.OpStatus, request.Op)
 		return control.Response{OK: true, DeviceLabel: "Google Pixel 9 (OS 16)", Port: 6000}
-	})
+	}, daemon.StopResult{PID: 4242, WasRunning: true})
 
 	out, err := execRoot(t, "bridge", "start", "--port", "5038")
 
@@ -528,8 +647,11 @@ func TestGivenBridgeStartFailsWhenStartBridgeInvokedWithARNThenErrorsWithTheStar
 }
 
 func TestGivenPidfileButNoControlSocketWhenStartBridgeInvokedThenReturnsNotListening(t *testing.T) {
-	// Start no-ops on the live pidfile; the status call finds no socket.
+	// The restart stops the stale record's daemon and starts anew; the status
+	// call then finds no socket.
 	fakeRuntimePaths(t)
+	fakeBridgeStop(t, daemon.StopResult{PID: 4242, WasRunning: true}, nil)
+	countingBridgeStart(t)
 
 	out, err := execRoot(t, "bridge", "start")
 
@@ -538,8 +660,10 @@ func TestGivenPidfileButNoControlSocketWhenStartBridgeInvokedThenReturnsNotListe
 }
 
 func TestGivenPidfileButNoControlSocketWhenStartBridgeInvokedWithARNThenReturnsNotListeningOnly(t *testing.T) {
-	// Start no-ops on the live pidfile; the add finds no socket. Not a refused attach.
+	// The restarted daemon never binds its socket; the add finds none. Not a refused attach.
 	fakeRuntimePaths(t)
+	fakeBridgeStop(t, daemon.StopResult{PID: 4242, WasRunning: true}, nil)
+	countingBridgeStart(t)
 
 	_, err := execRoot(t, "bridge", "start", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
 
@@ -548,10 +672,10 @@ func TestGivenPidfileButNoControlSocketWhenStartBridgeInvokedWithARNThenReturnsN
 }
 
 func TestGivenSessionARNWhenStartBridgeInvokedThenStartsAndAttachesDevice(t *testing.T) {
-	fakeDaemon(t, func(req control.Request) control.Response {
+	fakeRestart(t, func(req control.Request) control.Response {
 		assert.Equal(t, control.OpAdd, req.Op)
 		return control.Response{OK: true, DeviceLabel: "Google Pixel 9 (OS 16)", Port: 5037}
-	})
+	}, daemon.StopResult{PID: 4242, WasRunning: true})
 
 	out, err := execRoot(t, "bridge", "start", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
 
@@ -561,18 +685,17 @@ func TestGivenSessionARNWhenStartBridgeInvokedThenStartsAndAttachesDevice(t *tes
 }
 
 func TestGivenSessionARNButDaemonCannotResolveWhenStartBridgeInvokedThenErrorsButReportsDaemonUp(t *testing.T) {
-	// With resolution in the daemon, a bad ARN no longer fails before the spawn:
-	// the daemon starts and the attach fails. The error must make clear the daemon
-	// is up so the user retries device add rather than assuming nothing started.
-	fakeDaemon(t, func(control.Request) control.Response {
+	// The daemon resolves the ARN, so a session that does not resolve fails after the
+	// start. The error says the daemon is up, so the user runs bridge start again.
+	fakeRestart(t, func(control.Request) control.Response {
 		return control.Response{OK: false, Error: "resolve session: session not RUNNING"}
-	})
+	}, daemon.StopResult{PID: 4242, WasRunning: true})
 
 	_, err := execRoot(t, "bridge", "start", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "bridge started")
-	assert.Contains(t, err.Error(), "retry 'device add'")
+	assert.Contains(t, err.Error(), "run this command again")
 	assert.Contains(t, err.Error(), "session not RUNNING")
 }
 

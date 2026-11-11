@@ -393,9 +393,9 @@ Run `devicefarm-connect <command> --help` to see the flags of a command.
 - The runtime directory is `$XDG_RUNTIME_DIR/devicefarm-connect`, or a per-user directory under the system
   temp directory when that variable is not set. The log, pid file and control socket live there.
 - `device add` and `device list` start the bridge with the default settings when none runs. They take no
-  listener flags, so to pick a port or turn reverse on, run `bridge start` first. Against a running bridge,
-  `bridge start` attaches the device you name or prints the bridge's status, and ignores its other flags. To
-  change a flag, run `bridge stop` first.
+  listener flags, so to pick a port or turn reverse on, run `bridge start` first. `bridge start` stops a
+  running bridge in this runtime directory, says so, and starts a new one with the given flags. The restart
+  drops attached devices and forward and reverse rules.
 - `doctor` takes `--port` and `--listen-addr` too: it checks the address the bridge would bind.
 - Without `--allow-adb-reverse`, `adb reverse` prints:
 

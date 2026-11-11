@@ -515,16 +515,16 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 					m.logger.Info("device already attached; add is a no-op", "device", current.Label)
 					return control.Response{OK: true, DeviceLabel: current.Label, Port: m.config.ListenPort}
 				}
-				return control.Response{
-					OK:    false,
-					Error: fmt.Sprintf("a different device is already attached (%s); remove it first", current.Label),
-				}
+				return refusedReply(differentDeviceAttached(current.Label))
 			}
 
 			resolved, serial, err := m.resolveForAttach(ctx, dialer, req.ARN)
 			if err != nil {
 				m.logger.Warn("failed to attach the device on add", "error", err, "arn", req.ARN)
-				return control.Response{OK: false, Error: err.Error()}
+				if fix := m.addFix(err, req.ARN); fix != "" {
+					err = failure.WithFix(err, fix)
+				}
+				return refusedReply(err)
 			}
 			// Control commands are serialized on the inline accept loop and nothing
 			// else calls Set, so nothing can attach between the check above and here;
@@ -534,10 +534,7 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 			if !device.Set(bridge.DeviceInfo{ARN: req.ARN, Endpoint: resolved.Endpoint, Label: resolved.Label,
 				Serial: serial, SessionStartedAt: resolved.StartedAt, SessionExpiresAt: resolved.ExpiresAt}) {
 				current, _ := device.Current()
-				return control.Response{
-					OK:    false,
-					Error: fmt.Sprintf("a different device is already attached (%s); remove it first", current.Label),
-				}
+				return refusedReply(differentDeviceAttached(current.Label))
 			}
 			m.logger.Info("device attached", "device", resolved.Label)
 			return control.Response{OK: true, DeviceLabel: resolved.Label, Port: m.config.ListenPort}
@@ -635,6 +632,40 @@ func (m *DaemonManager) lookUpSession(ctx context.Context, sessionARN string) (b
 
 // reattachCommand is how the detach reasons tell the user to attach a session again.
 const reattachCommand = "run '" + config.BinaryName + " device add --session-arn"
+
+// refusedReply is the reply to a refused request: err's text in Error, its fixes in Fixes.
+func refusedReply(err error) control.Response {
+	cause, fixes := failure.Split(err)
+	return control.Response{OK: false, Error: cause, Fixes: fixes}
+}
+
+// differentDeviceAttached refuses an add while another session is attached.
+func differentDeviceAttached(label string) error {
+	return failure.WithFix(fmt.Errorf("a different device is already attached (%s)", label),
+		"run '"+config.BinaryName+" device remove' first")
+}
+
+// addFix is the fix for a failed add whose cause has one known remedy, else "". The bridge
+// reads AWS settings only from the shell that starts it, so a credential fix restarts it.
+func (m *DaemonManager) addFix(err error, sessionARN string) string {
+	restart := fmt.Sprintf("then run '%s --session-arn %s' with any other option the bridge started with; "+
+		"the bridge reads AWS settings only from the shell that starts it",
+		StartCommand(m.config.ListenAddr, m.config.ListenPort), sessionARN)
+	var rejected *session.RequestRejectedError
+	switch {
+	case errors.Is(err, session.ErrNoCredentials), errors.As(err, &rejected) && rejected.CredentialsExpired():
+		return "get working AWS credentials in this shell, " + restart
+	case errors.Is(err, session.ErrAccessDenied):
+		return "get AWS credentials allowed 'devicefarm:GetRemoteAccessSession' on this session in this shell, " + restart
+	case errors.Is(err, session.ErrSessionEnded):
+		return fmt.Sprintf("start a new remote access session, then %s <new ARN>'", reattachCommand)
+	case errors.Is(err, session.ErrUnsupportedDevice):
+		return fmt.Sprintf("start a remote access session on a supported Android device, then %s <its ARN>'", reattachCommand)
+	case errors.Is(err, session.ErrNoEndpointYet):
+		return "wait until the session is RUNNING with an endpoint, then try again"
+	}
+	return ""
+}
 
 // classifiedFailures are the lookup failures that detach beside not found and ended: the daemon
 // can no longer read the session, and a retry would not change that.

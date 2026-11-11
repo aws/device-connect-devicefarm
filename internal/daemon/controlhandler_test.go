@@ -6,6 +6,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/bridge"
 	"github.com/aws/device-connect-devicefarm/internal/config"
 	"github.com/aws/device-connect-devicefarm/internal/control"
+	"github.com/aws/device-connect-devicefarm/internal/session"
 	"github.com/aws/device-connect-devicefarm/internal/testsupport"
 )
 
@@ -183,7 +185,8 @@ func (s *controlHandlerSuite) TestDifferentDeviceAlreadyAttachedAddRejectedWitho
 	resp := s.handler(addReq("arn:2"))
 
 	s.False(resp.OK, "the one-device limit must reject adding a different device")
-	s.NotEmpty(resp.Error)
+	s.Equal("a different device is already attached (Pixel 10 (OS 17))", resp.Error)
+	s.Equal([]string{"run '" + config.BinaryName + " device remove' first"}, resp.Fixes)
 	current, _ := s.device.Current()
 	s.Equal("arn:1", current.ARN, "the first device must stay attached")
 	s.Equal([]string{"arn:1"}, s.client.resolvedARNs(), "a rejected different device must not trigger a resolve")
@@ -203,6 +206,55 @@ func (s *controlHandlerSuite) TestSameDeviceAlreadyAttachedAddAgainIsIdempotentW
 	s.Require().True(present)
 	s.Equal("arn:1", current.ARN, "the device must remain attached")
 	s.Equal([]string{"arn:1"}, s.client.resolvedARNs(), "a re-add of the current device must not resolve again")
+}
+
+func (s *controlHandlerSuite) TestFailedResolveWithAKnownRemedyCarriesItsFixApartFromTheCause() {
+	restart := "then run '" + config.BinaryName + " bridge start --port 5037 --session-arn arn:1' with any other option " +
+		"the bridge started with; the bridge reads AWS settings only from the shell that starts it"
+	cases := []struct {
+		name    string
+		failure error
+		fix     string
+	}{
+		{"no credentials", fmt.Errorf("get identity: %w", session.ErrNoCredentials),
+			"get working AWS credentials in this shell, " + restart},
+		{"expired credentials", &session.RequestRejectedError{Code: "ExpiredTokenException", Cause: errors.New("expired")},
+			"get working AWS credentials in this shell, " + restart},
+		{"access denied", fmt.Errorf("%w: not allowed", session.ErrAccessDenied),
+			"get AWS credentials allowed 'devicefarm:GetRemoteAccessSession' on this session in this shell, " + restart},
+		{"ended", fmt.Errorf("session %w", session.ErrSessionEnded),
+			"start a new remote access session, then run '" + config.BinaryName + " device add --session-arn <new ARN>'"},
+		{"unsupported device", fmt.Errorf("session on Android 8: %w", session.ErrUnsupportedDevice),
+			"start a remote access session on a supported Android device, then run '" + config.BinaryName +
+				" device add --session-arn <its ARN>'"},
+		{"not RUNNING", fmt.Errorf("session %w", session.ErrNoEndpointYet), "wait until the session is RUNNING with an endpoint, then try again"},
+	}
+	for _, testCase := range cases {
+		s.Run(testCase.name, func() {
+			s.client.set("", testCase.failure)
+
+			resp := s.handler(addReq("arn:1"))
+
+			s.False(resp.OK)
+			s.Equal("resolve session: "+testCase.failure.Error(), resp.Error, "the cause carries no fix text")
+			s.Equal([]string{testCase.fix}, resp.Fixes)
+		})
+	}
+}
+
+func (s *controlHandlerSuite) TestFailedResolveWithNoKnownRemedyCarriesNoFix() {
+	for _, failure := range []error{
+		fmt.Errorf("session %w", session.ErrSessionNotFound),
+		&session.RequestRejectedError{Code: "InvalidSignatureException", Cause: errors.New("signature expired")},
+		errors.New("connection reset"),
+	} {
+		s.client.set("", failure)
+
+		resp := s.handler(addReq("arn:1"))
+
+		s.False(resp.OK)
+		s.Empty(resp.Fixes, failure.Error())
+	}
 }
 
 func (s *controlHandlerSuite) TestRemoveWithMatchingARNDetaches() {

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials/processcreds"
 )
 
@@ -24,10 +25,40 @@ var errCredentialProcessOutput = errors.New("the credential_process helper faile
 func scrubCredentialProcess(err error) error {
 	var processErr *processcreds.ProviderError
 	if errors.As(err, &processErr) {
-		return errCredentialProcessOutput
+		return credentialsError{cause: errCredentialProcessOutput}
 	}
 	return err
 }
+
+// markedCredentials is loadConfig's credential provider: the SDK's, with a retrieval failure
+// marked ErrNoCredentials unless the caller's context ended. The SDK gives that failure no type
+// of its own.
+type markedCredentials struct{ provider aws.CredentialsProvider }
+
+func (marked markedCredentials) Retrieve(ctx context.Context) (aws.Credentials, error) {
+	credentials, err := marked.provider.Retrieve(ctx)
+	if err != nil && ctx.Err() == nil {
+		return aws.Credentials{}, credentialsError{cause: err}
+	}
+	return credentials, err
+}
+
+// ProviderSources passes the SDK provider's sources through, for the client's user agent.
+func (marked markedCredentials) ProviderSources() []aws.CredentialSource {
+	if sources, ok := marked.provider.(aws.CredentialProviderSource); ok {
+		return sources.ProviderSources()
+	}
+	return nil
+}
+
+// credentialsError matches ErrNoCredentials and keeps its cause's text.
+type credentialsError struct{ cause error }
+
+func (credentialsErr credentialsError) Error() string { return credentialsErr.cause.Error() }
+
+func (credentialsErr credentialsError) Unwrap() error { return credentialsErr.cause }
+
+func (credentialsError) Is(target error) bool { return target == ErrNoCredentials }
 
 // ResolveCredentials walks the default credential chain once, as the Device Farm client does
 // on its first call. An empty chain is an error.
