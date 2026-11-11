@@ -246,8 +246,10 @@ session ARN, the name, the serial, the attach age (`<age> ago`), the session age
 and the time to expiry (`in <span>`). An unknown value reads `unknown`; a passed expiry reads
 `expired`.
 `device list --json` prints one JSON object. `devices` holds one object per device: `sessionArn`,
-`label`, `serial`, `attachedAt`, `sessionStartedAt` and `sessionExpiresAt`. The times are RFC 3339;
-a time the bridge does not know is absent. With no device, `devices` is `[]`, and `lastDetach`
+`label`, `serial`, `attachedAt`, `sessionStartedAt` and `sessionExpiresAt`. The bridge reads the
+session's time left from the server at `device add`, computes the expiry from it, and derives
+the start as the expiry minus the session limit. The times are RFC 3339; a time the bridge
+could not read is absent. With no device, `devices` is `[]`, and `lastDetach`
 (`reason`, `at`) appears when the bridge detached the last device itself. Without `--json`, no
 device prints `no device attached; use 'device add' to connect one` on stderr, then `the last
 device detached <age> ago: <reason>` when the bridge detached it itself.

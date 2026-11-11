@@ -9,10 +9,14 @@
 package testsupport
 
 import (
+	"fmt"
 	"io"
 	"net"
+	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.org/x/net/websocket"
 )
@@ -26,21 +30,139 @@ func NewMockWSS(t *testing.T, handler func(*websocket.Conn)) string {
 	return startTLSWSS(t, handler, loadAuthority().loopbackLeaf)
 }
 
-// NewServerMockWSS serves both routes on one URL, as the server does: ?path=adbreverse at a
-// ReverseMockWSS, every other path at a SessionMockWSS. For an attachment that dials both: the
-// notifier, then its attach clear.
-func NewServerMockWSS(t *testing.T, cfg SessionMockConfig) (*SessionMockWSS, *ReverseMockWSS) {
+// routeControl is the server's status route; the add reads the session's time left there.
+const routeControl = "control"
+
+// NewServerMockWSS serves the server's routes on one URL: ?path=adbreverse at a ReverseMockWSS,
+// ?path=control at a StatusMockWSS, every other path at a SessionMockWSS.
+func NewServerMockWSS(t *testing.T, cfg SessionMockConfig) (*SessionMockWSS, *ReverseMockWSS, *StatusMockWSS) {
 	t.Helper()
-	sessions, reverse := newSessionMock(cfg), newReverseMock()
+	sessions, reverse, status := newSessionMock(cfg), newReverseMock(), newStatusMock()
 	endpoint := NewMockWSS(t, func(ws *websocket.Conn) {
-		if ws.Request().URL.Query().Get("path") == routeAdbReverse {
+		switch ws.Request().URL.Query().Get("path") {
+		case routeAdbReverse:
 			reverse.serve(ws)
+		case routeControl:
+			status.serve(ws)
+		default:
+			sessions.serve(ws)
+		}
+	})
+	sessions.URL, reverse.URL, status.URL = endpoint, endpoint, endpoint
+	return sessions, reverse, status
+}
+
+// DefaultStatusTimeLeft is the session time left a StatusMockWSS reports until a test sets its own.
+const DefaultStatusTimeLeft = 140 * time.Minute
+
+// StatusMockWSS stands in for the server's status route: it answers each status request with the
+// server's reply shape, a JSON object whose value member is JSON text carrying timeLeft in
+// seconds, sent as one text frame.
+type StatusMockWSS struct {
+	URL string
+
+	mu       sync.Mutex
+	timeLeft time.Duration
+	silent   bool
+	refuse   bool
+	body     []byte
+	requests [][]byte
+	open     int
+}
+
+func newStatusMock() *StatusMockWSS {
+	return &StatusMockWSS{timeLeft: DefaultStatusTimeLeft}
+}
+
+// SetTimeLeft sets the time left later replies report.
+func (mock *StatusMockWSS) SetTimeLeft(timeLeft time.Duration) {
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	mock.timeLeft = timeLeft
+}
+
+// StaySilent makes the mock read requests and answer nothing, as a server in another mode does.
+func (mock *StatusMockWSS) StaySilent() {
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	mock.silent = true
+}
+
+// RefuseDials makes the mock close each websocket at open, unanswered.
+func (mock *StatusMockWSS) RefuseDials() {
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	mock.refuse = true
+}
+
+// AnswerWith makes the mock answer every request with exactly body.
+func (mock *StatusMockWSS) AnswerWith(body []byte) {
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	mock.body = append([]byte(nil), body...)
+}
+
+// Requests returns every frame the route received, in order, across every websocket.
+func (mock *StatusMockWSS) Requests() [][]byte {
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	copied := make([][]byte, len(mock.requests))
+	for index, request := range mock.requests {
+		copied[index] = append([]byte(nil), request...)
+	}
+	return copied
+}
+
+// OpenSockets returns how many websockets the route holds open now.
+func (mock *StatusMockWSS) OpenSockets() int {
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	return mock.open
+}
+
+// serve answers each inbound frame with the status reply, the canned body, or silence.
+func (mock *StatusMockWSS) serve(ws *websocket.Conn) {
+	mock.mu.Lock()
+	mock.open++
+	mock.mu.Unlock()
+	defer func() {
+		mock.mu.Lock()
+		mock.open--
+		mock.mu.Unlock()
+		ws.Close()
+	}()
+	mock.mu.Lock()
+	refuse := mock.refuse
+	mock.mu.Unlock()
+	if refuse {
+		return
+	}
+	for {
+		request, err := receive(ws, nil)
+		if err != nil {
 			return
 		}
-		sessions.serve(ws)
-	})
-	sessions.URL, reverse.URL = endpoint, endpoint
-	return sessions, reverse
+		mock.mu.Lock()
+		mock.requests = append(mock.requests, request)
+		reply, silent := mock.statusReply(), mock.silent
+		mock.mu.Unlock()
+		if silent {
+			continue
+		}
+		// A text frame, as the server sends it.
+		if websocket.Message.Send(ws, string(reply)) != nil {
+			return
+		}
+	}
+}
+
+// statusReply builds the double-encoded reply, or the canned body. Call with mu held.
+func (mock *StatusMockWSS) statusReply() []byte {
+	if mock.body != nil {
+		return append([]byte(nil), mock.body...)
+	}
+	inner := strconv.Quote(fmt.Sprintf(`{"status": "running", "timeLeft": %.1f}`, mock.timeLeft.Seconds()))
+	return []byte(`{"status": "SUCCESS", "message": null, "value": ` + inner + `}`)
 }
 
 // NewAcceptCounter listens on loopback, closes each accepted connection and counts it,

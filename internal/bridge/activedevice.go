@@ -24,8 +24,8 @@ type DeviceInfo struct {
 	Serial   string // adb serial, fetched by the control add before the bind
 	// AttachedAt is when Set bound the device; Set stamps it.
 	AttachedAt time.Time
-	// SessionStartedAt and SessionExpiresAt come from the session resolution at the add. Zero
-	// when the service reported no start time. A refresh leaves them alone.
+	// SessionStartedAt and SessionExpiresAt come from the status read at the add. Zero when that
+	// read failed. A refresh leaves them alone.
 	SessionStartedAt time.Time
 	SessionExpiresAt time.Time
 }

@@ -59,11 +59,12 @@ const clientRegion = "us-west-2"
 // refuses an older Android device.
 const minimumAndroidMajor = 9
 
-// sessionMaxLength is the service's session limit, per the Device Farm developer guide, "Using a
+// MaxSessionLength is the service's session limit, per the Device Farm developer guide, "Using a
 // remote access session"
 // (https://docs.aws.amazon.com/devicefarm/latest/developerguide/how-to-use-session.html). The
-// API reports no expiry; ExpiresAt is Started plus this.
-const sessionMaxLength = 150 * time.Minute
+// API reports no expiry; the daemon reads the time left from the session's status route at the
+// add and derives the start as the expiry minus this.
+const MaxSessionLength = 150 * time.Minute
 
 // Sentinels for errors.Is. GetSession wraps them into its texts, where their words read in
 // place; the SDK's own text stays inside the wrap.
@@ -150,16 +151,12 @@ func (*SessionEndedError) Is(target error) bool { return target == ErrSessionEnd
 // RemoteAccessInfo is the outcome of resolving a session ARN: the websocket URL
 // to dial (the interactive endpoint verbatim, path-less; each dial site names its
 // route through bridge.Route), the ARN the response names (empty when none; can
-// differ from the one asked), the device label to show the user, and the session
-// times: StartedAt from the response,
-// ExpiresAt as StartedAt plus sessionMaxLength. Both zero when the response has
-// no start.
+// differ from the one asked) and the device label to show the user. The session times are
+// not here: the daemon reads the time left from the session's status route at the add.
 type RemoteAccessInfo struct {
-	Endpoint  string
-	ARN       string
-	Label     string
-	StartedAt time.Time
-	ExpiresAt time.Time
+	Endpoint string
+	ARN      string
+	Label    string
 }
 
 // ReturnedARN is the ARN the service names the session by: the response's, else
@@ -317,13 +314,8 @@ func (c awsRemoteAccessClient) GetSession(ctx context.Context, sessionARN string
 			sessionARN, ErrNoEndpointYet, status)
 	}
 
-	info := RemoteAccessInfo{Endpoint: endpoint, ARN: aws.ToString(remoteAccessSession.Arn),
-		Label: deviceLabel(remoteAccessSession.Device)}
-	if remoteAccessSession.Started != nil {
-		info.StartedAt = *remoteAccessSession.Started
-		info.ExpiresAt = info.StartedAt.Add(sessionMaxLength)
-	}
-	return info, nil
+	return RemoteAccessInfo{Endpoint: endpoint, ARN: aws.ToString(remoteAccessSession.Arn),
+		Label: deviceLabel(remoteAccessSession.Device)}, nil
 }
 
 // ValidateSessionARN rejects a session ARN the client cannot serve: one that is

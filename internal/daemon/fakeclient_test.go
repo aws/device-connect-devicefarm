@@ -7,15 +7,8 @@ import (
 	"context"
 	"errors"
 	"sync"
-	"time"
 
 	"github.com/aws/device-connect-devicefarm/internal/session"
-)
-
-// testSessionStartedAt and testSessionExpiresAt are the session times every fake resolve carries.
-var (
-	testSessionStartedAt = time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
-	testSessionExpiresAt = testSessionStartedAt.Add(150 * time.Minute)
 )
 
 // Well-formed session ARNs for every add the daemon tests send: the add handler
@@ -97,8 +90,7 @@ func (f *fakeRemoteAccessClient) GetSession(_ context.Context, sessionARN string
 	if f.err != nil {
 		return session.RemoteAccessInfo{}, f.err
 	}
-	return session.RemoteAccessInfo{Endpoint: f.endpoint, ARN: f.returnedArns[sessionARN], Label: f.label,
-		StartedAt: testSessionStartedAt, ExpiresAt: testSessionExpiresAt}, nil
+	return session.RemoteAccessInfo{Endpoint: f.endpoint, ARN: f.returnedArns[sessionARN], Label: f.label}, nil
 }
 
 // attachDuringResolve wraps a RemoteAccessClient and runs attach before

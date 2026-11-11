@@ -72,7 +72,7 @@ type Response struct {
 
 // AttachedDevice is one connected device in an OpStatus or OpList reply: its session ARN,
 // label and adb serial, when the daemon attached it, and when its session started and
-// expires. The session times are zero when the service reported no start time.
+// expires. The session times are zero when the add's status read failed.
 type AttachedDevice struct {
 	SessionARN       string    `json:"sessionArn"`
 	Label            string    `json:"label"`

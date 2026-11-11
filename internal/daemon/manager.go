@@ -44,11 +44,16 @@ const (
 )
 
 // resolveTimeout bounds one session lookup (GetRemoteAccessSession with its retries) on
-// refresh, and the add's lookups (up to two) plus the serial fetch. The SDK's retry budget caps
-// attempts, not wall time, and add runs on the inline control loop, so a stalled step would
+// refresh, and the add's lookups (up to two), serial fetch and status read. The SDK's retry budget
+// caps attempts, not wall time, and add runs on the inline control loop, so a stalled step would
 // wedge every later control command. It sits below the control channel's deadline so a slow
 // step surfaces as an add error to the CLI, not a dead socket. A var so tests can shrink it.
 var resolveTimeout = 8 * time.Second
+
+// sessionStatusTimeout bounds the add's status read of the session's time left. Inside
+// resolveTimeout, so a silent status route still leaves the add under the control deadline.
+// A var so tests can shrink it.
+var sessionStatusTimeout = 2 * time.Second
 
 // spawnDaemon launches the detached daemon child and returns its process handle and
 // a channel that closes when the child exits. A package var: a test fake can play
@@ -500,7 +505,7 @@ func runPeriodic(ctx context.Context, interval time.Duration, tick func()) {
 //
 // shutdown cancels the daemon context, then replies.
 //
-// ctx is the daemon context, and add's resolve and fetch run under it. So a SIGTERM or
+// ctx is the daemon context, and add's resolve, fetch and status read run under it. So a SIGTERM or
 // SIGINT that stops the daemon also cancels an add in flight. A control shutdown cannot
 // do that: it waits on the inline loop until the add returns. `bridge stop` sends that
 // shutdown, so it can wait behind an add for up to resolveTimeout.
@@ -546,13 +551,14 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 				m.logger.Warn("failed to attach the device on add", "error", err, "arn", storedARN)
 				return refusedReply(err)
 			}
+			startedAt, expiresAt := m.readSessionTimes(resolveCtx, dialer, resolved)
 			// Control commands are serialized on the inline accept loop and nothing
 			// else calls Set, so nothing can attach between the check above and here;
 			// this Set is expected to succeed. The failure branch is kept only as
 			// defense-in-depth against a future concurrent caller, and treats the
 			// race like the already-attached path.
 			if !device.Set(bridge.DeviceInfo{ARN: storedARN, Endpoint: resolved.Endpoint, Label: resolved.Label,
-				Serial: serial, SessionStartedAt: resolved.StartedAt, SessionExpiresAt: resolved.ExpiresAt}) {
+				Serial: serial, SessionStartedAt: startedAt, SessionExpiresAt: expiresAt}) {
 				current, _ := device.Current()
 				return m.attachedAddReply(current, storedARN)
 			}
@@ -626,6 +632,23 @@ func (m *DaemonManager) attachedAddReply(current bridge.DeviceInfo, arn string) 
 		return control.Response{OK: true, DeviceLabel: current.Label, ARN: current.ARN, Port: m.config.ListenPort}
 	}
 	return refusedReply(differentDeviceAttached(current.Label))
+}
+
+// readSessionTimes reads the session's time left from the server's status route. The expiry is
+// the read time plus the time left; the start is the expiry minus the session length. A failed
+// read leaves both times zero and never fails the add.
+func (m *DaemonManager) readSessionTimes(ctx context.Context, dialer *bridge.WSDialer,
+	resolved session.RemoteAccessInfo) (startedAt, expiresAt time.Time) {
+	statusCtx, cancelStatus := context.WithTimeout(ctx, sessionStatusTimeout)
+	defer cancelStatus()
+	timeLeft, err := dialer.FetchSessionTimeLeft(statusCtx, resolved.Endpoint, session.MaxSessionLength)
+	if err != nil {
+		m.logger.Warn("could not read the session's time left; device list shows it as unknown",
+			"device", resolved.Label, "error", err)
+		return time.Time{}, time.Time{}
+	}
+	expiresAt = time.Now().Add(timeLeft)
+	return expiresAt.Add(-session.MaxSessionLength), expiresAt
 }
 
 // resolveForAttach resolves typedARN for an add. The service finds the session by

@@ -97,7 +97,8 @@ func ruledSupervisor(t *testing.T, mock *testsupport.ReverseMockWSS, rules *reve
 func serverMocks(t *testing.T, answer func(*testsupport.MockSession, []byte) []byte) (
 	*testsupport.SessionMockWSS, *testsupport.ReverseMockWSS) {
 	t.Helper()
-	return testsupport.NewServerMockWSS(t, testsupport.SessionMockConfig{OnMessage: answer})
+	sessions, reverse, _ := testsupport.NewServerMockWSS(t, testsupport.SessionMockConfig{OnMessage: answer})
+	return sessions, reverse
 }
 
 // serverReverseMock is the reverse half of serverMocks answering clears as the server does, for a

@@ -368,7 +368,7 @@ func noProxy(t *testing.T) {
 func relayMock(t *testing.T, cfg testsupport.SessionMockConfig) (*testsupport.SessionMockWSS, *testsupport.ReverseMockWSS, *bridge.WSDialer) {
 	t.Helper()
 	noProxy(t)
-	sessions, reverse := testsupport.NewServerMockWSS(t, cfg)
+	sessions, reverse, _ := testsupport.NewServerMockWSS(t, cfg)
 	return sessions, reverse, bridge.NewWSDialer(time.Second).TrustRoots(testsupport.TestRoots())
 }
 
