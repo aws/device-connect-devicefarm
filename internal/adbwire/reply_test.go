@@ -244,6 +244,7 @@ func TestGivenAFailingWriterWhenRepliedThenTheWriteErrorPropagates(t *testing.T)
 		{name: "forward success", write: func(writer io.Writer) error { return WriteForwardSuccess(writer, 41235) }},
 		{name: "forward success with no resolved port", write: func(writer io.Writer) error { return WriteForwardSuccess(writer, 0) }},
 		{name: "list-forward", write: func(writer io.Writer) error { return WriteListForward(writer, "") }},
+		{name: "server version", write: WriteServerVersion},
 		{name: "transport select", write: func(writer io.Writer) error { return WriteTransportSelect(writer, 1) }},
 	}
 

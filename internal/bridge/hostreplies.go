@@ -19,8 +19,9 @@ import (
 )
 
 // The daemon answers some host requests from copies of the server's replies. It fetches each
-// copy at attach, or on first use if the attach kept none. A held tracker uses no websocket: it
-// pushes the copy, or the empty list, on every attach and detach.
+// copy at attach, or on first use if the attach kept none. With no device a list is empty and
+// host:version gets the last attachment's copy (answerServerQuery). A held tracker uses no
+// websocket: it pushes the copy, or the empty list, on every attach and detach.
 
 // emptyDeviceList is the tracker message for no devices: zero length, no rows (transport.cpp
 // device_tracker_send).
@@ -44,6 +45,11 @@ type hostQuery struct {
 // commands. A failed fetch relays the probe through the refusal gate, so the client reads a FAIL
 // reason or the redial's reply, not a bare close.
 var featuresQuery = hostQuery{request: hostFeaturesRequest, relayOnFetchFailure: true}
+
+// hostVersionService is answered with or without a device: from the attachment's copy of the
+// server's reply, or with no device by ActiveDevice.writeVersionWithNoDevice. An adb client
+// kills a server whose version differs from its own, so the answer is the remote server's.
+const hostVersionService = "host:version"
 
 // localHostQueries maps each one-reply host request, sent alone with the plain host: prefix, to
 // its query. As adb's handle_host_request: version, devices, devices-l and features get one
@@ -149,6 +155,23 @@ func (cache *hostReplyCache) lookup(ctx context.Context, request string) ([]byte
 	}
 }
 
+// kept returns the cached reply to request without fetching or waiting: nil when there is none
+// or its fetch has not ended.
+func (cache *hostReplyCache) kept(request string) []byte {
+	cache.mutex.Lock()
+	entry, found := cache.entries[request]
+	cache.mutex.Unlock()
+	if !found {
+		return nil
+	}
+	select {
+	case <-entry.fetched:
+		return entry.reply
+	default:
+		return nil
+	}
+}
+
 // keepable reports whether reply can answer later requests: an OKAY reply with a payload, and
 // for a device list, every device ready. A device in another state may change soon, and a held
 // tracker is pushed only at an attach or a detach. A fetch returns whole replies only.
@@ -203,6 +226,38 @@ func (fetcher *hostReplyFetcher) fetch(ctx context.Context, request string) ([]b
 		return nil, nil
 	}
 	return reply, err
+}
+
+// answerServerQuery answers, with no device attached, the lone host requests an adb server
+// answers without one: host:version (ActiveDevice.writeVersionWithNoDevice), and the device
+// lists as the empty list. One reply, then the close. answered false: a device is attached (its
+// copies answer), any other request, or one behind a select.
+func answerServerQuery(tcp net.Conn, clientOpening opening, deviceAttached bool, device *ActiveDevice,
+	logger *slog.Logger) (answered bool) {
+	if deviceAttached || clientOpening.selected {
+		return false
+	}
+	var write func(io.Writer) error
+	switch clientOpening.service {
+	case hostVersionService:
+		write = device.writeVersionWithNoDevice
+	case "host:devices", "host:devices-l":
+		write = writeEmptyDeviceList
+	default:
+		return false
+	}
+	// No pump watches this socket; the deadline stops a client that asks, then stops reading.
+	_ = tcp.SetWriteDeadline(time.Now().Add(openingRequestTimeout))
+	if err := write(tcp); err != nil {
+		logger.Debug("could not answer a host request", "error", err)
+	}
+	return true
+}
+
+// writeEmptyDeviceList writes a device list reply with no rows.
+func writeEmptyDeviceList(writer io.Writer) error {
+	_, err := io.WriteString(writer, statusOkay+emptyDeviceList)
+	return err
 }
 
 // answerHostQuery answers a request that localHostQuery resolves, from the attachment's cached

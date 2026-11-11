@@ -4,6 +4,7 @@
 package adbwire
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,6 +15,19 @@ func TestGivenTheHostVersionRequestWhenFramedByTheEncoderThenTheConstantMatches(
 	framed, err := EncodeRequest("host:version")
 	require.NoError(t, err)
 	assert.Equal(t, HostVersionRequest, string(framed))
+}
+
+func TestGivenTheServerVersionWhenWrittenThenTheVersionParserReadsItBack(t *testing.T) {
+	var buffer bytes.Buffer
+
+	require.NoError(t, WriteServerVersion(&buffer))
+
+	written := buffer.Bytes()
+	require.Len(t, written, len(okayReply)+HostVersionReplyLen)
+	assert.Equal(t, okayReply, string(written[:len(okayReply)]))
+	version, err := ParseHostVersionReply(written[len(okayReply):])
+	require.NoError(t, err)
+	assert.Equal(t, AdbServerVersion, version)
 }
 
 func TestGivenTheHostKillRequestWhenFramedByTheEncoderThenTheConstantMatches(t *testing.T) {
