@@ -218,8 +218,38 @@ func checkCredentialsResolve(ctx context.Context, inputs Inputs) Result {
 	return Result{Status: Pass, Summary: "credentials from " + summary.Source}
 }
 
-// checkSessionRunning calls GetSession once; one call proves the ARN, region, credentials,
-// permission and a RUNNING session. The endpoint goes to the run state, never to the row.
+// sessionLookup is one GetSession answer. noClient: err came from building the client.
+type sessionLookup struct {
+	info     session.RemoteAccessInfo
+	err      error
+	noClient bool
+}
+
+// lookUpSession makes the run's one lookup of the session to check, under remoteTimeout, and
+// keeps the answer. The first row that needs it makes the call; a later row reads the kept
+// answer.
+func (state *runState) lookUpSession(ctx context.Context, inputs Inputs) sessionLookup {
+	state.lookupOnce.Do(func() {
+		sessionARN, _, _ := sessionToCheck(inputs, state)
+		lookupCtx, cancel := context.WithTimeout(ctx, remoteTimeout)
+		defer cancel()
+		resolver := inputs.Resolver
+		if resolver == nil {
+			var err error
+			if resolver, err = session.NewRemoteAccessClient(lookupCtx, inputs.Logger); err != nil {
+				state.lookup = sessionLookup{err: err, noClient: true}
+				return
+			}
+		}
+		info, err := resolver.GetSession(lookupCtx, sessionARN)
+		state.lookup = sessionLookup{info: info, err: err}
+	})
+	return state.lookup
+}
+
+// checkSessionRunning reads the run's one GetSession call; one call proves the ARN, region,
+// credentials, permission and a RUNNING session. The endpoint goes to the run state, never to
+// the row. The run state also keeps the ARN the service returned.
 // Without --session-arn it checks the one attached device's session and names it; with no
 // daemon, no device or several devices it skips.
 func checkSessionRunning(ctx context.Context, inputs Inputs, state *runState) Result {
@@ -231,18 +261,15 @@ func checkSessionRunning(ctx context.Context, inputs Inputs, state *runState) Re
 		return Result{Status: Skip, Summary: sessionArnSkipSummary}
 	}
 	inputs.SessionARN = sessionARN
-	resolver := inputs.Resolver
-	if resolver == nil {
-		var err error
-		if resolver, err = session.NewRemoteAccessClient(ctx, inputs.Logger); err != nil {
-			return Result{Status: Fail, Summary: err.Error(), Hint: credentialsHint}
-		}
+	lookup := state.lookUpSession(ctx, inputs)
+	switch {
+	case lookup.noClient:
+		return Result{Status: Fail, Summary: lookup.err.Error(), Hint: credentialsHint}
+	case lookup.err != nil:
+		return Result{Status: Fail, Summary: lookup.err.Error(), Hint: sessionHint(lookup.err, inputs)}
 	}
-	info, err := resolver.GetSession(ctx, sessionARN)
-	if err != nil {
-		return Result{Status: Fail, Summary: err.Error(), Hint: sessionHint(err, inputs)}
-	}
-	state.endpoint = info.Endpoint
+	info := lookup.info
+	state.endpoint, state.returnedARN = info.Endpoint, info.ReturnedARN(sessionARN)
 	if fromDaemon {
 		return Result{Status: Pass, Summary: fmt.Sprintf("RUNNING: %s (the session the bridge holds: %s)", info.Label, safeValue(sessionARN))}
 	}
@@ -307,7 +334,8 @@ func checkReattachAcked(ctx context.Context, inputs Inputs, state *runState) Res
 func checkReverseNotifier(ctx context.Context, inputs Inputs, state *runState) Result {
 	inputs = withSessionToCheck(inputs, state)
 	daemon, _ := state.daemon()
-	if daemon.OK && daemon.ReverseEnabled && strings.TrimSpace(daemon.ARN) == strings.TrimSpace(inputs.SessionARN) {
+	if daemon.OK && daemon.ReverseEnabled &&
+		attachedIsAsked(strings.TrimSpace(daemon.ARN), strings.TrimSpace(inputs.SessionARN), state.returnedARN) {
 		return Result{Status: Pass, Summary: reverseOnSummary}
 	}
 	probeCtx, cancel := withProbeBudget(ctx)

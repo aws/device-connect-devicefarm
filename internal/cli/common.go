@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -44,9 +45,35 @@ var sessionArnDescription = fmt.Sprintf("%s %s remote access session ARN", awsNa
 
 // addSessionArnFlag binds the --session-arn flag to the shared rootState on cmd.
 // Every command that takes a session ARN registers it identically apart from the
-// help text, so it lives here.
+// help text, so it lives here. It trims the value, so a pasted ARN with stray
+// spaces still matches.
 func addSessionArnFlag(cmd *cobra.Command, state *rootState, help string) {
-	cmd.Flags().StringVar(&state.sessionARN, "session-arn", "", help)
+	cmd.Flags().Var(trimmedString{target: &state.sessionARN}, "session-arn", help)
+}
+
+// trimmedString is a pflag.Value that stores the flag's value with surrounding
+// spaces removed.
+type trimmedString struct{ target *string }
+
+func (value trimmedString) String() string {
+	if value.target == nil {
+		return ""
+	}
+	return *value.target
+}
+
+func (value trimmedString) Set(raw string) error {
+	*value.target = strings.TrimSpace(raw)
+	return nil
+}
+
+func (trimmedString) Type() string { return "string" }
+
+// blankSessionArn reports a --session-arn that was given but trimmed to empty.
+// `device remove` without the flag detaches the attached device, so a blank
+// value must not read as "no flag".
+func blankSessionArn(cmd *cobra.Command, state *rootState) bool {
+	return cmd.Flags().Changed("session-arn") && state.sessionARN == ""
 }
 
 // lastDetachNote words the daemon's record of its last detach for a no-device reply, or "" when
@@ -201,6 +228,9 @@ func attachDevice(cmd *cobra.Command, state *rootState, refused failure.Explaine
 		return &refused
 	}
 	printListeningLine(cmd, resp)
+	if resp.ARN != "" && resp.ARN != state.sessionARN {
+		cmd.PrintErrln("* the service names this session " + resp.ARN + "; use that ARN with 'device remove'")
+	}
 	return nil
 }
 

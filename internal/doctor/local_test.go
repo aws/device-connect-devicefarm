@@ -257,6 +257,8 @@ func TestGivenARunningDaemonWhenCheckedThenTheRowReportsItsStatusAndReverseState
 
 const (
 	otherSessionARN = "arn:aws:devicefarm:us-west-2:123456789012:session:abc/def/11111"
+	// returnedSessionARN is the ARN the service returns for testSessionARN when the two differ.
+	returnedSessionARN = "arn:aws:devicefarm:us-west-2:111122223333:session:abc/def/00000"
 	// endedReason is the bridge's detach reason for an ended session.
 	endedReason = "remote access session " + testSessionARN + " has ended (COMPLETED); " +
 		"start a new session and run 'devicefarm-connect device add --session-arn <new ARN>'"
@@ -318,7 +320,7 @@ func TestGivenAnAskedSessionTheBridgeDoesNotHoldWhenCheckedThenTheRowWarnsWithTh
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result := bridgeRowResult(testSessionARN, tc.reply, 4242)
+			result := bridgeRowResult(testSessionARN, testSessionARN, tc.reply, 4242)
 
 			assert.Equal(t, Result{Status: Warn, Hint: tc.wantHint,
 				Summary: "running (pid 4242) on port 5037; " + tc.wantTail + "; session " + testSessionARN + " is not attached"}, result,
@@ -354,10 +356,132 @@ func TestGivenTheAskedSessionAttachedWhenCheckedThenTheRowKeepsItsReverseVerdict
 	}
 }
 
+func TestGivenTheServiceReturnsAnotherArnForTheAskedSessionWhenTheBridgeIsCheckedThenThatArnNamesTheAskedSession(t *testing.T) {
+	// The session still runs: the bridge lost its credentials, this shell has its own.
+	expiredReason := "the AWS credentials the bridge started with have expired, so it can no longer read remote access session " +
+		returnedSessionARN + "; refresh the credentials, run 'devicefarm-connect bridge stop', start the bridge again from that " +
+		"shell with the same options, then run 'devicefarm-connect device add --session-arn " + returnedSessionARN + "'"
+	notAttached := "; session " + testSessionARN + " is not attached"
+	tests := []struct {
+		name        string
+		reply       control.Response
+		wantStatus  Status
+		wantSummary string
+		wantHint    string
+	}{
+		{name: "attached under the returned ARN", reply: attachedReply(returnedSessionARN, true), wantStatus: Pass,
+			wantSummary: "device Pixel 9 (OS 16), session " + returnedSessionARN + "; reverse on"},
+		{name: "attached under the returned ARN with reverse off", reply: attachedReply(returnedSessionARN, false), wantStatus: Warn,
+			wantSummary: "device Pixel 9 (OS 16), session " + returnedSessionARN + "; reverse off",
+			wantHint:    reverseOffHint(attachedReply(returnedSessionARN, false))},
+		{name: "detached under the returned ARN",
+			reply:      control.Response{OK: true, Port: 5037, ReverseEnabled: true, LastDetachReason: expiredReason},
+			wantStatus: Warn, wantSummary: "no device; reverse on; the bridge detached the last device" + notAttached,
+			wantHint: "the bridge detached the device, so adb finds no device: " + expiredReason + "."},
+		{name: "another session attached", reply: attachedReply(otherSessionARN, true), wantStatus: Warn,
+			wantSummary: "device Pixel 9 (OS 16), session " + otherSessionARN + "; reverse on" + notAttached,
+			wantHint: "session " + testSessionARN + " is not attached to the bridge, so adb cannot reach its device. " +
+				"Run 'devicefarm-connect device remove', then 'devicefarm-connect device add --session-arn " + testSessionARN +
+				"'. The remove detaches Pixel 9 (OS 16)."},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &runState{paths: fakeDaemon(t, tc.reply)}
+			resolver := &fakeResolver{info: session.RemoteAccessInfo{ARN: returnedSessionARN}}
+			inputs := localInputs(t)
+			inputs.SessionARN, inputs.Resolver = testSessionARN, resolver
+
+			result := runLocal(t, inputs, state, checkDaemon)
+
+			assert.Equal(t, Result{Status: tc.wantStatus, Hint: tc.wantHint,
+				Summary: fmt.Sprintf("running (pid %d) on port 5037; %s", os.Getpid(), tc.wantSummary)}, result)
+			assert.Equal(t, []string{testSessionARN}, resolver.arns, "one lookup, of the typed ARN")
+		})
+	}
+}
+
+func TestGivenNoReturnedArnForTheAskedSessionWhenTheBridgeIsCheckedThenTheTypedArnIsCompared(t *testing.T) {
+	attached, other := attachedReply(returnedSessionARN, true), attachedReply(otherSessionARN, true)
+	// An ended session gives no answer, so its detach is not taken as the asked session's.
+	ended := control.Response{OK: true, Port: 5037, ReverseEnabled: true,
+		LastDetachReason: strings.ReplaceAll(endedReason, testSessionARN, returnedSessionARN)}
+	tests := []struct {
+		name     string
+		reply    control.Response
+		resolver *fakeResolver
+		wantTail string
+	}{
+		{name: "the lookup fails", reply: attached, resolver: &fakeResolver{err: errors.New("no usable AWS credentials")},
+			wantTail: "device Pixel 9 (OS 16), session " + returnedSessionARN + "; reverse on"},
+		{name: "the answer names no ARN", reply: other, resolver: &fakeResolver{},
+			wantTail: "device Pixel 9 (OS 16), session " + otherSessionARN + "; reverse on"},
+		{name: "the session has ended", reply: ended,
+			resolver: &fakeResolver{err: &session.SessionEndedError{SessionARN: testSessionARN, Status: "COMPLETED"}},
+			wantTail: "no device; reverse on; the bridge detached the last device"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &runState{paths: fakeDaemon(t, tc.reply)}
+			inputs := localInputs(t)
+			inputs.SessionARN, inputs.Resolver = testSessionARN, tc.resolver
+
+			result := runLocal(t, inputs, state, checkDaemon)
+
+			assert.Equal(t, Result{Status: Warn, Hint: notAttachedHint(tc.reply, testSessionARN),
+				Summary: fmt.Sprintf("running (pid %d) on port 5037; %s; session %s is not attached", os.Getpid(), tc.wantTail, testSessionARN)},
+				result)
+			assert.Equal(t, []string{testSessionARN}, tc.resolver.arns, "the lookup was tried")
+		})
+	}
+}
+
+func TestGivenTheTypedArnNamesWhatTheBridgeHoldsOrItHoldsNothingWhenCheckedThenNoLookupIsMade(t *testing.T) {
+	tests := []struct {
+		name     string
+		askedARN string
+		reply    control.Response
+	}{
+		{name: "no asked session", reply: attachedReply(testSessionARN, true)},
+		{name: "the asked session attached", askedARN: testSessionARN, reply: attachedReply(testSessionARN, true)},
+		{name: "a detach reason naming the asked session", askedARN: testSessionARN,
+			reply: control.Response{OK: true, Port: 5037, LastDetachReason: endedReason}},
+		{name: "no device and no detach reason", askedARN: testSessionARN, reply: control.Response{OK: true, Port: 5037}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &runState{paths: fakeDaemon(t, tc.reply)}
+			resolver := &fakeResolver{}
+			inputs := localInputs(t)
+			inputs.SessionARN, inputs.Resolver = tc.askedARN, resolver
+
+			result := runLocal(t, inputs, state, checkDaemon)
+
+			assert.Contains(t, result.Summary, "running (pid ", "the row reached the bridge")
+			assert.Empty(t, resolver.arns, "the row must not call the service")
+		})
+	}
+}
+
+func TestGivenTooLittleOfItsTimeLeftForTheLookupWhenTheBridgeIsCheckedThenTheTypedArnIsComparedAndNoLookupIsMade(t *testing.T) {
+	reply := attachedReply(returnedSessionARN, true)
+	state := &runState{paths: fakeDaemon(t, reply)}
+	resolver := &fakeResolver{info: session.RemoteAccessInfo{ARN: returnedSessionARN}}
+	inputs := localInputs(t)
+	inputs.SessionARN, inputs.Resolver = testSessionARN, resolver
+	ctx, cancel := context.WithTimeout(context.Background(), remoteTimeout)
+	defer cancel()
+
+	result := checkByID(t, localChecks(inputs, state), checkDaemon).Run(ctx)
+
+	assert.Equal(t, Warn, result.Status, result.Summary)
+	assert.Equal(t, notAttachedHint(reply, testSessionARN), result.Hint)
+	assert.Empty(t, resolver.arns, "the session row makes the lookup, with its whole bound")
+}
+
 func TestGivenAReasonOrAnAskedSessionWithAControlCharacterWhenRenderedThenTheRowStaysOnOneLine(t *testing.T) {
 	forged := "gone\n[PASS] forged\x1b[0m"
-	detached := bridgeRowResult(forged, control.Response{OK: true, Port: 5037, LastDetachReason: forged}, 4242)
-	notAttached := bridgeRowResult(forged, control.Response{OK: true, Port: 5037, DeviceLabel: forged, ARN: otherSessionARN}, 4242)
+	detached := bridgeRowResult(forged, forged, control.Response{OK: true, Port: 5037, LastDetachReason: forged}, 4242)
+	notAttached := bridgeRowResult(forged, forged, control.Response{OK: true, Port: 5037, DeviceLabel: forged, ARN: otherSessionARN}, 4242)
 
 	for name, text := range map[string]string{"detach summary": detached.Summary, "detach hint": detached.Hint,
 		"add summary": notAttached.Summary, "add hint": notAttached.Hint} {

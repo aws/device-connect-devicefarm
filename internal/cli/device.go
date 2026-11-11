@@ -206,6 +206,9 @@ func newDeviceRemoveCommand(state *rootState) *cobra.Command {
 		Long:  short + ".\n\nThis command needs a running bridge.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if blankSessionArn(cmd, state) {
+				return usageError(cmd, errors.New("--session-arn is blank; omit it to detach the attached device"))
+			}
 			resp, err := state.send(control.Request{Op: control.OpRemove, ARN: state.sessionARN})
 			if err != nil {
 				return err

@@ -885,3 +885,65 @@ func TestGivenAnAdbServerWasStoppedWhenTheStartThenFailsThenTheStopNoticeStillPr
 	assert.Contains(t, out.String(), "* stopped the adb server on 127.0.0.1:5037, as 'adb kill-server' does")
 	assert.NotContains(t, out.String(), "* bridge started")
 }
+
+func TestGivenAPaddedSessionArnWhenAddDeviceInvokedThenTheDaemonGetsTheTrimmedArn(t *testing.T) {
+	fakeDaemon(t, func(req control.Request) control.Response {
+		assert.Equal(t, "arn:aws:devicefarm:us-west-2:1:session:a/b/0", req.ARN, "the flag is stored trimmed")
+		return control.Response{OK: true, DeviceLabel: "Pixel", Port: 5037}
+	})
+
+	_, err := execRoot(t, "device", "add", "--session-arn", "  arn:aws:devicefarm:us-west-2:1:session:a/b/0  ")
+
+	require.NoError(t, err)
+}
+
+func TestGivenOnlySpacesAsSessionArnWhenAddDeviceInvokedThenTheFlagIsRequired(t *testing.T) {
+	shortRuntimeDir(t)
+
+	_, err := execRoot(t, "device", "add", "--session-arn", "   ")
+
+	require.ErrorContains(t, err, "--session-arn is required")
+}
+
+func TestGivenTheDaemonAttachedUnderAnotherArnWhenAddDeviceInvokedThenPrintsThatArn(t *testing.T) {
+	const returned = "arn:aws:devicefarm:us-west-2:1:session:x/y/9"
+	fakeDaemon(t, func(control.Request) control.Response {
+		return control.Response{OK: true, DeviceLabel: "Pixel", ARN: returned, Port: 5037}
+	})
+
+	out, err := execRoot(t, "device", "add", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
+
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "* the service names this session "+returned+"; use that ARN with 'device remove'")
+}
+
+func TestGivenTheDaemonAttachedUnderTheTypedArnWhenAddDeviceInvokedThenPrintsNoArnLine(t *testing.T) {
+	const typed = "arn:aws:devicefarm:us-west-2:1:session:a/b/0"
+	fakeDaemon(t, func(control.Request) control.Response {
+		return control.Response{OK: true, DeviceLabel: "Pixel", ARN: typed, Port: 5037}
+	})
+
+	out, err := execRoot(t, "device", "add", "--session-arn", typed)
+
+	require.NoError(t, err)
+	assert.NotContains(t, out.String(), "names this session")
+}
+
+func TestGivenABlankSessionArnWhenRemoveDeviceInvokedThenRefusedAndNothingRemoved(t *testing.T) {
+	fakeDaemon(t, func(req control.Request) control.Response {
+		t.Errorf("no request may reach the daemon; got %q", req.Op)
+		return control.Response{OK: true}
+	})
+
+	_, err := execRoot(t, "device", "remove", "--session-arn", "   ")
+
+	require.ErrorContains(t, err, "--session-arn is blank")
+}
+
+func TestGivenABlankSessionArnWhenStartBridgeInvokedThenRefused(t *testing.T) {
+	shortRuntimeDir(t)
+
+	_, err := execRoot(t, "bridge", "start", "--session-arn", "   ")
+
+	require.ErrorContains(t, err, "--session-arn is blank")
+}

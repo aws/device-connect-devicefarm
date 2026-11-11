@@ -976,7 +976,7 @@ func TestGivenServingDaemonWhenAddAndShutdownSentOverControlSocketThenAttachesAn
 	defer cancel()
 
 	client := control.NewDaemonClient(mgr.paths.ControlSocket)
-	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: "arn:1"})
+	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: testSessionArnOne})
 	require.NoError(t, err)
 	require.True(t, addResp.OK, "add over the live control socket must succeed: %s", addResp.Error)
 	assert.Equal(t, "Pixel 10 (OS 17)", addResp.DeviceLabel)
@@ -1179,7 +1179,7 @@ func TestGivenARunningDaemonWhenADeviceIsAddedThenANotifierOpensAndFollowsTheAtt
 
 	done, cancel := startForeground(t, mgr)
 	client := control.NewDaemonClient(mgr.paths.ControlSocket)
-	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: "arn:1"})
+	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: testSessionArnOne})
 	require.NoError(t, err)
 	require.True(t, addResp.OK, "add over the live control socket must succeed: %s", addResp.Error)
 	require.Eventually(t, func() bool { return mock.NotifiersAccepted() == 1 }, testTimeout,
@@ -1214,7 +1214,7 @@ func TestGivenAnAttachedDeviceWhenIdleThenItsOnlySessionsAreTheHostFetchesAndThe
 
 	done, cancel := startForeground(t, mgr)
 	client := control.NewDaemonClient(mgr.paths.ControlSocket)
-	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: "arn:1"})
+	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: testSessionArnOne})
 	require.NoError(t, err)
 	require.True(t, addResp.OK, "add over the live control socket must succeed: %s", addResp.Error)
 	sessions := len(attachSessions)
@@ -1246,7 +1246,7 @@ func TestGivenAnAttachedDeviceWhenAnAdbCommandArrivesThenItRidesTheWebsocketPark
 
 	done, cancel := startForeground(t, mgr)
 	client := control.NewDaemonClient(mgr.paths.ControlSocket)
-	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: "arn:1"})
+	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: testSessionArnOne})
 	require.NoError(t, err)
 	require.True(t, addResp.OK, "add over the live control socket must succeed: %s", addResp.Error)
 	sessions := len(attachSessions)
@@ -1315,7 +1315,7 @@ func TestGivenReverseOffWhenTheDaemonAttachesThenNoNotifierOpensAndOnlyReverseIs
 
 	done, cancel := startForeground(t, mgr)
 	client := control.NewDaemonClient(mgr.paths.ControlSocket)
-	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: "arn:1"})
+	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: testSessionArnOne})
 	require.NoError(t, err)
 	require.True(t, addResp.OK, "add over the live control socket must succeed: %s", addResp.Error)
 
@@ -1348,7 +1348,7 @@ func TestGivenAPlaintextInteractiveEndpointWhenAddIsSentThenTheAddFailsAndNoDial
 
 	done, cancel := startForeground(t, mgr)
 	client := control.NewDaemonClient(mgr.paths.ControlSocket)
-	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: "arn:1"})
+	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: testSessionArnOne})
 	require.NoError(t, err)
 	require.False(t, addResp.OK, "the serial fetch's refused dial must fail the add")
 	assert.Contains(t, addResp.Error, "refused scheme")
@@ -1382,7 +1382,7 @@ func TestGivenARunningDaemonWhenItStopsThenTheAttachmentIsCleared(t *testing.T) 
 
 	done, cancel := startForeground(t, mgr)
 	client := control.NewDaemonClient(mgr.paths.ControlSocket)
-	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: "arn:1"})
+	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: testSessionArnOne})
 	require.NoError(t, err)
 	require.True(t, addResp.OK, "add over the live control socket must succeed: %s", addResp.Error)
 

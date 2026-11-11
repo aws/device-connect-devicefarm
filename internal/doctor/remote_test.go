@@ -502,8 +502,10 @@ func TestGivenARelayThatForgetsSessionsWhenReattachedThenTheRowFailsWithTheRerun
 func TestGivenTheReverseSlotWhenTheRowRunsThenTheRowFollowsWhoHoldsIt(t *testing.T) {
 	const attachedARN = testSessionARN
 	tests := []struct {
-		name        string
-		daemon      control.Response
+		name   string
+		daemon control.Response
+		// returnedARN is the ARN the session row kept; empty compares the typed ARN alone.
+		returnedARN string
 		rival       bool
 		wantStatus  Status
 		wantText    string
@@ -518,6 +520,9 @@ func TestGivenTheReverseSlotWhenTheRowRunsThenTheRowFollowsWhoHoldsIt(t *testing
 		{name: "daemon on this session with reverse on, ARN with stray space",
 			daemon: control.Response{OK: true, ARN: " " + attachedARN, ReverseEnabled: true}, wantStatus: Pass, wantText: reverseOnSummary,
 			wantNoProbe: true},
+		{name: "daemon on this session under the ARN the service returned, with reverse on",
+			daemon: control.Response{OK: true, ARN: returnedSessionARN, ReverseEnabled: true}, returnedARN: returnedSessionARN,
+			wantStatus: Pass, wantText: reverseOnSummary, wantNoProbe: true},
 		{name: "slot held elsewhere", rival: true, wantStatus: Fail, wantText: reverseHeldSummary, wantHint: slotHeldHint},
 	}
 	for _, tc := range tests {
@@ -527,7 +532,7 @@ func TestGivenTheReverseSlotWhenTheRowRunsThenTheRowFollowsWhoHoldsIt(t *testing
 				t.Cleanup(reverse.HoldNotifierSlot())
 			}
 			inputs, state := relayInputs(sessions.URL, dialer)
-			state.daemonStatus = tc.daemon
+			state.daemonStatus, state.returnedARN = tc.daemon, tc.returnedARN
 
 			result := runRemote(t, inputs, state, checkReverse)
 

@@ -11,14 +11,16 @@
 // depends on), RemoteAccessInfo (its result), NewRemoteAccessClient (the real,
 // AWS-backed implementation), the Err sentinels a GetSession failure carries,
 // with SessionEndedError for the status word, RequestRejectedError for the
-// service's error code and UnsupportedDeviceError for the refused device, and
-// ResolveCredentials with its CredentialSummary (the credential chain's source,
-// for the doctor). Everything else - the
-// SDK-shaped getter, the ARN helper, the config loading - is internal to this
+// service's error code and UnsupportedDeviceError for the refused device,
+// ValidateSessionARN (bridge start and the add handler run it first),
+// and ResolveCredentials with its CredentialSummary (the credential chain's
+// source, for the doctor). Everything else - the
+// SDK-shaped getter, the config loading - is internal to this
 // package, so no aws-sdk-go-v2 type crosses the package boundary.
 package session
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -147,14 +149,23 @@ func (*SessionEndedError) Is(target error) bool { return target == ErrSessionEnd
 
 // RemoteAccessInfo is the outcome of resolving a session ARN: the websocket URL
 // to dial (the interactive endpoint verbatim, path-less; each dial site names its
-// route through bridge.Route), the device label to show the user, and the session times:
-// StartedAt from the response, ExpiresAt as StartedAt plus sessionMaxLength. Both zero when
-// the response has no start.
+// route through bridge.Route), the ARN the response names (empty when none; can
+// differ from the one asked), the device label to show the user, and the session
+// times: StartedAt from the response,
+// ExpiresAt as StartedAt plus sessionMaxLength. Both zero when the response has
+// no start.
 type RemoteAccessInfo struct {
 	Endpoint  string
+	ARN       string
 	Label     string
 	StartedAt time.Time
 	ExpiresAt time.Time
+}
+
+// ReturnedARN is the ARN the service names the session by: the response's, else
+// askedARN.
+func (info RemoteAccessInfo) ReturnedARN(askedARN string) string {
+	return cmp.Or(info.ARN, askedARN)
 }
 
 // RemoteAccessClient looks up a Device Farm remote access session by ARN and
@@ -273,8 +284,8 @@ func classifyAPIError(err error) error {
 // check, so a session still PREPARING on such a device is refused at once, not
 // after a wait and a retry. Only a RUNNING session with an endpoint resolves.
 func (c awsRemoteAccessClient) GetSession(ctx context.Context, sessionARN string) (RemoteAccessInfo, error) {
-	if err := validateSessionARN(sessionARN); err != nil {
-		return RemoteAccessInfo{}, fmt.Errorf("%w: %w", ErrInvalidARN, err)
+	if err := ValidateSessionARN(sessionARN); err != nil {
+		return RemoteAccessInfo{}, err
 	}
 
 	out, err := c.getter.GetRemoteAccessSession(ctx, &devicefarm.GetRemoteAccessSessionInput{
@@ -306,7 +317,8 @@ func (c awsRemoteAccessClient) GetSession(ctx context.Context, sessionARN string
 			sessionARN, ErrNoEndpointYet, status)
 	}
 
-	info := RemoteAccessInfo{Endpoint: endpoint, Label: deviceLabel(remoteAccessSession.Device)}
+	info := RemoteAccessInfo{Endpoint: endpoint, ARN: aws.ToString(remoteAccessSession.Arn),
+		Label: deviceLabel(remoteAccessSession.Device)}
 	if remoteAccessSession.Started != nil {
 		info.StartedAt = *remoteAccessSession.Started
 		info.ExpiresAt = info.StartedAt.Add(sessionMaxLength)
@@ -314,24 +326,35 @@ func (c awsRemoteAccessClient) GetSession(ctx context.Context, sessionARN string
 	return info, nil
 }
 
-// validateSessionARN rejects a session ARN the client cannot serve: one that is
-// malformed, not a Device Farm ARN, or in a region other than the one the client
-// was built for. A typo fails fast (surfaced as the daemon's add error) rather
-// than as an opaque AWS error, and an ARN from a region Device Farm may add later
+// ValidateSessionARN rejects a session ARN the client cannot serve: one that is
+// malformed, outside the aws partition, not a Device Farm ARN, in a region other
+// than the one the client was built for, or whose resource is not a session (a
+// project or device ARN). Every refusal matches ErrInvalidARN. A typo fails fast (a
+// usage error or the daemon's add error) rather than as an opaque AWS error, and an ARN from a region Device Farm may add later
 // fails loudly rather than being sent to the wrong regional endpoint (the SDK
 // would otherwise synthesize a plausible-looking endpoint for it).
-func validateSessionARN(sessionARN string) error {
+func ValidateSessionARN(sessionARN string) error {
 	parsed, err := arn.Parse(sessionARN)
 	if err != nil {
-		return fmt.Errorf("parse session ARN %q: %w", sessionARN, err)
+		return fmt.Errorf("%w: parse session ARN %q: %w", ErrInvalidARN, sessionARN, err)
+	}
+	if parsed.Partition != "aws" {
+		return fmt.Errorf("%w: ARN %q is not an AWS ARN (partition %q)", ErrInvalidARN, sessionARN, parsed.Partition)
 	}
 	if parsed.Service != "devicefarm" {
-		return fmt.Errorf("ARN %q is not a Device Farm ARN (service %q)", sessionARN, parsed.Service)
+		return fmt.Errorf("%w: ARN %q is not a Device Farm ARN (service %q)", ErrInvalidARN, sessionARN, parsed.Service)
 	}
 	if parsed.Region != clientRegion {
 		return fmt.Errorf(
-			"session ARN %q is in region %q, but Device Farm remote access is only supported in %s",
-			sessionARN, parsed.Region, clientRegion,
+			"%w: session ARN %q is in region %q, but Device Farm remote access is only supported in %s",
+			ErrInvalidARN, sessionARN, parsed.Region, clientRegion,
+		)
+	}
+	if kind, id, found := strings.Cut(parsed.Resource, ":"); !found || kind != "session" || id == "" {
+		return fmt.Errorf(
+			"%w: ARN %q is not a remote access session ARN (resource %q); a session ARN looks like "+
+				"arn:aws:devicefarm:%s:<account>:session:<ids>",
+			ErrInvalidARN, sessionARN, parsed.Resource, clientRegion,
 		)
 	}
 	return nil

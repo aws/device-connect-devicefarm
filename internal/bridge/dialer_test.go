@@ -16,6 +16,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"sync/atomic"
 	"testing"
@@ -492,4 +493,34 @@ func TestGivenAPingFromTheServerWhenReceivedThenItIsAnsweredWithAPongAndTheNextM
 	require.NoError(t, err)
 	assert.Equal(t, []byte("after"), message, "the ping must not surface as a message")
 	assert.Equal(t, []byte("probe"), await(t, pongs, "the pong"), "the pong must echo the ping's payload")
+}
+
+func TestGivenTheServerAnswersTheUpgradeWithAnHttpErrorWhenDialedThenTheErrorIsUpgradeRefusedAndCarriesNoQuery(t *testing.T) {
+	// The websocket library does not expose a refused upgrade's status, so the
+	// dialer words the causes itself; "bad status" and the presigned query must not
+	// reach anyone. httptest's own certificate covers 127.0.0.1, so the handshake
+	// passes TLS and fails at the HTTP answer.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(server.Close)
+	trust := x509.NewCertPool()
+	trust.AddCert(server.Certificate())
+	endpoint := "wss://" + server.Listener.Addr().String() + "/?X-Amz-Signature=" + testsupport.SignatureMarker
+
+	_, err := NewWSDialer(time.Second).TrustRoots(trust).Dial(context.Background(), endpoint, RouteAdb)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrUpgradeRefused)
+	assert.NotContains(t, err.Error(), "bad status")
+	assert.NotContains(t, err.Error(), "?")
+	assert.NotContains(t, err.Error(), testsupport.SignatureMarker)
+}
+
+func TestGivenAnUnreachableServerWhenDialedThenTheErrorIsNotUpgradeRefused(t *testing.T) {
+	_, err := newTestDialer(200*time.Millisecond).
+		Dial(context.Background(), testsupport.PresignedUnreachableEndpoint, RouteAdb)
+
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrUpgradeRefused, "a failed connect is not a refused upgrade")
 }
