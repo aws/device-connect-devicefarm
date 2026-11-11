@@ -212,6 +212,8 @@ attach a device, then use `adb` as usual.
 - `tcp:0` as the local end of a forward rule picks a free port and prints it.
 - Both ends of a reverse rule must be `tcp:<port>`. The remote access service rejects other kinds and
   `tcp:0`.
+- The bridge rejects a reverse rule that targets its own port. adb prints
+  `error: cannot reverse to tcp:<port>: the bridge listens on that port`.
 - Forward rules belong to the attached device. `device remove`, `bridge stop`, or a failed refresh of the
   session endpoint removes them all.
 - Reverse rules are stored in the remote access session, so `bridge stop` leaves them in place. Each time you
