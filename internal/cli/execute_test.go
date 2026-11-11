@@ -144,8 +144,9 @@ func TestGivenDaemonRefusesAddWhenBridgeStartExecutedWithARNThenPrintsProblemCau
 
 func TestGivenBridgeStartFailsWhenDeviceAddExecutedThenPrintsTheStartNoteProblemCauseAndLogFix(t *testing.T) {
 	shortRuntimeDir(t)
-	stubBridgeStart(t, func(*daemon.DaemonManager) error {
-		return failure.WithFix(errors.New(`timed out after 5s waiting for pidfile "/tmp/d.pid"`), "read the daemon log: /tmp/d.log")
+	stubBridgeStart(t, func(*daemon.DaemonManager) (daemon.StartResult, error) {
+		return daemon.StartResult{}, failure.WithFix(
+			errors.New(`timed out after 5s waiting for pidfile "/tmp/d.pid"`), "read the bridge log: /tmp/d.log")
 	})
 
 	code, out := runExecute(t, "device", "add", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
@@ -155,7 +156,7 @@ func TestGivenBridgeStartFailsWhenDeviceAddExecutedThenPrintsTheStartNoteProblem
 		"* bridge not running; starting it now\n"+
 			config.BinaryName+": error: could not start the bridge\n"+
 			"  cause: timed out after 5s waiting for pidfile \"/tmp/d.pid\"\n"+
-			"  fix:   read the daemon log: /tmp/d.log\n",
+			"  fix:   read the bridge log: /tmp/d.log\n",
 		out)
 }
 

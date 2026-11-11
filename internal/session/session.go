@@ -33,6 +33,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/devicefarm"
 	"github.com/aws/aws-sdk-go-v2/service/devicefarm/types"
+	"github.com/aws/smithy-go/logging"
 )
 
 // maxRetryAttempts caps how many times the SDK tries GetRemoteAccessSession
@@ -204,12 +205,15 @@ func NewRemoteAccessClient(ctx context.Context, logger *slog.Logger) (RemoteAcce
 }
 
 // loadConfig is the AWS config the Device Farm client and ResolveCredentials share.
+// The SDK's default logger writes its own warnings straight to stderr, past slog;
+// every client built from this config, credential providers included, drops them.
 func loadConfig(ctx context.Context) (aws.Config, error) {
 	cfg, err := config.LoadDefaultConfig(
 		ctx,
 		config.WithRegion(clientRegion),
 		config.WithRetryMode(aws.RetryModeAdaptive),
 		config.WithRetryMaxAttempts(maxRetryAttempts),
+		config.WithLogger(logging.Nop{}),
 	)
 	if err != nil {
 		return aws.Config{}, fmt.Errorf("load AWS config: %w", err)

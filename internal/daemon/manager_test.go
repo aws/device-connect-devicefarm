@@ -278,7 +278,8 @@ func TestGivenNoDaemonRunningWhenStartedThenSpawnsChildAndReportsRunning(t *test
 		return processOf(t, os.Getpid()), nil, nil
 	})
 
-	require.NoError(t, mgr.Start())
+	_, err := mgr.Start()
+	require.NoError(t, err)
 
 	pid, running := mgr.Status()
 	assert.True(t, running)
@@ -295,9 +296,50 @@ func TestGivenDaemonAlreadyRunningWhenStartedAgainThenIsNoOpAndDoesNotSpawn(t *t
 		return nil, nil, nil
 	})
 
-	require.NoError(t, mgr.Start())
+	_, err := mgr.Start()
+	require.NoError(t, err)
 
 	assert.False(t, spawnCalled, "Start must not spawn a second daemon when one is running")
+}
+
+func TestGivenNoDaemonRunningWhenStartedThenResultCarriesTheChildPidAndTheLogFile(t *testing.T) {
+	mgr := newTestManager(t)
+	stubSpawn(t, func(_ string, _ []string, _ *os.File) (*os.Process, <-chan struct{}, error) {
+		require.NoError(t, mgr.pidFile.Write())
+		return processOf(t, os.Getpid()), nil, nil
+	})
+
+	result, err := mgr.Start()
+
+	require.NoError(t, err)
+	assert.Equal(t, StartResult{PID: os.Getpid(), LogFile: mgr.paths.LogFile}, result)
+}
+
+func TestGivenDaemonAlreadyRunningWhenStartedThenResultSaysAlreadyRunningWithItsPid(t *testing.T) {
+	mgr := newTestManager(t)
+	require.NoError(t, mgr.pidFile.Write())
+
+	result, err := mgr.Start()
+
+	require.NoError(t, err)
+	assert.Equal(t, StartResult{PID: os.Getpid(), LogFile: mgr.paths.LogFile, AlreadyRunning: true}, result)
+}
+
+func TestGivenAConcurrentStartThatWinsDuringTheWaitWhenStartedThenResultNamesTheWinner(t *testing.T) {
+	// The ready pidfile is a racing winner's, not the spawned child's: the result
+	// must name the pid that serves, as already running.
+	mgr := newTestManager(t)
+	loserPid := startRealChild(t, "exec sleep 60")
+	stubSpawn(t, func(_ string, _ []string, _ *os.File) (*os.Process, <-chan struct{}, error) {
+		require.NoError(t, mgr.pidFile.Write())
+		return processOf(t, loserPid), nil, nil
+	})
+
+	result, err := mgr.Start()
+
+	require.NoError(t, err)
+	assert.Equal(t, StartResult{PID: os.Getpid(), LogFile: mgr.paths.LogFile, AlreadyRunning: true}, result,
+		"the winner's pid, not the losing child's")
 }
 
 func TestGivenChildForwardedArgsWhenStartedThenDaemonSubcommandLeadsArgs(t *testing.T) {
@@ -309,20 +351,24 @@ func TestGivenChildForwardedArgsWhenStartedThenDaemonSubcommandLeadsArgs(t *test
 		return processOf(t, os.Getpid()), nil, nil
 	})
 
-	require.NoError(t, mgr.Start())
+	_, err := mgr.Start()
+	require.NoError(t, err)
 
 	require.NotEmpty(t, capturedArgs)
 	assert.Equal(t, DaemonSubcommand, capturedArgs[0], "daemon subcommand must lead the child args")
 	assert.Contains(t, capturedArgs, "--port")
 }
 
-func TestGivenSpawnFailsWhenStartedThenErrorReturned(t *testing.T) {
+func TestGivenSpawnFailsWhenStartedThenResultIsZeroAndTheErrorIsReturned(t *testing.T) {
 	mgr := newTestManager(t)
 	stubSpawn(t, func(_ string, _ []string, _ *os.File) (*os.Process, <-chan struct{}, error) {
 		return nil, nil, assert.AnError
 	})
 
-	require.Error(t, mgr.Start())
+	result, err := mgr.Start()
+
+	require.Error(t, err)
+	assert.Equal(t, StartResult{}, result)
 }
 
 // shortStartupTimeout shrinks the package startup timeout for the duration of a
@@ -345,7 +391,7 @@ func TestGivenChildSpawnsButNeverReportsReadyWhenStartedThenErrorsAndKillsOrphan
 		return processOf(t, orphanPid), nil, nil
 	})
 
-	err := mgr.Start()
+	_, err := mgr.Start()
 
 	require.Error(t, err, "a child that never reports ready must fail Start")
 	assert.ErrorContains(t, err, "did not report ready within")
@@ -397,11 +443,13 @@ func TestGivenAnAdbServerOnThePortWhenStartedThenItIsStoppedBeforeTheChildSpawns
 		return processOf(t, os.Getpid()), nil, nil
 	})
 
-	require.NoError(t, mgr.Start())
+	result, err := mgr.Start()
+	require.NoError(t, err)
 
 	assert.Len(t, server.killFrames, 1, "one host:kill, as 'adb kill-server' sends")
-	assert.Contains(t, logs.String(), fmt.Sprintf(`level=INFO msg="an adb server is listening on 127.0.0.1:%d; stopping it `+
-		`before the daemon starts, as 'adb kill-server' would"`, port))
+	assert.Equal(t, "127.0.0.1:"+strconv.Itoa(port), result.StoppedAdbServer,
+		"the stopped server's address comes back to the caller")
+	assert.NotContains(t, logs.String(), "adb server", "the caller prints the notice; Start logs nothing")
 	_, running := mgr.Status()
 	assert.True(t, running)
 }
@@ -423,7 +471,7 @@ func TestGivenAnAdbServerThatRefusesToStopWhenStartedThenNoSpawnAndTheTextNamesA
 			server := startFakeAdbServer(t, port, tc.answer)
 			spawned := stubNoSpawn(t)
 
-			err := mgr.Start()
+			_, err := mgr.Start()
 
 			require.Error(t, err)
 			assert.Equal(t, stopRefusedText(port, strings.ReplaceAll(tc.wantCause, "<port>", strconv.Itoa(port))), err.Error())
@@ -433,12 +481,27 @@ func TestGivenAnAdbServerThatRefusesToStopWhenStartedThenNoSpawnAndTheTextNamesA
 	}
 }
 
+func TestGivenAnAdbServerWasStoppedWhenTheSpawnFailsThenTheResultStillNamesIt(t *testing.T) {
+	mgr := newTestManager(t)
+	port := mgr.config.ListenPort
+	startFakeAdbServer(t, port, killExits)
+	stubSpawn(t, func(_ string, _ []string, _ *os.File) (*os.Process, <-chan struct{}, error) {
+		return nil, nil, assert.AnError
+	})
+
+	result, err := mgr.Start()
+
+	require.Error(t, err)
+	assert.Equal(t, "127.0.0.1:"+strconv.Itoa(port), result.StoppedAdbServer,
+		"a failed start must still report the adb server it stopped")
+}
+
 func TestGivenAnotherProgramOnThePortWhenStartedThenNoSpawnAndTheTextNamesAnotherPort(t *testing.T) {
 	mgr := newTestManager(t)
 	occupyPort(t, mgr.config.ListenPort, closingOccupant)
 	spawned := stubNoSpawn(t)
 
-	err := mgr.Start()
+	_, err := mgr.Start()
 
 	require.Error(t, err)
 	assert.Equal(t, heldPortText(mgr.config.ListenPort), err.Error())
@@ -469,7 +532,7 @@ func TestGivenAnUnbindablePortWhenStartedThenNoSpawnAndTheTextQuotesTheDoctor(t 
 			mgr := newTestManagerWithConfig(t, cfg)
 			spawned := stubNoSpawn(t)
 
-			err := mgr.Start()
+			_, err := mgr.Start()
 
 			require.Error(t, err)
 			assert.Equal(t, fmt.Sprintf("the bridge cannot bind %s: %v. Run '%s' for the fix, or start the bridge on another port "+
@@ -508,7 +571,7 @@ func TestGivenAConcurrentStartThatWinsWhileThePortIsHeldWhenStartedThenStartRepo
 			server := tc.occupy(t, mgr.config.ListenPort, func() { written <- winner.Write() })
 			spawned := stubNoSpawn(t)
 
-			err := mgr.Start()
+			_, err := mgr.Start()
 
 			require.NoError(t, <-written)
 			t.Cleanup(func() { _ = winner.Remove() })
@@ -574,7 +637,7 @@ func TestGivenAChildThatExitsWithABindErrorWhenStartedThenThePortIsProbedAgainAn
 			stubChildExit(t, func() { racer = tc.occupy(t, port) },
 				childErrorLine(fmt.Sprintf("listen on 127.0.0.1:%d: listen tcp 127.0.0.1:%d: bind: address already in use", port, port)))
 
-			err := mgr.Start()
+			_, err := mgr.Start()
 
 			require.Error(t, err)
 			assert.Equal(t, tc.wantText(port), err.Error())
@@ -596,7 +659,7 @@ func TestGivenAChildThatExitsWithAnotherErrorWhenStartedThenThatErrorIsTheTextAt
 	})
 
 	started := time.Now()
-	err := mgr.Start()
+	_, err := mgr.Start()
 
 	require.Error(t, err)
 	assert.Less(t, time.Since(started), startupTimeout, "a child that exits ends the wait at once")
@@ -610,7 +673,7 @@ func TestGivenAChildWhoseControlSocketFailsWhenStartedThenItsErrorIsNotTakenForA
 	controlError := fmt.Sprintf("listen on control socket %q: bind: address already in use", mgr.paths.ControlSocket)
 	stubChildExit(t, func() {}, childErrorLine(controlError))
 
-	err := mgr.Start()
+	_, err := mgr.Start()
 
 	require.Error(t, err)
 	assert.Equal(t, fmt.Sprintf("the bridge exited while starting: %s. Fix what it reports, then run 'devicefarm-connect bridge "+
@@ -625,7 +688,7 @@ func TestGivenAChildThatLogsNoErrorWhenItExitsOrTimesOutThenTheLogPathIsNamed(t 
 			return realSpawnDaemon("/bin/sh", []string{"-c", `echo 'level=INFO msg="starting"'; exit 1`}, logOut)
 		})
 
-		err := mgr.Start()
+		_, err := mgr.Start()
 
 		require.Error(t, err)
 		assert.Equal(t, fmt.Sprintf("the bridge exited while starting and logged no error. Check \"%s\", then run "+
@@ -639,7 +702,7 @@ func TestGivenAChildThatLogsNoErrorWhenItExitsOrTimesOutThenTheLogPathIsNamed(t 
 			return nil, nil, nil
 		})
 
-		err := mgr.Start()
+		_, err := mgr.Start()
 
 		require.Error(t, err)
 		assert.Equal(t, fmt.Sprintf("the bridge did not report ready within 100ms and logged no error, so it was stopped. Check "+
@@ -736,10 +799,13 @@ func TestGivenChildNeverWritesPidFileWhenWaitedForThenTimesOut(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestGivenNoDaemonRunningWhenStoppedThenIsNoOp(t *testing.T) {
+func TestGivenNoDaemonRunningWhenStoppedThenResultSaysNotRunning(t *testing.T) {
 	mgr := newTestManager(t)
 
-	assert.NoError(t, mgr.Stop())
+	result, err := mgr.Stop()
+
+	require.NoError(t, err)
+	assert.Equal(t, StopResult{}, result, "no daemon to stop reads as not running and not killed")
 }
 
 func TestGivenDaemonAnsweringControlSocketWhenStoppedThenShutdownRequestedAndProcessGone(t *testing.T) {
@@ -748,12 +814,14 @@ func TestGivenDaemonAnsweringControlSocketWhenStoppedThenShutdownRequestedAndPro
 	pid := startDaemonLikeChild(t, mgr, helperModeExit)
 
 	started := time.Now()
-	require.NoError(t, mgr.Stop())
+	result, err := mgr.Stop()
+	require.NoError(t, err)
 
+	assert.Equal(t, StopResult{PID: pid, WasRunning: true}, result, "an answered shutdown is not a kill")
 	assert.Less(t, time.Since(started), mgr.config.StopTimeout,
 		"a daemon that exits on request must not wait out the stop timeout")
 	assert.False(t, processAlive(pid), "process should be gone after Stop")
-	_, err := os.Stat(mgr.paths.PidFile)
+	_, err = os.Stat(mgr.paths.PidFile)
 	assert.ErrorIs(t, err, os.ErrNotExist, "pidfile should be removed after a successful stop")
 	// Only a clean exit unlinks the socket; a killed child leaves it.
 	_, err = os.Stat(mgr.paths.ControlSocket)
@@ -769,11 +837,13 @@ func TestGivenControlSocketUnreachableWhenStoppedThenKilledWithoutWaitingStopTim
 	require.NoError(t, os.Remove(mgr.paths.ControlSocket))
 
 	started := time.Now()
-	require.NoError(t, mgr.Stop())
+	result, err := mgr.Stop()
+	require.NoError(t, err)
 
+	assert.Equal(t, StopResult{PID: pid, WasRunning: true, Killed: true}, result)
 	assert.Less(t, time.Since(started), 5*time.Second, "an unreachable socket must skip the stop wait")
 	assert.False(t, processAlive(pid), "a daemon nothing can reach must be killed")
-	_, err := os.Stat(mgr.paths.PidFile)
+	_, err = os.Stat(mgr.paths.PidFile)
 	assert.ErrorIs(t, err, os.ErrNotExist)
 }
 
@@ -784,10 +854,12 @@ func TestGivenDaemonAcknowledgesShutdownButLingersWhenStoppedThenEscalatesToKill
 	// The child replies OK and stays, so only the kill can end it.
 	pid := startDaemonLikeChild(t, mgr, helperModeIgnore)
 
-	require.NoError(t, mgr.Stop())
+	result, err := mgr.Stop()
+	require.NoError(t, err)
 
+	assert.Equal(t, StopResult{PID: pid, WasRunning: true, Killed: true}, result, "a lingering daemon reads as killed")
 	assert.False(t, processAlive(pid), "process should be killed after the stop timeout")
-	_, err := os.Stat(mgr.paths.PidFile)
+	_, err = os.Stat(mgr.paths.PidFile)
 	assert.ErrorIs(t, err, os.ErrNotExist)
 }
 
@@ -801,13 +873,14 @@ func TestGivenDaemonRefusesShutdownWhenStoppedThenLogsRefusalAndEscalatesToKill(
 	pid := startDaemonLikeChild(t, mgr, helperModeRefuse)
 
 	started := time.Now()
-	require.NoError(t, mgr.Stop())
+	_, err := mgr.Stop()
+	require.NoError(t, err)
 
 	assert.GreaterOrEqual(t, time.Since(started), cfg.StopTimeout, "a refused shutdown keeps the stop timeout")
 	assert.Regexp(t, `level=WARN msg="daemon refused shutdown[^\n]*error="refused for the test"`, logs.String(),
 		"the daemon's error text must reach the warn line")
 	assert.False(t, processAlive(pid), "process should be killed after the stop timeout")
-	_, err := os.Stat(mgr.paths.PidFile)
+	_, err = os.Stat(mgr.paths.PidFile)
 	assert.ErrorIs(t, err, os.ErrNotExist)
 }
 
@@ -1334,10 +1407,11 @@ func TestGivenUnlockedPidFileNamingLiveProcessWhenStoppedThenNothingIsSignaled(t
 	foreign := startRealChild(t, "exec sleep 60")
 	require.NoError(t, os.WriteFile(mgr.paths.PidFile, []byte(strconv.Itoa(foreign)), 0o600))
 
-	require.NoError(t, mgr.Stop())
+	_, err := mgr.Stop()
+	require.NoError(t, err)
 
 	assert.True(t, processAlive(foreign), "a process that did not write the pidfile must never be signaled")
-	_, err := os.Stat(mgr.paths.PidFile)
+	_, err = os.Stat(mgr.paths.PidFile)
 	assert.ErrorIs(t, err, os.ErrNotExist, "the stale pidfile is cleared")
 }
 
@@ -1354,13 +1428,14 @@ func TestGivenDaemonPidReusedBetweenProbeAndHandleWhenStoppedThenSuccessorNotSig
 		return os.FindProcess(successorPid)
 	})
 
-	require.NoError(t, mgr.Stop())
+	_, err := mgr.Stop()
+	require.NoError(t, err)
 
 	// Signal delivery is asynchronous: Never gives a wrongly signaled successor
 	// time to die.
 	assert.Never(t, func() bool { return !processAlive(successorPid) }, 100*time.Millisecond, 10*time.Millisecond,
 		"a process that took the daemon's pid must never be signaled")
-	_, err := os.Stat(mgr.paths.PidFile)
+	_, err = os.Stat(mgr.paths.PidFile)
 	assert.ErrorIs(t, err, os.ErrNotExist, "the dead daemon's record is cleared")
 }
 
@@ -1372,10 +1447,11 @@ func TestGivenDaemonReleasesItsRecordOnShutdownButStaysAliveWhenStoppedThenNotKi
 	// the stop wait. Stop must not kill it.
 	pid := startDaemonLikeChild(t, mgr, helperModeRelease)
 
-	require.NoError(t, mgr.Stop())
+	_, err := mgr.Stop()
+	require.NoError(t, err)
 
 	assert.True(t, processAlive(pid), "a pid whose writer released the record must not be killed")
-	_, err := os.Stat(mgr.paths.PidFile)
+	_, err = os.Stat(mgr.paths.PidFile)
 	assert.ErrorIs(t, err, os.ErrNotExist)
 }
 
@@ -1391,9 +1467,10 @@ func TestGivenProcessHandleUnavailableAndRecordReleasedWhenStoppedThenReportsSto
 		return nil, assert.AnError
 	})
 
-	require.NoError(t, mgr.Stop())
+	_, err := mgr.Stop()
+	require.NoError(t, err)
 
-	_, err := os.Stat(mgr.paths.PidFile)
+	_, err = os.Stat(mgr.paths.PidFile)
 	assert.ErrorIs(t, err, os.ErrNotExist, "the dead daemon's record is cleared")
 }
 
@@ -1420,7 +1497,7 @@ func TestGivenProcessHandleUnavailableAndRecordHeldWhenStoppedThenErrorReturnedA
 				return nil, testCase.lookupErr
 			})
 
-			err := mgr.Stop()
+			_, err := mgr.Stop()
 
 			require.ErrorIs(t, err, testCase.lookupErr)
 			if testCase.wantHint {

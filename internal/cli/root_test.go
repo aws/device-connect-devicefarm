@@ -6,7 +6,11 @@ package cli
 import (
 	"bytes"
 	"context"
+	"log"
+	"log/slog"
+	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -211,10 +215,13 @@ func TestGivenNoRunningDaemonWhenStatusInvokedThenReportsNotRunning(t *testing.T
 }
 
 func TestGivenNoRunningDaemonWhenBridgeStopInvokedThenReportsNotListening(t *testing.T) {
+	stops := fakeBridgeStop(t, daemon.StopResult{}, nil)
+
 	out, err := runRoot(t, "bridge", "stop")
 
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), "not listening")
+	assert.Equal(t, 1, *stops)
 }
 
 func TestGivenDeviceAddWithoutARNWhenInvokedThenFailsRequestingARN(t *testing.T) {
@@ -409,4 +416,77 @@ func TestGivenPinnedEnvWhenDaemonManagerBuiltThenBuildsTheAwsClientWithoutError(
 	// manager trips, failing instead on the invalid port seeded above. That
 	// discriminates "a client was wired in" from "it errored for any reason".
 	require.ErrorContains(t, manager.RunForeground(context.Background()), "configuration")
+}
+
+func TestGivenACommandAndTheDebugFlagWhenLoggingIsInitializedThenOnlyTheDaemonBodyOrDebugWritesRecords(t *testing.T) {
+	previous := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	records := []string{"a debug record", "a standard log record", "an error record"}
+	cases := []struct {
+		name    string
+		command string
+		debug   bool
+		written []string
+	}{
+		{"a terminal command without --debug writes nothing", "status", false, nil},
+		{"a terminal command with --debug writes every level", "status", true, records},
+		{"the daemon body writes info and above", daemon.DaemonSubcommand, false, records[1:]},
+		{"the daemon body with --debug writes every level", daemon.DaemonSubcommand, true, records},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			stderr := &bytes.Buffer{}
+			cmd := &cobra.Command{Use: testCase.command}
+			cmd.SetErr(stderr)
+
+			initLogging(cmd, testCase.debug)
+			slog.Debug(records[0])
+			log.Print(records[1])
+			slog.Error(records[2])
+
+			for _, record := range records {
+				if slices.Contains(testCase.written, record) {
+					assert.Contains(t, stderr.String(), record)
+				} else {
+					assert.NotContains(t, stderr.String(), record)
+				}
+			}
+		})
+	}
+}
+
+func TestGivenABrokenPidfileLockWhenBridgeStatusRunsThenItsWarningReachesStderrOnlyWithDebug(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the pidfile lock file is unix only")
+	}
+	previous := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	cases := []struct {
+		name  string
+		debug bool
+	}{
+		{"without --debug", false},
+		{"with --debug", true},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			paths := shortRuntimeDir(t)
+			// The probe refuses a symlinked lock file and logs a warning.
+			require.NoError(t, os.Symlink(filepath.Join(paths.RuntimeDir, "elsewhere"), paths.PidFile+".lock"))
+			args := []string{"bridge", "status"}
+			if testCase.debug {
+				args = append(args, "--debug")
+			}
+
+			out, err := execRoot(t, args...)
+
+			require.NoError(t, err)
+			if testCase.debug {
+				assert.Contains(t, out.String(), `level=WARN msg="cannot tell whether the daemon is running"`)
+			} else {
+				assert.NotContains(t, out.String(), "level=")
+				assert.Contains(t, out.String(), "bridge is not running")
+			}
+		})
+	}
 }
