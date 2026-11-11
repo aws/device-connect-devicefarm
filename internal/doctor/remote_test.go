@@ -606,8 +606,8 @@ const (
 	adbOutput40 = "Android Debug Bridge version 1.0.40\n"
 	adbOutput41 = "Android Debug Bridge version 1.0.41\nVersion 35.0.2-12147458\n"
 	// Hint fragments the tests share.
-	skewConsequence  = ". Until then every adb command through the daemon ends the remote adb server."
-	noAdbConsequence = ". A local adb on another version stops the remote adb server with its first command."
+	skewConsequence  = ". Until then no adb command reaches the device. The remote adb server is not affected."
+	noAdbConsequence = ". A local adb on another version cannot connect through the daemon."
 	noAdbCause       = "adb was not found on PATH or in an Android SDK ('ANDROID_HOME', 'ANDROID_SDK_ROOT' or Android Studio's " +
 		"default SDK location), so the doctor could not check that its version matches the remote adb server (1.0.41)"
 	sdkManagerFix = "Update Android SDK Platform-Tools in Android Studio's SDK Manager to a release whose adb is 1.0.41, such as " +
@@ -642,12 +642,14 @@ func TestGivenALocalAdbOrNoneWhenTheVersionIsCheckedThenTheRowComparesItWithTheR
 		{name: "matching versions", adbOutput: adbOutput41, hostReply: "OKAY00040029",
 			wantStatus: Pass, wantText: "local adb 1.0.41 matches the remote adb server"},
 		{name: "an older local adb", adbOutput: adbOutput39, hostReply: "OKAY00040029",
-			wantStatus: Fail, wantText: "local adb 1.0.39 differs from the remote adb server (1.0.41); the first adb command would stop that server",
-			wantHint: "the local adb is 1.0.39 and the remote adb server is 1.0.41, so the first adb command would stop that server. " +
+			wantStatus: Fail, wantText: "local adb 1.0.39 differs from the remote adb server (1.0.41); every adb command fails",
+			wantHint: "the local adb is 1.0.39 and the remote adb server is 1.0.41, so every adb command fails: that adb tries to start " +
+				"its own adb server on the daemon's port and cannot. " +
 				"Install platform-tools whose adb is 1.0.41, such as platform-tools 37, or put such an adb first on PATH, then rerun " + rerun + skewConsequence},
 		{name: "a newer local adb than a host with no known platform-tools", adbOutput: adbOutput41, hostReply: "OKAY00040027",
-			wantStatus: Fail, wantText: "local adb 1.0.41 differs from the remote adb server (1.0.39); the first adb command would stop that server",
-			wantHint: "the local adb is 1.0.41 and the remote adb server is 1.0.39, so the first adb command would stop that server. " +
+			wantStatus: Fail, wantText: "local adb 1.0.41 differs from the remote adb server (1.0.39); every adb command fails",
+			wantHint: "the local adb is 1.0.41 and the remote adb server is 1.0.39, so every adb command fails: that adb tries to start " +
+				"its own adb server on the daemon's port and cannot. " +
 				"Install platform-tools whose adb is 1.0.39, or put such an adb first on PATH, then rerun " + rerun + skewConsequence},
 		{name: "no adb anywhere", noAdb: true, hostReply: "OKAY00040029", wantStatus: Warn,
 			wantText: "no adb found on PATH or in an Android SDK, so its version was not checked against the remote adb server (1.0.41)",
@@ -676,8 +678,8 @@ func TestGivenALocalAdbOrNoneWhenTheVersionIsCheckedThenTheRowComparesItWithTheR
 
 func TestGivenSdkAdbsBesideThePathAdbWhenTheVersionIsCheckedThenEveryFoundAdbCounts(t *testing.T) {
 	// want's texts take %[1]s the PATH adb's path, %[2]s the SDK adb's path, %[3]s the quoted rerun.
-	const studioClause = "; Android Studio runs the SDK's adb at '%[2]s', so a mismatch there stops the remote adb server when Studio starts it"
-	const thatAdbConsequence = ". Until then every command from that adb through the daemon ends the remote adb server."
+	const studioClause = "; Android Studio runs the SDK's adb at '%[2]s', so Studio lists no device while that adb is on another version"
+	const thatAdbConsequence = ". Until then no command from that adb reaches the device. The remote adb server is not affected."
 	pathAndSdk := func(pathOutput, sdkOutput string) func(t *testing.T) (string, string) {
 		return func(t *testing.T) (string, string) {
 			return fakeAdbOnPath(t, fakeAdbSpec{Output: pathOutput}), installFakeAdb(t, sdkPlatformTools(t, "ANDROID_HOME"), fakeAdbSpec{Output: sdkOutput})
@@ -699,23 +701,24 @@ func TestGivenSdkAdbsBesideThePathAdbWhenTheVersionIsCheckedThenEveryFoundAdbCou
 			want: Result{Status: Pass, Summary: "local adb 1.0.41 (2 found) matches the remote adb server"}},
 		{name: "the SDK adb differs while the PATH adb matches", setup: pathAndSdk(adbOutput41, adbOutput39),
 			want: Result{Status: Fail,
-				Summary: "local adb 1.0.39 at '%[2]s' differs from the remote adb server (1.0.41); the first command from that adb would stop that server",
-				Hint: "Android Studio's adb at '%[2]s' is 1.0.39 and the remote adb server is 1.0.41, so the first command from that adb would stop " +
-					"that server. " + sdkManagerFix + ", then rerun %[3]s" + thatAdbConsequence}},
+				Summary: "local adb 1.0.39 at '%[2]s' differs from the remote adb server (1.0.41); every command from that adb fails",
+				Hint: "Android Studio's adb at '%[2]s' is 1.0.39 and the remote adb server is 1.0.41, so every command from that adb fails: that " +
+					"adb tries to start its own adb server on the daemon's port and cannot. " + sdkManagerFix + ", then rerun %[3]s" + thatAdbConsequence}},
 		{name: "no PATH adb and the ANDROID_SDK_ROOT adb matches", setup: sdkOnly("ANDROID_SDK_ROOT", adbOutput41),
 			want: Result{Status: Pass, Summary: "local adb 1.0.41 matches the remote adb server"}},
 		{name: "no PATH adb and the SDK adb differs", setup: sdkOnly("ANDROID_HOME", adbOutput39),
 			want: Result{Status: Fail,
-				Summary: "local adb 1.0.39 at '%[2]s' differs from the remote adb server (1.0.41); the first command from that adb would stop that server",
-				Hint: "Android Studio's adb at '%[2]s' is 1.0.39 and the remote adb server is 1.0.41, so the first command from that adb would stop " +
-					"that server. " + sdkManagerFix + ", then rerun %[3]s" + thatAdbConsequence}},
+				Summary: "local adb 1.0.39 at '%[2]s' differs from the remote adb server (1.0.41); every command from that adb fails",
+				Hint: "Android Studio's adb at '%[2]s' is 1.0.39 and the remote adb server is 1.0.41, so every command from that adb fails: that " +
+					"adb tries to start its own adb server on the daemon's port and cannot. " + sdkManagerFix + ", then rerun %[3]s" + thatAdbConsequence}},
 		{name: "the PATH adb and the SDK adb both differ", setup: pathAndSdk(adbOutput39, adbOutput40),
 			want: Result{Status: Fail,
-				Summary: "local adb 1.0.39 at '%[1]s' and local adb 1.0.40 at '%[2]s' differ from the remote adb server (1.0.41); the first command " +
-					"from any of them would stop that server",
-				Hint: "the local adb at '%[1]s' is 1.0.39, Android Studio's adb at '%[2]s' is 1.0.40 and the remote adb server is 1.0.41, so the " +
-					"first command from any of them would stop that server. " + sdkManagerFix + ", and put such an adb first on PATH, then rerun " +
-					"%[3]s. Until then every command from any of them through the daemon ends the remote adb server."}},
+				Summary: "local adb 1.0.39 at '%[1]s' and local adb 1.0.40 at '%[2]s' differ from the remote adb server (1.0.41); every command " +
+					"from any of them fails",
+				Hint: "the local adb at '%[1]s' is 1.0.39, Android Studio's adb at '%[2]s' is 1.0.40 and the remote adb server is 1.0.41, so " +
+					"every command from any of them fails: that adb tries to start its own adb server on the daemon's port and cannot. " +
+					sdkManagerFix + ", and put such an adb first on PATH, then rerun " +
+					"%[3]s. Until then no command from any of them reaches the device. The remote adb server is not affected."}},
 		{name: "one binary reached through PATH and ANDROID_HOME counts once",
 			setup: func(t *testing.T) (string, string) {
 				isolateLocalAdb(t)
@@ -725,8 +728,9 @@ func TestGivenSdkAdbsBesideThePathAdbWhenTheVersionIsCheckedThenEveryFoundAdbCou
 				return adb, adb
 			},
 			want: Result{Status: Fail,
-				Summary: "local adb 1.0.39 differs from the remote adb server (1.0.41); the first adb command would stop that server",
-				Hint: "the local adb is 1.0.39 and the remote adb server is 1.0.41, so the first adb command would stop that server" + studioClause +
+				Summary: "local adb 1.0.39 differs from the remote adb server (1.0.41); every adb command fails",
+				Hint: "the local adb is 1.0.39 and the remote adb server is 1.0.41, so every adb command fails: that adb tries to start its " +
+					"own adb server on the daemon's port and cannot" + studioClause +
 					". " + sdkManagerFix + ", then rerun %[3]s" + skewConsequence}},
 		{name: "a PATH symlink to the SDK adb counts once",
 			setup: func(t *testing.T) (string, string) {
@@ -741,8 +745,9 @@ func TestGivenSdkAdbsBesideThePathAdbWhenTheVersionIsCheckedThenEveryFoundAdbCou
 				return filepath.Join(binDir, "adb"), sdkAdb
 			},
 			want: Result{Status: Fail,
-				Summary: "local adb 1.0.39 differs from the remote adb server (1.0.41); the first adb command would stop that server",
-				Hint: "the local adb is 1.0.39 and the remote adb server is 1.0.41, so the first adb command would stop that server" + studioClause +
+				Summary: "local adb 1.0.39 differs from the remote adb server (1.0.41); every adb command fails",
+				Hint: "the local adb is 1.0.39 and the remote adb server is 1.0.41, so every adb command fails: that adb tries to start its " +
+					"own adb server on the daemon's port and cannot" + studioClause +
 					". " + sdkManagerFix + ", then rerun %[3]s" + skewConsequence}},
 		{name: "a broken SDK adb beside a matching PATH adb",
 			setup: func(t *testing.T) (string, string) {
@@ -951,6 +956,73 @@ func TestGivenAnSdkAdbThatCannotStartWhenTheVersionIsCheckedThenTheRowWarnsWithT
 			assert.Equal(t, Result{Status: Warn, Summary: fmt.Sprintf("'%[1]s version' failed: fork/exec %[1]s: %[2]s", shown, tc.wantError),
 				Hint: fmt.Sprintf(adbFailedHint, "'"+shown+" version'", doctorRerun(inputs), 41)}, result)
 			assert.NotContains(t, result.Summary+result.Hint, "\n", "a newline in the path is shown escaped")
+		})
+	}
+}
+
+func TestGivenAMismatchedAdbWhenTheHintIsBuiltThenItSaysEveryCommandFailsAndTheRemoteAdbServerIsNotAffected(t *testing.T) {
+	inputs := Inputs{Config: config.Default(), SessionARN: testSessionARN}
+	tests := []struct {
+		name       string
+		mismatched []localAdb
+		named      bool
+		wantParts  []string
+	}{
+		{name: "a lone PATH adb", mismatched: []localAdb{{path: "/usr/bin/adb", onPath: true, version: 39}},
+			wantParts: []string{"so every adb command fails: that adb tries to start its own adb server on the daemon's port and cannot",
+				"Until then no adb command reaches the device. The remote adb server is not affected."}},
+		{name: "a named adb", mismatched: []localAdb{{path: "/opt/tools/adb", onPath: true, version: 39}}, named: true,
+			wantParts: []string{"so every command from that adb fails", "Until then no command from that adb reaches the device."}},
+		{name: "several adbs", named: true,
+			mismatched: []localAdb{{path: "/usr/bin/adb", onPath: true, version: 39},
+				{path: "/opt/sdk/platform-tools/adb", sdkPath: "/opt/sdk/platform-tools/adb", version: 40}},
+			wantParts: []string{"so every command from any of them fails", "Until then no command from any of them reaches the device."}},
+		{name: "the Android Studio clause on a lone PATH adb that is the SDK's",
+			mismatched: []localAdb{{path: "/usr/bin/adb", onPath: true, sdkPath: "/home/dev/Android/Sdk/platform-tools/adb", version: 39}},
+			wantParts:  []string{"so Studio lists no device while that adb is on another version"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			hint := skewHint(tc.mismatched, tc.named, 41, inputs)
+
+			for _, part := range tc.wantParts {
+				assert.Contains(t, hint, part)
+			}
+		})
+	}
+}
+
+func TestGivenEachAdbVersionVerdictWhenRenderedThenNoTextSaysTheRemoteAdbServerStops(t *testing.T) {
+	inputs := Inputs{Config: config.Default(), SessionARN: testSessionARN}
+	tests := []struct {
+		name      string
+		adbs      []localAdb
+		hiddenAdb string
+		wantFix   string
+	}{
+		{name: "a mismatched adb", adbs: []localAdb{{path: "/usr/bin/adb", onPath: true, version: 39}},
+			wantFix: "Install platform-tools whose adb is 1.0.41"},
+		{name: "a broken adb", adbs: []localAdb{{path: "/usr/bin/adb", onPath: true, err: errors.New("'/usr/bin/adb version' failed: exit status 3")}},
+			wantFix: "'/usr/bin/adb version'"},
+		{name: "an adb reached only through a relative PATH entry", hiddenAdb: "/home/dev/tools/adb",
+			adbs:    []localAdb{{path: "/usr/bin/adb", onPath: true, version: 41}},
+			wantFix: "Add that directory to PATH"},
+		{name: "no adb anywhere", wantFix: "Install Android platform-tools whose adb is 1.0.41"},
+		{name: "a mismatched SDK adb",
+			adbs:    []localAdb{{path: "/opt/sdk/platform-tools/adb", sdkPath: "/opt/sdk/platform-tools/adb", version: 39}},
+			wantFix: "Update Android SDK Platform-Tools"},
+		{name: "an adb that prints no version line",
+			adbs:    []localAdb{{path: "/usr/bin/adb", onPath: true, err: fmt.Errorf("'/usr/bin/adb version' %w: %q", errNoAdbVersionLine, "hello")}},
+			wantFix: "check that it is the platform-tools adb"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := adbVersionVerdict(tc.adbs, tc.hiddenAdb, 41, inputs)
+
+			text := result.Summary + " " + result.Hint
+			assert.NotContains(t, text, "stop")
+			assert.NotContains(t, text, "ends the remote")
+			assert.Contains(t, result.Hint, tc.wantFix, "the fix command stays")
 		})
 	}
 }
