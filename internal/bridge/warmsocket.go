@@ -31,6 +31,9 @@ const sleepTolerance = time.Second
 // any frame. At a full pool that is its refusal, and a redial there can evict a live connection.
 var errPreSelectUnanswered = errors.New("the server closed the websocket before answering its transport select")
 
+// errPongMissed means the parked socket read no pong between two pings.
+var errPongMissed = errors.New("no pong since the last ping")
+
 // warmSocket is an adb websocket dialed early and pre-selected: its first frame, the transport
 // select, minted sessionUUID and switched it to the device, so a taker sends its device service
 // first. One Receive runs from park, so a server close shows at once; the taker's first Receive
@@ -48,6 +51,9 @@ type warmSocket struct {
 	// firstSendErr is the taker's first Send result, latched once.
 	firstSend    sync.Once
 	firstSendErr error
+	// pinged and pongsAtPing are the last ping's mark. The keeper's goroutine alone uses them.
+	pinged      bool
+	pongsAtPing uint64
 }
 
 func parkSocket(ws WSConn, sessionUUID string, maxAge time.Duration) *warmSocket {
@@ -112,10 +118,10 @@ func (recorder *answerRecorder) Receive() ([]byte, error) {
 
 // warmSocketKeeper keeps at most one pre-selected socket parked for one attachment, so the next
 // device connection skips the dial and the transport select. It dials at rotation, after a take
-// that used or aged out the parked socket, and retryDelay after a failed dial or a refused
-// select. After the server closes a pre-select unanswered, or answers or closes a parked socket,
-// it waits for the next rotation: a dial into a full server pool is refused and can evict a live
-// connection, so it must not loop.
+// that used or aged out the parked socket, after a parked socket missed its pong, and retryDelay
+// after a failed dial or a refused select. After the server closes a pre-select unanswered, or
+// answers or closes a parked socket, it waits for the next rotation: a dial into a full server
+// pool is refused and can evict a live connection, so it must not loop.
 type warmSocketKeeper struct {
 	device *ActiveDevice
 	cfg    *featureConfig
@@ -279,18 +285,79 @@ func (keeper *warmSocketKeeper) logRefusedPreSelect(ctx context.Context, err err
 	keeper.cfg.logger.Debug("the warm websocket's transport select failed; "+next, "device", keeper.arn, "error", err)
 }
 
-// waitForTurn waits for turn to pass or a take's refill signal. False means ctx ended.
+// waitForTurn pings the parked socket every ParkPingInterval and returns when turn passes, a take
+// signals a refill, or a ping drop empties the slot. False means ctx ended.
 func (keeper *warmSocketKeeper) waitForTurn(ctx context.Context, turn time.Duration) bool {
 	timer := time.NewTimer(turn)
 	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	case <-keeper.refill:
-		return true
+	var pingTicks <-chan time.Time
+	if interval := keeper.cfg.params.ParkPingInterval; interval > 0 {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		pingTicks = ticker.C
 	}
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			return true
+		case <-keeper.refill:
+			return true
+		case <-pingTicks:
+			if keeper.pingParked() {
+				return true
+			}
+		}
+	}
+}
+
+// pingParked pings the parked socket and reports whether it dropped a dead one. It drops a socket
+// that read no pong since the last ping, or whose ping write failed. An empty slot, a socket the
+// server answered or closed, and one that cannot ping wait for the rotation. The ping runs
+// outside mu, which every take takes.
+func (keeper *warmSocketKeeper) pingParked() (dropped bool) {
+	keeper.mu.Lock()
+	socket := keeper.parked
+	keeper.mu.Unlock()
+	if socket == nil || socket.ended() {
+		return false
+	}
+	conn, ok := socket.WSConn.(pinger)
+	if !ok {
+		return false
+	}
+	pongs := conn.PongsSeen()
+	if socket.pinged && pongs == socket.pongsAtPing {
+		return keeper.dropParked(socket, errPongMissed)
+	}
+	socket.pinged, socket.pongsAtPing = true, pongs
+	if err := conn.Ping(); err != nil {
+		return keeper.dropParked(socket, err)
+	}
+	return false
+}
+
+// dropParked closes socket and empties the slot, reporting whether it did. A socket taken
+// meanwhile is its taker's. One the server answered or closed meanwhile waits for the rotation:
+// at a full pool that close is a refusal, and a redial there can evict a live connection.
+func (keeper *warmSocketKeeper) dropParked(socket *warmSocket, cause error) bool {
+	if socket.ended() {
+		return false
+	}
+	keeper.mu.Lock()
+	held := keeper.parked == socket
+	if held {
+		keeper.parked = nil
+	}
+	keeper.mu.Unlock()
+	if !held {
+		return false
+	}
+	socket.Close()
+	keeper.cfg.logger.Debug("dropped the parked adb websocket; dialing a new one",
+		"device", keeper.arn, "error", cause)
+	return true
 }
 
 func (keeper *warmSocketKeeper) closeParked() {

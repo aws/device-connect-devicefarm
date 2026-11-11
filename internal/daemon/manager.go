@@ -460,6 +460,7 @@ func (manager *DaemonManager) attachmentParams() bridge.AttachmentParams {
 		NotifierBackoffMax:        manager.config.NotifierBackoffMax,
 		ReverseEnabled:            manager.config.ReverseEnabled,
 		ListenPort:                manager.config.ListenPort,
+		ParkPingInterval:          manager.config.ParkPingInterval,
 	}
 }
 

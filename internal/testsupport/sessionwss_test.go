@@ -337,3 +337,25 @@ func TestGivenASupersededCloseCodeWhenASessionIsTakenOverThenThePredecessorEndsT
 		})
 	}
 }
+
+func TestGivenSwallowedPongsWhenTheClientPingsThenThePingIsCountedAndNoPongGoesBack(t *testing.T) {
+	mock := NewSessionEchoWSS(t)
+	mock.SwallowPongs(true)
+	ws := dialTestWSS(t, mock.URL)
+	ws.PayloadType = websocket.BinaryFrame
+	pinging, err := ws.NewFrameWriter(websocket.PingFrame)
+	require.NoError(t, err)
+	_, err = pinging.Write([]byte("probe"))
+	require.NoError(t, err)
+
+	// The mock reads the ping before this message, so a pong would arrive before the reply.
+	require.NoError(t, websocket.Message.Send(ws, []byte("000chost:version")))
+
+	reply, err := ws.NewFrameReader()
+	require.NoError(t, err)
+	assert.Equal(t, byte(websocket.BinaryFrame), reply.PayloadType(), "no pong comes before the reply")
+	payload, err := io.ReadAll(reply)
+	require.NoError(t, err)
+	assertControlFrame(t, payload, controlStatusNew)
+	assert.Equal(t, 1, mock.PingsSeen())
+}

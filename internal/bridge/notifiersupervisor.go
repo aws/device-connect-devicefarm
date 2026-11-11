@@ -31,6 +31,11 @@ const (
 	// is closed as dead. Counts missing pongs: a peer that has stopped reading still accepts writes
 	// until its buffer fills. A failed write ends the notifier at once. Chosen, not derived.
 	notifierMissBudget = 2
+
+	// notifierSettledAfter is how long a notifier must serve before its drop counts as a server
+	// restart, redialed at once with the backoff reset. Many heartbeats long, so a notifier that
+	// dies after a few pings each time still backs off. Chosen, not derived.
+	notifierSettledAfter = 60 * time.Second
 )
 
 // notifierSupervisor keeps one notifier open for one attachment until ctx ends: dial, send
@@ -51,6 +56,9 @@ type notifierSupervisor struct {
 
 	budget   *streamBudget // the attachment's; see streamBudget
 	refusals refusalThrottle
+
+	// settledAfter is notifierSettledAfter; a field so tests can shorten it.
+	settledAfter time.Duration
 
 	ready atomic.Bool
 	// slotHeld is set by a hello refused with notifierSlotTakenReason and cleared by the next READY:
@@ -75,7 +83,7 @@ type notifierSupervisor struct {
 func newNotifierSupervisor(device *ActiveDevice, cfg *featureConfig, arn string, table *forward.ForwardRulesTable,
 	rules *reverseRules, budget *streamBudget) *notifierSupervisor {
 	return &notifierSupervisor{device: device, cfg: cfg, arn: arn, table: table, rules: rules, budget: budget,
-		slotMarked: make(chan struct{}), serverRulesCleared: make(chan struct{})}
+		settledAfter: notifierSettledAfter, slotMarked: make(chan struct{}), serverRulesCleared: make(chan struct{})}
 }
 
 // openGate releases every held reverse request and every later one. Idempotent on run's
@@ -120,10 +128,10 @@ func (supervisor *notifierSupervisor) markSlotHeld(held bool) {
 	supervisor.cfg.logger.Warn("this client's notifier holds reverse on the device", "device", supervisor.arn)
 }
 
-// run keeps one notifier open at a time until ctx ends. If a notifier served longer than one
-// heartbeat interval, run dials a new one at once and resets the backoff: the endpoint worked, so
-// the drop was a server restart. A notifier that ended sooner, or a dial that failed, waits, and
-// the wait grows up to NotifierBackoffMax.
+// run keeps one notifier open at a time until ctx ends. If a notifier served longer than
+// settledAfter, run dials a new one at once and resets the backoff: the endpoint worked, so the
+// drop was a server restart. A notifier that ended sooner, or a dial that failed, waits, and the
+// wait grows up to NotifierBackoffMax.
 func (supervisor *notifierSupervisor) run(ctx context.Context) {
 	// Every exit opens the gate: a supervisor that never clears must not hold reverse requests.
 	defer supervisor.openGate()
@@ -149,7 +157,7 @@ func (supervisor *notifierSupervisor) run(ctx context.Context) {
 			return
 		}
 		supervisor.cfg.logger.Warn("the reverse notifier ended; redialing", "device", supervisor.arn, "servedFor", served, "reason", err)
-		if served > supervisor.cfg.params.NotifierKeepAlive {
+		if served > supervisor.settledAfter {
 			delay = supervisor.cfg.params.NotifierBackoffInitial
 			continue
 		}
