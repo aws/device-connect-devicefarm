@@ -339,6 +339,10 @@ func refuseReverseFamily(tcpConn net.Conn, clientOpening opening, forwarding *at
 	return true
 }
 
+// msgReverseOntoListenPort is the FAIL format for a reverse install whose customer port is the
+// daemon's own listen port; %d is that port. adb prints it after `error: `.
+const msgReverseOntoListenPort = "cannot reverse to tcp:%d: the bridge listens on that port"
+
 // msgReverseNotReady is the FAIL a reverse request gets when the attachment's clear of the
 // server's reverse rules outlasts the request's hold. adb prints it after `error: `.
 const msgReverseNotReady = "the device's reverse rules are not ready yet; run the command again"
@@ -431,10 +435,11 @@ func refuseOpening(tcpConn net.Conn, reason, failMessage string, logger *slog.Lo
 }
 
 // screenReverseRule counts a `reverse:*` request against the attachment's reverse rules before
-// anything is dialed; adb has no such limit. A new device spec (the device-side `tcp:<port>`)
-// at the limit gets the FAIL `too many reverse rules (limit <n>)`, the limit as `<n>`, so adb
-// prints the reason, and refused ends the connection with no dial. Otherwise request awaits
-// the server's verdict; nil when nothing is counted. The Warn is throttled like the budget's.
+// anything is dialed; adb has no such limit. An install onto the daemon's own listen port gets
+// msgReverseOntoListenPort, logged at Debug. A new device spec (the device-side `tcp:<port>`) at
+// the limit gets `too many reverse rules (limit <n>)`, with a Warn throttled like the budget's. adb
+// prints either reason. A refusal ends the connection: no dial, no rule slot. Otherwise request
+// awaits the server's verdict; nil when nothing is counted.
 func screenReverseRule(tcpConn net.Conn, clientOpening opening, forwarding *attachmentFeatures,
 	logger *slog.Logger) (request *reverseRequest, refused bool) {
 	if forwarding == nil {
@@ -445,6 +450,14 @@ func screenReverseRule(tcpConn net.Conn, clientOpening opening, forwarding *atta
 		return nil, false
 	}
 	rules := forwarding.reverseRules
+	// Before begin: a refusal holds no rule slot. A kill names no customer port. Port 0 is unknown;
+	// refuseCustomerPort then refuses every announce.
+	listenPort := forwarding.notifier.cfg.params.ListenPort
+	if listenPort > 0 && customerPort == listenPort {
+		logger.Debug("refused a reverse rule: its target is the daemon's own listen port", "listenPort", listenPort)
+		refuseOpening(tcpConn, fmt.Sprintf(msgReverseOntoListenPort, listenPort), "could not refuse a reverse rule", logger)
+		return nil, true
+	}
 	if request, full := rules.begin(action, deviceSpec, customerPort); !full {
 		return request, false
 	}
