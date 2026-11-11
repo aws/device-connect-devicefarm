@@ -91,10 +91,12 @@ type Row struct {
 	Elapsed time.Duration
 }
 
-// Report is one run's rows, in run order.
+// Report is one run's rows, in run order. SessionARN is the session the run checked: the
+// --session-arn value, else the one device's session the daemon held, else empty.
 type Report struct {
-	Rows    []Row
-	Elapsed time.Duration
+	Rows       []Row
+	Elapsed    time.Duration
+	SessionARN string
 }
 
 // Summary counts the rows by status.
@@ -460,10 +462,10 @@ type jsonCheck struct {
 }
 
 // WriteJSON writes the report as one compact JSON line. ok is Failed() == 0.
-func WriteJSON(writer io.Writer, doctorReport Report, sessionARN string) error {
+func WriteJSON(writer io.Writer, doctorReport Report) error {
 	out := jsonReport{
 		OK:         doctorReport.Failed() == 0,
-		SessionARN: sessionARN,
+		SessionARN: doctorReport.SessionARN,
 		Checks:     make([]jsonCheck, 0, len(doctorReport.Rows)),
 		Summary:    doctorReport.Summary(),
 	}

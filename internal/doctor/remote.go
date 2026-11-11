@@ -175,8 +175,33 @@ func sessionNetworkHint(inputs Inputs) string {
 		"The daemon makes the same call when it attaches and every few minutes after.", safeValue(inputs.SessionARN))
 }
 
-// sessionArnSkipSummary is the session row's SKIP text when no ARN was passed.
+// sessionArnSkipSummary is the session row's SKIP text with no ARN and no device.
 const sessionArnSkipSummary = "pass --session-arn to check the session, the device connection and adb versions"
+
+// severalSessionsSkipSummary is the session row's SKIP text with no ARN and several devices.
+// It takes the device count.
+const severalSessionsSkipSummary = "the daemon holds %d devices; pass --session-arn to pick the session to check"
+
+// sessionToCheck is the session the session and relay rows check: the trimmed --session-arn
+// value, else the session of the one device the running daemon holds (fromDaemon true), else
+// empty with attached the daemon's device count.
+func sessionToCheck(inputs Inputs, state *runState) (sessionARN string, fromDaemon bool, attached int) {
+	if flagARN := strings.TrimSpace(inputs.SessionARN); flagARN != "" {
+		return flagARN, false, 0
+	}
+	reply, _ := state.daemon()
+	if reply.OK && len(reply.Devices) == 1 {
+		return reply.Devices[0].SessionARN, true, 1
+	}
+	return "", false, len(reply.Devices)
+}
+
+// withSessionToCheck returns inputs with SessionARN set to the session to check, so hints and
+// the quoted rerun name the effective session.
+func withSessionToCheck(inputs Inputs, state *runState) Inputs {
+	inputs.SessionARN, _, _ = sessionToCheck(inputs, state)
+	return inputs
+}
 
 // remoteChecks are the rows that leave this machine, in run order.
 func remoteChecks(inputs Inputs, state *runState) []Check {
@@ -227,10 +252,17 @@ func credentialsResult(summary session.CredentialSummary, now time.Time, refresh
 
 // checkSessionRunning calls GetSession once; one call proves the ARN, region, credentials,
 // permission and a RUNNING session. The endpoint goes to the run state, never to the row.
+// Without --session-arn it checks the one attached device's session and names it; with no
+// daemon, no device or several devices it skips.
 func checkSessionRunning(ctx context.Context, inputs Inputs, state *runState) Result {
-	if inputs.SessionARN == "" {
+	sessionARN, fromDaemon, attached := sessionToCheck(inputs, state)
+	if sessionARN == "" {
+		if attached >= 2 {
+			return Result{Status: Skip, Summary: fmt.Sprintf(severalSessionsSkipSummary, attached)}
+		}
 		return Result{Status: Skip, Summary: sessionArnSkipSummary}
 	}
+	inputs.SessionARN = sessionARN
 	resolver := inputs.Resolver
 	if resolver == nil {
 		var err error
@@ -238,11 +270,14 @@ func checkSessionRunning(ctx context.Context, inputs Inputs, state *runState) Re
 			return Result{Status: Fail, Summary: err.Error(), Hint: credentialsHint}
 		}
 	}
-	info, err := resolver.GetSession(ctx, inputs.SessionARN)
+	info, err := resolver.GetSession(ctx, sessionARN)
 	if err != nil {
 		return Result{Status: Fail, Summary: err.Error(), Hint: sessionHint(err, inputs)}
 	}
 	state.endpoint = info.Endpoint
+	if fromDaemon {
+		return Result{Status: Pass, Summary: fmt.Sprintf("RUNNING: %s (the session the daemon holds: %s)", info.Label, safeValue(sessionARN))}
+	}
 	return Result{Status: Pass, Summary: "RUNNING: " + info.Label}
 }
 
@@ -273,6 +308,7 @@ func sessionHint(err error, inputs Inputs) string {
 // checkRelaySessionOpens opens one adb session over the relay and selects the device transport,
 // the first exchange of every proxied connection.
 func checkRelaySessionOpens(ctx context.Context, inputs Inputs, state *runState) Result {
+	inputs = withSessionToCheck(inputs, state)
 	probeCtx, cancel := withProbeBudget(ctx)
 	defer cancel()
 	sessionUUID, err := inputs.Dialer.ProbeSession(probeCtx, state.endpoint)
@@ -286,6 +322,7 @@ func checkRelaySessionOpens(ctx context.Context, inputs Inputs, state *runState)
 // checkReattachAcked dials again with the probed UUID; the server must resume the session, as
 // every websocket swap needs.
 func checkReattachAcked(ctx context.Context, inputs Inputs, state *runState) Result {
+	inputs = withSessionToCheck(inputs, state)
 	probeCtx, cancel := withProbeBudget(ctx)
 	defer cancel()
 	if err := inputs.Dialer.ProbeReattach(probeCtx, state.endpoint, state.sessionUUID); err != nil {
@@ -300,6 +337,7 @@ func checkReattachAcked(ctx context.Context, inputs Inputs, state *runState) Res
 // slot from another client's. With the running daemon on this session with reverse on, the row
 // passes on that setting and runs no probe.
 func checkReverseNotifier(ctx context.Context, inputs Inputs, state *runState) Result {
+	inputs = withSessionToCheck(inputs, state)
 	daemon, _ := state.daemon()
 	if daemon.OK && daemon.ReverseEnabled && strings.TrimSpace(daemon.ARN) == strings.TrimSpace(inputs.SessionARN) {
 		return Result{Status: Pass, Summary: reverseOnSummary}
@@ -356,6 +394,7 @@ func slotHeldHint(inputs Inputs) string {
 // on, and the remote server exits. The local step runs first under its own bound; the probe
 // takes what is left of the row's budget.
 func checkAdbVersionSkew(ctx context.Context, inputs Inputs, state *runState) Result {
+	inputs = withSessionToCheck(inputs, state)
 	adbs, hiddenAdb := inspectLocalAdbs(ctx, runtime.GOOS)
 	probeCtx, cancel := withProbeBudget(ctx)
 	defer cancel()

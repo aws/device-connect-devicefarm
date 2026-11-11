@@ -311,7 +311,8 @@ doctor: 1 of 4 categories passed, 1 warning, 2 not checked
 
 Exit code 0 unless a check is `FAIL`; a `WARN` leaves it 0. The table follows the terminal width,
 or `COLUMNS` when stdout is not a terminal, between 60 and 120 columns. Flags: `--session-arn`
-(optional; without it the session, the connection to the device and the adb versions are not
+(optional; defaults to the session of the one device the running daemon holds; with no daemon, no
+device or several devices, the session, the connection to the device and the adb versions are not
 checked), `--port` and `--listen-addr` (the address the daemon would bind, same defaults as
 `bridge start`), `--verbose` (one line per check, with its id, instead of the table), `--json` (one
 compact JSON object instead of the table; same exit code) and the global `--debug`. Run the doctor
@@ -346,7 +347,7 @@ devicefarm-connect doctor --json | jq .ok
 | Field | Type | Meaning |
 |---|---|---|
 | `ok` | boolean | `true` when no check is `fail` (the exit code is 0) |
-| `sessionArn` | string | the `--session-arn` value, empty when none |
+| `sessionArn` | string | the session the doctor checked: the `--session-arn` value, or the one attached session, empty when none |
 | `checks` | array | one object per check in run order: `id`, `title`, `category` (`local`, `aws`, `network` or `dependencies`, the table row), `status` (`pass`, `warn`, `fail`, `skip`), `summary`, `hint` (absent when the row has none: every `pass`, and a `fail` from a timeout or Ctrl-C), `needs` (ids of the checks it needs), `elapsedMs` |
 | `summary` | object | `pass`, `warn`, `fail`, `skip` counts |
 
