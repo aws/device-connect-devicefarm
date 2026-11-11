@@ -36,6 +36,9 @@ const (
 	// RouteAdbReverse reaches the server's /adbreverse handler: the reverse notifier
 	// and its connectors.
 	RouteAdbReverse Route = "adbreverse"
+	// RouteControl reaches the server's status route, the one the web console uses. The daemon
+	// sends one status request per device add there (see FetchSessionTimeLeft) and nothing else.
+	RouteControl Route = "control"
 )
 
 // errNoRoute means a dial site passed an empty Route: a programming error, refused
