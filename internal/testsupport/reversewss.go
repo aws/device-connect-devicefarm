@@ -67,6 +67,10 @@ type ReverseMockWSS struct {
 	connectorsAccepted int
 	connectorsRefused  int
 	refuseConnector    string
+	// closeNewCode and closeNewReason close every later websocket after its first frame; zero code:
+	// off. See CloseNewConnections.
+	closeNewCode   int
+	closeNewReason string
 }
 
 // NewReverseMockWSS starts the mock endpoint, torn down via t.Cleanup.
@@ -204,6 +208,15 @@ func (mock *ReverseMockWSS) ConnectorsRefused() int {
 	return mock.connectorsRefused
 }
 
+// CloseNewConnections closes every later websocket, notifier or connector, with closeCode and reason
+// after its first frame, as the relay does for a stopping session. A zero
+// closeCode turns it off.
+func (mock *ReverseMockWSS) CloseNewConnections(closeCode int, reason string) {
+	mock.stateMutex.Lock()
+	mock.closeNewCode, mock.closeNewReason = closeCode, reason
+	mock.stateMutex.Unlock()
+}
+
 // RefuseConnector makes every later redemption of a parked token fail with reason, standing in for
 // a server at its connector cap: the connection stays parked.
 func (mock *ReverseMockWSS) RefuseConnector(reason string) {
@@ -225,6 +238,13 @@ func (mock *ReverseMockWSS) serve(ws *websocket.Conn) {
 		// The client hung up before its hello. A text frame does not land here: x/net's
 		// Message codec ignores the opcode on a []byte receive, so a text hello is refused
 		// below on its content, which is all the daemon can see either.
+		return
+	}
+	mock.stateMutex.Lock()
+	closeCode, closeReason := mock.closeNewCode, mock.closeNewReason
+	mock.stateMutex.Unlock()
+	if closeCode != 0 {
+		closeWithCode(ws, closeCode, closeReason)
 		return
 	}
 	if token := connectorTokenOf(first); token != "" {

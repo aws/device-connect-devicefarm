@@ -5,6 +5,7 @@ package bridge
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -63,6 +64,10 @@ type ActiveDevice struct {
 	// refusalHandler is asked about the session after a refused fresh adb connection; see
 	// WithRefusalHandler. Set once at construction. Nil: no lookup.
 	refusalHandler RefusalHandler
+
+	// stoppingReason builds the detach reason for the relay's session-stopping close; see
+	// WithSessionStoppingReason. Set once at construction.
+	stoppingReason func(sessionARN string) string
 
 	// conns holds the cancel func of every connection currently bridging to the
 	// bound device, keyed by a monotonic id so each can deregister itself on exit.
@@ -183,9 +188,21 @@ func WithRefusalHandler(handler RefusalHandler) ActiveDeviceOption {
 	return func(device *ActiveDevice) { device.refusalHandler = handler }
 }
 
+// WithSessionStoppingReason sets the detach reason for the relay's session-stopping close. This package
+// cannot name the binary, so the daemon passes the text with its recovery command.
+func WithSessionStoppingReason(reason func(sessionARN string) string) ActiveDeviceOption {
+	return func(device *ActiveDevice) { device.stoppingReason = reason }
+}
+
+// defaultStoppingReason is the detach reason without WithSessionStoppingReason.
+func defaultStoppingReason(sessionARN string) string {
+	return fmt.Sprintf("remote access session %s is stopping", sessionARN)
+}
+
 // NewActiveDevice builds an empty ActiveDevice.
 func NewActiveDevice(opts ...ActiveDeviceOption) *ActiveDevice {
-	device := &ActiveDevice{conns: make(map[uint64]context.CancelFunc), changed: make(chan struct{})}
+	device := &ActiveDevice{conns: make(map[uint64]context.CancelFunc), changed: make(chan struct{}),
+		stoppingReason: defaultStoppingReason}
 	for _, opt := range opts {
 		opt(device)
 	}
@@ -372,6 +389,22 @@ func (a *ActiveDevice) ClearMatching(arn, reason string) (DeviceInfo, bool) {
 	}
 	a.lastDetach = LastDetach{Reason: reason, At: time.Now()}
 	return a.clearLocked()
+}
+
+// detachIfSessionStopping detaches arn's device when err is the relay's session-stopping close
+// (IsSessionStopping). The session still reads RUNNING then, so there is no lookup and no redial.
+// stopping is true even when another call removed the device first, so every site that read the
+// close stops; reason is the detach text for its client. The call that removed the device logs
+// the one Warn.
+func (device *ActiveDevice) detachIfSessionStopping(arn string, err error) (reason string, stopping bool) {
+	if !IsSessionStopping(err) {
+		return "", false
+	}
+	reason = device.stoppingReason(arn)
+	if _, detached := device.ClearMatching(arn, reason); detached && device.featureConfig != nil {
+		device.featureConfig.logger.Warn("the session is stopping; detached the device", "session", arn)
+	}
+	return reason, true
 }
 
 // LastDetach returns why and when the daemon last detached a device on its own, and false

@@ -220,6 +220,9 @@ func (fetcher *hostReplyFetcher) fetch(ctx context.Context, request string) ([]b
 		return nil, fmt.Errorf("%w: the device detached before the host request", errAdbConnClosed)
 	}
 	reply, err := fetcher.dialer.fetchHostReply(ctx, endpoint, request)
+	if _, stopping := fetcher.device.detachIfSessionStopping(fetcher.arn, err); stopping {
+		return nil, err
+	}
 	var replyErr *hostReplyError
 	if errors.As(err, &replyErr) {
 		return nil, nil

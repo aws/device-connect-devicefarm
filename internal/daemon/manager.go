@@ -369,6 +369,7 @@ func (m *DaemonManager) RunForeground(ctx context.Context) error {
 	device := bridge.NewActiveDevice(
 		bridge.WithAttachmentFeatures(dialer, m.refreshPolicy(), m.attachmentParams(), m.logger),
 		bridge.WithRefusalHandler(m.refusalHandler(ctx)),
+		bridge.WithSessionStoppingReason(sessionStoppingReason),
 	)
 	// Detaching on the way out closes the attachment's forward listeners, severs its
 	// streams and closes its notifier, which nothing else does once the accept loop has
@@ -537,6 +538,10 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 			serial, err := dialer.FetchDeviceSerial(resolveCtx, resolved.Endpoint)
 			if err != nil {
 				err = fmt.Errorf("fetch the device serial: %w", err)
+				// The relay's session-stopping close: its cause and fix replace the fetch's error.
+				if bridge.IsSessionStopping(err) {
+					err = sessionStoppingError(storedARN)
+				}
 				m.logger.Warn("failed to attach the device on add", "error", err, "arn", storedARN)
 				return refusedReply(err)
 			}
@@ -695,6 +700,18 @@ func (m *DaemonManager) addFix(err error, sessionARN string) string {
 		return "wait until the session is RUNNING with an endpoint, then try again"
 	}
 	return ""
+}
+
+// sessionStoppingError words the relay's session-stopping close. The fix is apart, for a refused add.
+func sessionStoppingError(sessionARN string) error {
+	return failure.WithFix(fmt.Errorf("remote access session %s is stopping", sessionARN),
+		fmt.Sprintf("start a new session and %s <new ARN>'", reattachCommand))
+}
+
+// sessionStoppingReason is the detach reason for the relay's session-stopping close, which needs
+// no lookup: sessionStoppingError's cause and fix on one line.
+func sessionStoppingReason(sessionARN string) string {
+	return sessionStoppingError(sessionARN).Error()
 }
 
 // classifiedFailures are the lookup failures that detach beside not found and ended: the daemon
