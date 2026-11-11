@@ -491,17 +491,20 @@ func TestGivenATakenSocketWhenTheServerClosesItBeforeTheFirstReplyThenTheConnect
 		websocket.Message.Receive(ws, &service)
 		ws.Close()
 	})
+	// adb reads the coded close as its error line; a forwarded stream has no adb protocol to carry it.
 	tests := []struct {
-		name string
-		open func(t *testing.T, device *ActiveDevice) net.Conn
+		name  string
+		open  func(t *testing.T, device *ActiveDevice) net.Conn
+		reply string
 	}{
-		{name: "a selected local connection", open: func(t *testing.T, device *ActiveDevice) net.Conn {
-			proxyAddress, _ := runProxy(t, device, fastPolicy())
-			client := dialClient(t, proxyAddress)
-			selectAnyTransport(t, client)
-			writeAll(t, client, []byte(takenService))
-			return client
-		}},
+		{name: "a selected local connection", reply: "FAIL" + string(framed(`the server closed the connection: code 1000, reason ""`)),
+			open: func(t *testing.T, device *ActiveDevice) net.Conn {
+				proxyAddress, _ := runProxy(t, device, fastPolicy())
+				client := dialClient(t, proxyAddress)
+				selectAnyTransport(t, client)
+				writeAll(t, client, []byte(takenService))
+				return client
+			}},
 		{name: "a forwarded connection", open: func(t *testing.T, device *ActiveDevice) net.Conn {
 			conn := dialRule(t, installRule(t, attachedFeatures(t, device), "tcp:8080"))
 			require.NoError(t, conn.SetDeadline(time.Now().Add(testTimeout)))
@@ -516,7 +519,7 @@ func TestGivenATakenSocketWhenTheServerClosesItBeforeTheFirstReplyThenTheConnect
 
 			conn := testCase.open(t, device)
 
-			assert.Empty(t, drainClosed(t, conn), "the connection ends with nothing written")
+			assert.Equal(t, testCase.reply, string(drainClosed(t, conn)), "the connection ends with no device bytes")
 			time.Sleep(notifierSettle)
 			assert.Zero(t, reattaches.Load(), "a session that never answered is not resumed")
 		})
