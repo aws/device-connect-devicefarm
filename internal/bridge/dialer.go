@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/websocket"
@@ -68,8 +69,8 @@ func endpointWithRoute(endpoint string, route Route) (string, error) {
 
 // tcpKeepAliveInterval is path liveness only: it reaps a connection whose network
 // path silently died. A proxied connection's application liveness is its refresh
-// cycle plus the reactive reconnect, so it needs no websocket ping; x/net cannot
-// send one.
+// cycle plus the reactive reconnect, so it needs no websocket ping. Only the parked
+// adb websocket is pinged (see warmSocketKeeper).
 const tcpKeepAliveInterval = 30 * time.Second
 
 // sendDeadline bounds one outbound websocket write. Without it a peer that stops reading
@@ -141,24 +142,62 @@ func readCloseFrame(header []byte, frame io.Reader) error {
 	}
 }
 
+// pinger is a websocket that sends pings and counts pongs. Not on WSConn, so WSConn doubles and
+// wrappers need not implement it.
+type pinger interface {
+	// Ping writes one ping frame with no payload.
+	Ping() error
+	// PongsSeen counts the pongs Receive has read: no running Receive, no count.
+	PongsSeen() uint64
+}
+
+// pingCodec writes a ping frame. Codec.Send holds the x/net write lock, so a ping never interleaves
+// with a message or with x/net's own pong.
+var pingCodec = websocket.Codec{Marshal: func(any) ([]byte, byte, error) { return nil, websocket.PingFrame, nil }}
+
 // wsConn wraps an x/net *websocket.Conn. Send emits a BinaryFrame (the Message codec
 // picks the opcode from the []byte type), so adb's binary stream is never coerced to
 // text. Receive is bounded by MaxPayloadBytes, armed at dial time.
 type wsConn struct {
 	conn          *websocket.Conn
 	writeDeadline time.Duration
+	// writeMutex holds one write's deadline from arm to clear, so a Ping and a Send never lift
+	// each other's bound.
+	writeMutex sync.Mutex
 	// receiveMutex serializes Receive, in place of the x/net read lock that Receive bypasses.
 	receiveMutex sync.Mutex
 	// oversized is the frame Receive refused for its size; the next Receive drains it first.
 	oversized io.Reader
+	pongs     atomic.Uint64
 }
 
-// Send arms the deadline per write, not once at dial time.
-func (c *wsConn) Send(data []byte) error {
+// writeBounded runs write under the per-write deadline, then clears it: x/net answers a server
+// ping with a pong on its own, long after the last write, and a stale deadline would fail that
+// pong and drop the connection.
+func (c *wsConn) writeBounded(write func() error) error {
+	c.writeMutex.Lock()
+	defer c.writeMutex.Unlock()
 	if err := c.conn.SetWriteDeadline(time.Now().Add(c.writeDeadline)); err != nil {
 		return err
 	}
-	return websocket.Message.Send(c.conn, data)
+	if err := write(); err != nil {
+		return err
+	}
+	// An error here means the connection closed after the write went out; the write succeeded.
+	c.conn.SetWriteDeadline(time.Time{})
+	return nil
+}
+
+func (c *wsConn) Send(data []byte) error {
+	return c.writeBounded(func() error { return websocket.Message.Send(c.conn, data) })
+}
+
+func (c *wsConn) Ping() error {
+	return c.writeBounded(func() error { return pingCodec.Send(c.conn, nil) })
+}
+
+func (c *wsConn) PongsSeen() uint64 {
+	return c.pongs.Load()
 }
 
 // Receive is x/net's Message.Receive into a []byte, except at a close frame: x/net returns a
@@ -198,6 +237,9 @@ func (c *wsConn) Receive() ([]byte, error) {
 		}
 		// A ping, answered, or a pong.
 		if handled == nil {
+			if frame.PayloadType() == websocket.PongFrame {
+				c.pongs.Add(1)
+			}
 			continue
 		}
 		if int64(handled.Len()-len(header)) > int64(maxPayloadBytes) {
@@ -212,7 +254,13 @@ func (c *wsConn) Receive() ([]byte, error) {
 	}
 }
 
+// Close arms the deadline for the close frame x/net writes: a successful write cleared the
+// deadline, and a peer that stops reading must not hang the teardown. writeMutex keeps a
+// write's clear from lifting it.
 func (c *wsConn) Close() error {
+	c.writeMutex.Lock()
+	defer c.writeMutex.Unlock()
+	c.conn.SetWriteDeadline(time.Now().Add(c.writeDeadline))
 	return c.conn.Close()
 }
 

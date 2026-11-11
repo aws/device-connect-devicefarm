@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"regexp"
 	"sync"
 	"testing"
@@ -194,6 +195,8 @@ type SessionMockWSS struct {
 	// newSessionRefusalsLeft is how many more fresh sessions are refused; negative is every one.
 	newSessionRefusalsLeft int
 	newSessionsRefused     int
+	pingsSeen              int
+	swallowPongs           bool
 	// closeNewCode and closeNewReason close every later websocket after its first frame; zero code:
 	// off. See CloseNewConnections.
 	closeNewCode   int
@@ -271,6 +274,29 @@ func (m *SessionMockWSS) RoutesDialed() []string {
 	return append([]string(nil), m.routesDialed...)
 }
 
+// PingsSeen returns how many websocket ping frames arrived, across every websocket served.
+func (m *SessionMockWSS) PingsSeen() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.pingsSeen
+}
+
+// SwallowPongs stops the mock answering websocket pings, as a dead path to the relay does, so a
+// client's missed-pong check fires while the socket stays open. Pings are still counted.
+func (m *SessionMockWSS) SwallowPongs(swallow bool) {
+	m.mu.Lock()
+	m.swallowPongs = swallow
+	m.mu.Unlock()
+}
+
+// countPing counts one ping and reports whether to answer it.
+func (m *SessionMockWSS) countPing() (answer bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pingsSeen++
+	return !m.swallowPongs
+}
+
 // tookTransientDrop reports whether ws's reattach was dropped rather than refused,
 // consuming the mark.
 func (m *SessionMockWSS) tookTransientDrop(ws *websocket.Conn) bool {
@@ -321,7 +347,7 @@ func (m *SessionMockWSS) serve(ws *websocket.Conn) {
 	m.routesDialed = append(m.routesDialed, ws.Request().URL.Query().Get("path"))
 	m.mu.Unlock()
 
-	first, err := receive(ws)
+	first, err := receive(ws, m.countPing)
 	if err != nil {
 		ws.Close()
 		return
@@ -358,7 +384,7 @@ func (m *SessionMockWSS) serve(ws *websocket.Conn) {
 	}
 
 	for {
-		data, err := receive(ws)
+		data, err := receive(ws, m.countPing)
 		if err != nil {
 			break
 		}
@@ -662,12 +688,42 @@ func ExpectedSequence(n int) []byte {
 	return expected
 }
 
-// receive reads one whole binary message.
-func receive(ws *websocket.Conn) ([]byte, error) {
-	var message []byte
-	err := websocket.Message.Receive(ws, &message)
-	if err != nil {
-		return nil, err
+// pongCodec writes a pong frame under the x/net write lock, as x/net's own pong does.
+var pongCodec = websocket.Codec{Marshal: func(payload any) ([]byte, byte, error) {
+	return payload.([]byte), websocket.PongFrame, nil
+}}
+
+// receive reads one whole data message (one frame, as x/net's Message codec does). It handles
+// pings itself, so x/net does not: onPing sees each ping and says whether a pong carrying the
+// payload goes back. A nil onPing answers every ping. No payload cap and no mask check: the
+// x/net client sends neither an oversized frame this mock must refuse nor an unmasked one.
+func receive(ws *websocket.Conn, onPing func() (answer bool)) ([]byte, error) {
+	for {
+		frame, err := ws.NewFrameReader()
+		if err != nil {
+			return nil, err
+		}
+		if frame.PayloadType() == websocket.PingFrame {
+			payload, err := io.ReadAll(frame)
+			if err != nil {
+				return nil, err
+			}
+			if onPing != nil && !onPing() {
+				continue
+			}
+			if err := pongCodec.Send(ws, payload); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		handled, err := ws.HandleFrame(frame)
+		if err != nil {
+			return nil, err
+		}
+		// A pong.
+		if handled == nil {
+			continue
+		}
+		return io.ReadAll(handled)
 	}
-	return message, nil
 }

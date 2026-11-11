@@ -1045,6 +1045,7 @@ func TestGivenForwardReverseEnvOverridesWhenTheDaemonBodyRunsThenItAppliesThem(t
 	t.Setenv("DEVICEFARM_CONNECT_MAX_REVERSE_RULES", "7")
 	t.Setenv("DEVICEFARM_CONNECT_NOTIFIER_KEEPALIVE_MS", "2345")
 	t.Setenv("DEVICEFARM_CONNECT_NOTIFIER_BACKOFF_MS", "345")
+	t.Setenv("DEVICEFARM_CONNECT_PARK_PING_MS", "456")
 	cfg := config.Default()
 	cfg.ListenPort = freePort(t)
 	mgr := newTestManagerWithConfig(t, cfg)
@@ -1068,6 +1069,8 @@ func TestGivenForwardReverseEnvOverridesWhenTheDaemonBodyRunsThenItAppliesThem(t
 	assert.Equal(t, 345*time.Millisecond, mgr.config.NotifierBackoffInitial)
 	assert.Equal(t, config.DefaultNotifierBackoffMax, mgr.config.NotifierBackoffMax,
 		"the backoff cap has no override")
+	assert.Equal(t, 456*time.Millisecond, mgr.attachmentParams().ParkPingInterval,
+		"the park ping must reach the attachment params")
 }
 
 func TestGivenAnEnvOverrideThatBreaksValidationWhenTheDaemonBodyRunsThenItRefusesToStart(t *testing.T) {
