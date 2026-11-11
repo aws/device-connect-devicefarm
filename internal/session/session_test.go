@@ -411,6 +411,7 @@ func TestGivenUnusableARNWhenSessionFetchedThenFailsFastWithoutCallingTheAPI(t *
 		{name: "wrong service", arn: "arn:aws:s3:us-west-2:1:bucket"},
 		{name: "no region", arn: "arn:aws:devicefarm::1:session:a/b/0"},
 		{name: "unsupported region", arn: "arn:aws:devicefarm:eu-central-1:1:session:a/b/0"},
+		{name: "a project arn", arn: "arn:aws:devicefarm:us-west-2:1:project:a"},
 	}
 
 	for _, tc := range tests {
@@ -423,6 +424,55 @@ func TestGivenUnusableARNWhenSessionFetchedThenFailsFastWithoutCallingTheAPI(t *
 			assert.Zero(t, getter.calls, "an unusable ARN must be rejected before the API call")
 		})
 	}
+}
+
+func TestGivenArnShapesWhenValidatedThenOnlyARemoteAccessSessionArnPasses(t *testing.T) {
+	require.NoError(t, ValidateSessionARN(testSessionARN), "a session ARN passes")
+	tests := []struct {
+		name     string
+		arn      string
+		wantText string
+	}{
+		{name: "a project arn", arn: "arn:aws:devicefarm:us-west-2:1:project:a",
+			wantText: "is not a remote access session ARN"},
+		{name: "a device arn", arn: "arn:aws:devicefarm:us-west-2:1:device:a",
+			wantText: "is not a remote access session ARN"},
+		{name: "session with nothing after it", arn: "arn:aws:devicefarm:us-west-2:1:session:",
+			wantText: "is not a remote access session ARN"},
+		{name: "an empty partition", arn: "arn::devicefarm:us-west-2:1:session:a/b/0",
+			wantText: `is not an AWS ARN (partition "")`},
+		{name: "another service", arn: "arn:aws:s3:us-west-2:1:bucket",
+			wantText: "is not a Device Farm ARN"},
+		{name: "another region", arn: "arn:aws:devicefarm:eu-central-1:1:session:a/b/0",
+			wantText: "only supported in us-west-2"},
+		{name: "not an arn", arn: "not-an-arn-at-all", wantText: "invalid prefix"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateSessionARN(tc.arn)
+
+			require.ErrorIs(t, err, ErrInvalidARN)
+			assert.Contains(t, err.Error(), tc.wantText)
+		})
+	}
+}
+
+func TestGivenAResponseWithAnArnWhenResolvedThenTheInfoCarriesIt(t *testing.T) {
+	out := sessionOutput("wss://host.example/ws", "Pixel", "16")
+	out.RemoteAccessSession.Arn = aws.String(testSessionARN)
+
+	got, err := newClient(&fakeGetter{out: out}).GetSession(context.Background(), testSessionARN)
+
+	require.NoError(t, err)
+	assert.Equal(t, testSessionARN, got.ARN)
+}
+
+func TestGivenAResponseWithoutAnArnWhenResolvedThenTheInfoArnIsEmpty(t *testing.T) {
+	got, err := newClient(&fakeGetter{out: sessionOutput("wss://host.example/ws", "Pixel", "16")}).
+		GetSession(context.Background(), testSessionARN)
+
+	require.NoError(t, err)
+	assert.Empty(t, got.ARN)
 }
 
 func TestGivenUnsupportedRegionARNWhenSessionFetchedThenErrorNamesTheSupportedRegion(t *testing.T) {

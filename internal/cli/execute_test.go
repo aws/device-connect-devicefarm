@@ -251,3 +251,22 @@ func TestGivenDaemonRefusesAddWithAFixWhenBridgeStartExecutedWithARNThenOnlyTheD
 	assert.Contains(t, out, "  cause: resolve session: session has ended\n  fix:   start a new remote access session\n")
 	assert.NotContains(t, out, "fix the issue, then run this command again", "the daemon's fix replaces the generic one")
 }
+
+func TestGivenARunningBridgeWhenBridgeStartGetsAMalformedSessionArnThenAUsageErrorAndTheBridgeKeepsRunning(t *testing.T) {
+	for _, malformedArn := range []string{"not-an-arn", "arn::devicefarm:us-west-2:1:session:a/b/0"} {
+		t.Run(malformedArn, func(t *testing.T) {
+			stops, starts := fakeRestart(t, func(req control.Request) control.Response {
+				t.Errorf("no request may reach the daemon; got %q", req.Op)
+				return control.Response{OK: true}
+			}, daemon.StopResult{PID: 4242, WasRunning: true})
+
+			code, out := runExecute(t, "bridge", "start", "--session-arn", malformedArn)
+
+			assert.Equal(t, 1, code)
+			assert.Contains(t, out, config.BinaryName+": error: invalid session ARN: ")
+			assert.Contains(t, out, "  fix:   run '"+config.BinaryName+" bridge start --help' for usage\n")
+			assert.Zero(t, *stops, "a malformed ARN must not stop the running bridge")
+			assert.Zero(t, *starts)
+		})
+	}
+}

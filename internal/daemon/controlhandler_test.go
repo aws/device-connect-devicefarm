@@ -50,10 +50,10 @@ func (s *controlHandlerSuite) SetupTest() {
 	s.handler = s.mgr.controlHandler(context.Background(), s.device, s.dialer, func() {})
 }
 
-// attachedArnOne is the Devices entry the handler builds for "arn:1" once an add bound it.
+// attachedArnOne is the Devices entry the handler builds for testSessionArnOne once an add bound it.
 func (s *controlHandlerSuite) attachedArnOne() []control.AttachedDevice {
 	bound, _ := s.device.Current()
-	return []control.AttachedDevice{{SessionARN: "arn:1", Label: "Pixel 10 (OS 17)", Serial: attachSerial,
+	return []control.AttachedDevice{{SessionARN: testSessionArnOne, Label: "Pixel 10 (OS 17)", Serial: attachSerial,
 		AttachedAt: bound.AttachedAt, SessionStartedAt: testSessionStartedAt, SessionExpiresAt: testSessionExpiresAt}}
 }
 
@@ -62,14 +62,15 @@ func TestControlHandlerSuite(t *testing.T) {
 }
 
 func (s *controlHandlerSuite) TestNoDeviceAttachedAddResolvesAttachesAndReportsLabel() {
-	resp := s.handler(addReq("arn:1"))
+	resp := s.handler(addReq(testSessionArnOne))
 
 	s.Require().True(resp.OK)
 	s.Equal("Pixel 10 (OS 17)", resp.DeviceLabel)
 	s.Equal(s.mgr.config.ListenPort, resp.Port)
+	s.Equal(testSessionArnOne, resp.ARN, "the reply names the stored ARN")
 	current, present := s.device.Current()
 	s.Require().True(present)
-	s.Equal("arn:1", current.ARN)
+	s.Equal(testSessionArnOne, current.ARN)
 	s.Equal(s.mock.URL, current.Endpoint, "the resolved endpoint must be stored verbatim")
 	s.Equal(attachSerial, current.Serial, "the add must bind the device with the serial it fetched")
 	s.Equal(testSessionStartedAt, current.SessionStartedAt, "the add binds the session times it resolved")
@@ -82,7 +83,7 @@ func (s *controlHandlerSuite) TestSerialFetchDialFailsAddRejectedAndNothingAttac
 	// The session resolves, but nothing listens at its endpoint.
 	s.client.set(testEndpoint, nil)
 
-	resp := s.handler(addReq("arn:1"))
+	resp := s.handler(addReq(testSessionArnOne))
 
 	s.False(resp.OK, "a failed serial fetch must fail the add")
 	s.Contains(resp.Error, "fetch the device serial")
@@ -96,7 +97,7 @@ func (s *controlHandlerSuite) TestSerialFetchFailsAtAPresignedEndpointAddErrorAn
 	logs := &lockedBuffer{}
 	s.mgr.logger = slog.New(slog.NewTextHandler(logs, nil))
 
-	resp := s.handler(addReq("arn:1"))
+	resp := s.handler(addReq(testSessionArnOne))
 
 	s.False(resp.OK)
 	for _, sink := range []string{resp.Error, logs.String()} {
@@ -119,7 +120,7 @@ func (s *controlHandlerSuite) TestSerialFetchHangsAddFailsAtTheResolveTimeoutAnd
 	s.T().Cleanup(func() { resolveTimeout = previous })
 	started := time.Now()
 
-	resp := s.handler(addReq("arn:1"))
+	resp := s.handler(addReq(testSessionArnOne))
 
 	s.False(resp.OK, "a hung fetch must fail the add")
 	s.Contains(resp.Error, "deadline exceeded")
@@ -134,7 +135,7 @@ func (s *controlHandlerSuite) TestDeviceListNamesNoDeviceAddRejectedAndNothingAt
 	})
 	s.client.set(emptyList.URL, nil)
 
-	resp := s.handler(addReq("arn:1"))
+	resp := s.handler(addReq(testSessionArnOne))
 
 	s.False(resp.OK, "a device list naming no device must fail the add")
 	s.Contains(resp.Error, "lists no device")
@@ -148,7 +149,7 @@ func (s *controlHandlerSuite) TestResolutionFailsAddRejectedAndNothingAttached()
 	// failed add, never a nil-endpoint attach.
 	s.client.set("", errors.New("session not RUNNING"))
 
-	resp := s.handler(addReq("arn:1"))
+	resp := s.handler(addReq(testSessionArnOne))
 
 	s.False(resp.OK, "a failed resolution must fail the add")
 	s.Contains(resp.Error, "session not RUNNING")
@@ -164,53 +165,179 @@ func (s *controlHandlerSuite) TestDeviceAttachedMidResolveAddRejectedAndNewerDev
 	racing := &attachDuringResolve{
 		inner: newFakeClient(s.mock.URL, "Pixel 10 (OS 17)"),
 		attach: func() {
-			s.Require().True(s.device.Set(bridge.DeviceInfo{ARN: "arn:other", Label: "Other"}))
+			s.Require().True(s.device.Set(bridge.DeviceInfo{ARN: testSessionArnOther, Label: "Other"}))
 		},
 	}
 	mgr := newTestManagerWithClient(s.T(), config.Default(), racing)
 	handler := mgr.controlHandler(context.Background(), s.device, s.dialer, func() {})
 
-	resp := handler(addReq("arn:1"))
+	resp := handler(addReq(testSessionArnOne))
 
 	s.False(resp.OK, "a device bound mid-resolve must fail the add")
 	s.Contains(resp.Error, "already attached (Other)")
 	current, present := s.device.Current()
 	s.Require().True(present)
-	s.Equal("arn:other", current.ARN, "the device that won the race must stay attached")
+	s.Equal(testSessionArnOther, current.ARN, "the device that won the race must stay attached")
 }
 
 func (s *controlHandlerSuite) TestDifferentDeviceAlreadyAttachedAddRejectedWithoutResolving() {
-	s.Require().True(s.handler(addReq("arn:1")).OK)
+	s.Require().True(s.handler(addReq(testSessionArnOne)).OK)
 
-	resp := s.handler(addReq("arn:2"))
+	resp := s.handler(addReq(testSessionArnTwo))
 
 	s.False(resp.OK, "the one-device limit must reject adding a different device")
 	s.Equal("a different device is already attached (Pixel 10 (OS 17))", resp.Error)
 	s.Equal([]string{"run '" + config.BinaryName + " device remove' first"}, resp.Fixes)
 	current, _ := s.device.Current()
-	s.Equal("arn:1", current.ARN, "the first device must stay attached")
-	s.Equal([]string{"arn:1"}, s.client.resolvedARNs(), "a rejected different device must not trigger a resolve")
+	s.Equal(testSessionArnOne, current.ARN, "the first device must stay attached")
+	s.Equal([]string{testSessionArnOne}, s.client.resolvedARNs(), "a rejected different device must not trigger a resolve")
 }
 
 func (s *controlHandlerSuite) TestSameDeviceAlreadyAttachedAddAgainIsIdempotentWithoutResolving() {
-	s.Require().True(s.handler(addReq("arn:1")).OK)
+	s.Require().True(s.handler(addReq(testSessionArnOne)).OK)
 
 	// Re-adding the same session ARN must succeed as a no-op rather than erroring,
 	// and must report the attached device so bridge start/device add can reprint the
 	// listening line, without making a second AWS call.
-	resp := s.handler(addReq("arn:1"))
+	resp := s.handler(addReq(testSessionArnOne))
 
 	s.Require().True(resp.OK, "re-adding the same device must be idempotent")
 	s.Equal("Pixel 10 (OS 17)", resp.DeviceLabel)
 	current, present := s.device.Current()
 	s.Require().True(present)
-	s.Equal("arn:1", current.ARN, "the device must remain attached")
-	s.Equal([]string{"arn:1"}, s.client.resolvedARNs(), "a re-add of the current device must not resolve again")
+	s.Equal(testSessionArnOne, current.ARN, "the device must remain attached")
+	s.Equal([]string{testSessionArnOne}, s.client.resolvedARNs(), "a re-add of the current device must not resolve again")
+}
+
+func (s *controlHandlerSuite) TestMalformedArnAddRefusedWithNoLookup() {
+	resp := s.handler(addReq("not-an-arn-at-all"))
+
+	s.False(resp.OK)
+	s.Contains(resp.Error, "invalid session ARN")
+	s.Empty(s.client.resolvedARNs(), "a refused ARN must make no service call")
+	_, present := s.device.Current()
+	s.False(present)
+}
+
+func (s *controlHandlerSuite) TestProjectArnAddRefusedWithNoLookup() {
+	resp := s.handler(addReq("arn:aws:devicefarm:us-west-2:111122223333:project:eeeeeeee-5555-4555-a555-555555555555"))
+
+	s.False(resp.OK)
+	s.Contains(resp.Error, "is not a remote access session ARN")
+	s.Empty(s.client.resolvedARNs())
+}
+
+func (s *controlHandlerSuite) TestDeviceLimitReachedMalformedArnGetsTheArnErrorFirst() {
+	s.Require().True(s.handler(addReq(testSessionArnOne)).OK)
+
+	resp := s.handler(addReq("not-an-arn-at-all"))
+
+	s.False(resp.OK)
+	s.Contains(resp.Error, "invalid session ARN", "the ARN error wins over the attached refusal")
+	s.NotContains(resp.Error, "already attached")
+}
+
+func (s *controlHandlerSuite) TestTheServiceReturnsAnotherArnAddResolvesOnceMoreAndAttachesUnderIt() {
+	s.client.returnArnFor(testSessionArnOne, testSessionArnTwo)
+	s.client.returnArnFor(testSessionArnTwo, testSessionArnTwo)
+
+	resp := s.handler(addReq(testSessionArnOne))
+
+	s.Require().True(resp.OK, resp.Error)
+	s.Equal([]string{testSessionArnOne, testSessionArnTwo}, s.client.resolvedARNs(),
+		"the typed lookup, then one more with the returned ARN")
+	s.Equal(testSessionArnTwo, resp.ARN)
+	current, present := s.device.Current()
+	s.Require().True(present)
+	s.Equal(testSessionArnTwo, current.ARN, "the attachment keys on the ARN the service named")
+}
+
+func (s *controlHandlerSuite) TestTheSecondAnswerNamesAThirdArnAndNoThirdLookupIsMade() {
+	s.client.returnArnFor(testSessionArnOne, testSessionArnTwo)
+	s.client.returnArnFor(testSessionArnTwo, testSessionArnThree)
+
+	resp := s.handler(addReq(testSessionArnOne))
+
+	s.Require().True(resp.OK, resp.Error)
+	s.Equal([]string{testSessionArnOne, testSessionArnTwo}, s.client.resolvedARNs(),
+		"the retry is capped at one call in code")
+	s.Equal(testSessionArnThree, resp.ARN, "the second answer is used as is")
+}
+
+func (s *controlHandlerSuite) TestTheSecondAnswerCarriesNoArnAndTheAskedOneIsStored() {
+	s.client.returnArnFor(testSessionArnOne, testSessionArnTwo)
+
+	resp := s.handler(addReq(testSessionArnOne))
+
+	s.Require().True(resp.OK, resp.Error)
+	s.Equal([]string{testSessionArnOne, testSessionArnTwo}, s.client.resolvedARNs())
+	s.Equal(testSessionArnTwo, resp.ARN, "an answer with no ARN stores the asked one")
+	current, present := s.device.Current()
+	s.Require().True(present)
+	s.Equal(testSessionArnTwo, current.ARN)
+}
+
+func (s *controlHandlerSuite) TestTheServiceReturnsTheTypedArnAndOneLookupIsMade() {
+	s.client.returnArnFor(testSessionArnOne, testSessionArnOne)
+
+	resp := s.handler(addReq(testSessionArnOne))
+
+	s.Require().True(resp.OK, resp.Error)
+	s.Equal([]string{testSessionArnOne}, s.client.resolvedARNs())
+	s.Equal(testSessionArnOne, resp.ARN)
+}
+
+func (s *controlHandlerSuite) TestATypedArnThatResolvesToTheAttachedSessionIsANoOpWithNoSerialFetch() {
+	// Nothing is attached at the pre-check; the attach lands mid-resolve under the
+	// ARN the answer names. The repeated re-add check answers the no-op before any
+	// serial fetch.
+	racing := newFakeClient(s.mock.URL, "Pixel 10 (OS 17)")
+	racing.returnArnFor(testSessionArnOne, testSessionArnTwo)
+	racing.returnArnFor(testSessionArnTwo, testSessionArnTwo)
+	client := &attachDuringResolve{inner: racing, attach: func() {
+		s.device.Set(bridge.DeviceInfo{ARN: testSessionArnTwo, Label: "Pixel 10 (OS 17)"})
+	}}
+	handler := newTestManagerWithClient(s.T(), config.Default(), client).controlHandler(
+		context.Background(), s.device, s.dialer, func() {})
+
+	resp := handler(addReq(testSessionArnOne))
+
+	s.Require().True(resp.OK, resp.Error)
+	s.Equal(testSessionArnTwo, resp.ARN)
+	s.Empty(sessionInbounds(s.mock), "a no-op re-add fetches no serial")
+	current, present := s.device.Current()
+	s.Require().True(present)
+	s.Equal(testSessionArnTwo, current.ARN, "one attachment, unchanged")
+}
+
+func (s *controlHandlerSuite) TestTheSecondLookupFailsAddFailsAndNothingIsAttached() {
+	failing := &failSecondLookup{inner: s.client}
+	s.client.returnArnFor(testSessionArnOne, testSessionArnTwo)
+	handler := newTestManagerWithClient(s.T(), config.Default(), failing).controlHandler(
+		context.Background(), s.device, s.dialer, func() {})
+
+	resp := handler(addReq(testSessionArnOne))
+
+	s.False(resp.OK)
+	s.Contains(resp.Error, "second lookup failed for the test")
+	_, present := s.device.Current()
+	s.False(present)
+}
+
+func (s *controlHandlerSuite) TestAnAttachUnderAReturnedArnRefreshesByTheReturnedArn() {
+	s.client.returnArnFor(testSessionArnOne, testSessionArnTwo)
+	s.client.returnArnFor(testSessionArnTwo, testSessionArnTwo)
+	s.Require().True(s.handler(addReq(testSessionArnOne)).OK)
+
+	s.True(s.mgr.refreshEndpointOnce(context.Background(), s.device), "the refresh finds the session")
+
+	resolved := s.client.resolvedARNs()
+	s.Equal(testSessionArnTwo, resolved[len(resolved)-1], "the refresh looks the stored ARN up")
 }
 
 func (s *controlHandlerSuite) TestFailedResolveWithAKnownRemedyCarriesItsFixApartFromTheCause() {
-	restart := "then run '" + config.BinaryName + " bridge start --port 5037 --session-arn arn:1' with any other option " +
-		"the bridge started with; the bridge reads AWS settings only from the shell that starts it"
+	restart := "then run '" + config.BinaryName + " bridge start --port 5037 --session-arn " + testSessionArnOne +
+		"' with any other option the bridge started with; the bridge reads AWS settings only from the shell that starts it"
 	cases := []struct {
 		name    string
 		failure error
@@ -233,7 +360,7 @@ func (s *controlHandlerSuite) TestFailedResolveWithAKnownRemedyCarriesItsFixApar
 		s.Run(testCase.name, func() {
 			s.client.set("", testCase.failure)
 
-			resp := s.handler(addReq("arn:1"))
+			resp := s.handler(addReq(testSessionArnOne))
 
 			s.False(resp.OK)
 			s.Equal("resolve session: "+testCase.failure.Error(), resp.Error, "the cause carries no fix text")
@@ -250,7 +377,7 @@ func (s *controlHandlerSuite) TestFailedResolveWithNoKnownRemedyCarriesNoFix() {
 	} {
 		s.client.set("", failure)
 
-		resp := s.handler(addReq("arn:1"))
+		resp := s.handler(addReq(testSessionArnOne))
 
 		s.False(resp.OK)
 		s.Empty(resp.Fixes, failure.Error())
@@ -258,9 +385,9 @@ func (s *controlHandlerSuite) TestFailedResolveWithNoKnownRemedyCarriesNoFix() {
 }
 
 func (s *controlHandlerSuite) TestRemoveWithMatchingARNDetaches() {
-	s.Require().True(s.handler(addReq("arn:1")).OK)
+	s.Require().True(s.handler(addReq(testSessionArnOne)).OK)
 
-	resp := s.handler(control.Request{Op: control.OpRemove, ARN: "arn:1"})
+	resp := s.handler(control.Request{Op: control.OpRemove, ARN: testSessionArnOne})
 
 	s.Require().True(resp.OK)
 	_, present := s.device.Current()
@@ -268,7 +395,7 @@ func (s *controlHandlerSuite) TestRemoveWithMatchingARNDetaches() {
 }
 
 func (s *controlHandlerSuite) TestRemoveWithoutARNDetachesTheAttachedDevice() {
-	s.Require().True(s.handler(addReq("arn:1")).OK)
+	s.Require().True(s.handler(addReq(testSessionArnOne)).OK)
 
 	resp := s.handler(control.Request{Op: control.OpRemove})
 
@@ -279,9 +406,9 @@ func (s *controlHandlerSuite) TestRemoveWithoutARNDetachesTheAttachedDevice() {
 }
 
 func (s *controlHandlerSuite) TestRemoveWithMismatchedARNRejectedAndKept() {
-	s.Require().True(s.handler(addReq("arn:1")).OK)
+	s.Require().True(s.handler(addReq(testSessionArnOne)).OK)
 
-	resp := s.handler(control.Request{Op: control.OpRemove, ARN: "arn:other"})
+	resp := s.handler(control.Request{Op: control.OpRemove, ARN: testSessionArnOther})
 
 	s.False(resp.OK, "a mismatched ARN must not remove the attached device")
 	_, present := s.device.Current()
@@ -289,7 +416,7 @@ func (s *controlHandlerSuite) TestRemoveWithMismatchedARNRejectedAndKept() {
 }
 
 func (s *controlHandlerSuite) TestRemoveWithNoDeviceRejected() {
-	resp := s.handler(control.Request{Op: control.OpRemove, ARN: "arn:1"})
+	resp := s.handler(control.Request{Op: control.OpRemove, ARN: testSessionArnOne})
 
 	s.False(resp.OK)
 }
@@ -311,7 +438,7 @@ func (s *controlHandlerSuite) TestUnknownOpRejected() {
 }
 
 func (s *controlHandlerSuite) TestListReportsEachAttachedDeviceWithItsSessionARNSerialAndTimes() {
-	s.Require().True(s.handler(addReq("arn:1")).OK)
+	s.Require().True(s.handler(addReq(testSessionArnOne)).OK)
 
 	resp := s.handler(control.Request{Op: control.OpList})
 
@@ -327,13 +454,13 @@ func (s *controlHandlerSuite) TestListWithNoDeviceReportsAnEmptyList() {
 }
 
 func (s *controlHandlerSuite) TestStatusReportsAttachedLabelARNAndDevicesWithReverseOff() {
-	s.Require().True(s.handler(addReq("arn:1")).OK)
+	s.Require().True(s.handler(addReq(testSessionArnOne)).OK)
 
 	resp := s.handler(control.Request{Op: control.OpStatus})
 
 	s.Require().True(resp.OK)
 	s.Equal("Pixel 10 (OS 17)", resp.DeviceLabel)
-	s.Equal("arn:1", resp.ARN)
+	s.Equal(testSessionArnOne, resp.ARN)
 	s.Equal(s.attachedArnOne(), resp.Devices)
 	s.False(resp.ReverseEnabled, "the default config starts with reverse off")
 	s.Empty(resp.LastDetachReason, "an attached device reports no detach")
@@ -354,7 +481,7 @@ func (s *controlHandlerSuite) TestStatusReportsReverseEnabledFromTheConfig() {
 }
 
 func (s *controlHandlerSuite) TestStatusAndListCarryTheLastDetachWhileNoDeviceIsAttached() {
-	s.Require().True(s.handler(addReq("arn:1")).OK)
+	s.Require().True(s.handler(addReq(testSessionArnOne)).OK)
 	s.client.set("", errors.New("connection reset"))
 	s.False(s.mgr.refreshEndpointOnce(context.Background(), s.device), "the tick detaches")
 
@@ -362,13 +489,13 @@ func (s *controlHandlerSuite) TestStatusAndListCarryTheLastDetachWhileNoDeviceIs
 		resp := s.handler(control.Request{Op: op})
 
 		s.Require().True(resp.OK)
-		s.Contains(resp.LastDetachReason, "could not look up remote access session arn:1", string(op))
+		s.Contains(resp.LastDetachReason, "could not look up remote access session "+testSessionArnOne, string(op))
 		s.WithinDuration(time.Now(), resp.LastDetachAt, time.Minute, string(op))
 	}
 }
 
 func (s *controlHandlerSuite) TestStatusAndListCarryNoDetachAfterARemoveByTheUser() {
-	s.Require().True(s.handler(addReq("arn:1")).OK)
+	s.Require().True(s.handler(addReq(testSessionArnOne)).OK)
 	s.Require().True(s.handler(control.Request{Op: control.OpRemove}).OK)
 
 	for _, op := range []control.Op{control.OpStatus, control.OpList} {
