@@ -148,9 +148,11 @@ attach a device, then use `adb` as usual.
    devicefarm-connect device add --session-arn arn:aws:devicefarm:us-west-2:123456789012:session:11111111-2222-3333-4444-5555555abcde
    ```
 
-   If adb's own server holds port 5037, the bridge stops it first, as `adb kill-server` does. If a program such
-   as Android Studio restarts adb, quit it, run this, then open it again: it then uses the bridge as its adb
-   server. You can also start the bridge yourself on another port. `bridge start` takes `--port`, and its
+   If adb's own server holds port 5037, the bridge stops it first, as `adb kill-server` does. If a program
+   such as Android Studio restarts adb, quit it, run this, then open it again: it then uses the bridge as its
+   adb server. If another bridge holds the port, started from another working directory or by another user,
+   the command names its process id and stops nothing. Run `bridge stop` in the shell that started that
+   bridge. You can also start the bridge yourself on another port. `bridge start` takes `--port`, and its
    `--session-arn` is optional. Omit it to start with no device, then attach one with `device add`.
 
    ```sh

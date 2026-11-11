@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/aws/device-connect-devicefarm/internal/adbwire"
 	"github.com/aws/device-connect-devicefarm/internal/config"
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/daemon"
@@ -136,11 +137,56 @@ func occupyPort(t *testing.T, port int, serve func(net.Conn)) {
 func answering(reply string) func(net.Conn) {
 	return func(conn net.Conn) {
 		defer conn.Close()
-		request := make([]byte, len("000chost:version"))
-		if _, err := io.ReadFull(conn, request); err == nil && string(request) == "000chost:version" {
+		switch request, ok := readOccupantRequest(conn); {
+		case !ok:
+		case request == "000chost:version":
+			_, _ = conn.Write([]byte(reply))
+		default:
+			_, _ = fmt.Fprintf(conn, "FAIL%04x%s", len("unknown host service"), "unknown host service")
+		}
+	}
+}
+
+// answeringVersionOnly answers host:version with reply and closes any other request unanswered.
+func answeringVersionOnly(reply string) func(net.Conn) {
+	return func(conn net.Conn) {
+		defer conn.Close()
+		if request, ok := readOccupantRequest(conn); ok && request == "000chost:version" {
 			_, _ = conn.Write([]byte(reply))
 		}
 	}
+}
+
+// answeringAsABridge plays another bridge. The identity request gets pid. host:version gets a
+// version reply (41 here): a bridge repeats the version its remote adb server reported.
+func answeringAsABridge(pid int) func(net.Conn) {
+	return func(conn net.Conn) {
+		defer conn.Close()
+		switch request, ok := readOccupantRequest(conn); {
+		case !ok:
+		case request == "000chost:version":
+			_, _ = conn.Write([]byte("OKAY00040029"))
+		case request == adbwire.BridgeIdentityRequest:
+			_ = adbwire.WriteBridgeIdentity(conn, pid)
+		}
+	}
+}
+
+// readOccupantRequest reads one framed request, its length prefix kept.
+func readOccupantRequest(conn net.Conn) (string, bool) {
+	digits := make([]byte, 4)
+	if _, err := io.ReadFull(conn, digits); err != nil {
+		return "", false
+	}
+	length, err := strconv.ParseUint(string(digits), 16, 16)
+	if err != nil {
+		return "", false
+	}
+	service := make([]byte, length)
+	if _, err := io.ReadFull(conn, service); err != nil {
+		return "", false
+	}
+	return string(digits) + string(service), true
 }
 
 // silentOccupant holds the connection open and never writes.
@@ -568,6 +614,15 @@ func TestGivenTheListenPortWhenCheckedThenTheRowNamesItsOccupant(t *testing.T) {
 		{name: "an adb server", setup: func(t *testing.T, inputs *Inputs, _ *runState) {
 			occupyPort(t, inputs.Config.ListenPort, answering("OKAY00040029"))
 		}, wantStatus: Warn, wantSummary: "an adb server (version 41) is listening on", wantHint: adbServerHint},
+		{name: "another bridge", setup: func(t *testing.T, inputs *Inputs, _ *runState) {
+			// A bridge answers host:version too; the identity request tells it from an adb server.
+			occupyPort(t, inputs.Config.ListenPort, answeringAsABridge(4242))
+		}, wantStatus: Fail, wantSummary: "another devicefarm-connect bridge (pid 4242) is listening on",
+			wantHint: func(listenAddr string, port int) string { return daemon.BridgeHoldsPortText(listenAddr, port, 4242) }},
+		{name: "an occupant silent to the identity request", setup: func(t *testing.T, inputs *Inputs, _ *runState) {
+			// It may be a bridge cut mid-answer, so its version reply is not taken for an adb server.
+			occupyPort(t, inputs.Config.ListenPort, answeringVersionOnly("OKAY00040029"))
+		}, wantStatus: Fail, wantSummary: "because another program is listening on it", wantHint: daemon.HeldPortText},
 		{name: "an occupant with a malformed version", setup: func(t *testing.T, inputs *Inputs, _ *runState) {
 			occupyPort(t, inputs.Config.ListenPort, answering("OKAY0004zz29"))
 		}, wantStatus: Fail, wantSummary: "because another program is listening on it", wantHint: daemon.HeldPortText},
