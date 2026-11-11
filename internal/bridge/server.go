@@ -157,7 +157,8 @@ func (s *AdbProxyServer) Run(ctx context.Context) error {
 // with or without a device (serveDeviceTracker). With no device, host:version gets the last
 // version a server reported and a device list is empty (answerServerQuery). A request that names
 // no attached device, and any other request with no device, gets adb's FAIL for its selector;
-// bytes that form no request get the close alone (refuseUnresolved). While reverse is off, a reverse-family request gets a local FAIL and never dials
+// bytes that form no request get the close alone (refuseUnresolved). A lone host-transport-id: request for the daemon's id
+// is re-framed for the device (loneOpening). While reverse is off, a reverse-family request gets a local FAIL and never dials
 // either. With reverse on, a reverse-family request waits until the attachment's clear of the
 // server's reverse rules settles, or gets a local FAIL at the bound. While the server's notifier
 // slot is held elsewhere, it gets a local FAIL at once, on arrival or mid-wait. Every other
@@ -226,6 +227,7 @@ func (s *AdbProxyServer) handleConn(ctx context.Context, tcp net.Conn) {
 			return
 		}
 	}
+	clientOpening = loneOpening(clientOpening)
 	if refuseReverseFamily(tcp, clientOpening, forwarding, connLogger) {
 		connLogger.Debug("refused a reverse request: reverse is off", "service", clientOpening.service)
 		return
