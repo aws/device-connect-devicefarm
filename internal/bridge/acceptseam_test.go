@@ -116,7 +116,7 @@ func TestGivenATransportSelectWhenAnsweredThenTheReplyShapeFollowsItsSpelling(t 
 		t.Run(testCase.name, func(t *testing.T) {
 			var reply bytes.Buffer
 
-			selector, claimed, err := answerTransportSelect(&reply, testCase.request, &DeviceInfo{Serial: "dev-1"})
+			selector, claimed, err := answerTransportSelect(&reply, testCase.request, &DeviceInfo{Serial: "dev-1"}, nil)
 
 			require.NoError(t, err)
 			assert.Equal(t, testCase.wantSelector, selector,
@@ -145,7 +145,7 @@ func TestGivenARequestThatIsNotAPlainSelectWhenAnsweredThenItIsNotClaimed(t *tes
 		t.Run(testCase.name, func(t *testing.T) {
 			var reply bytes.Buffer
 
-			_, claimed, err := answerTransportSelect(&reply, testCase.request, &DeviceInfo{Serial: "dev-1"})
+			_, claimed, err := answerTransportSelect(&reply, testCase.request, &DeviceInfo{Serial: "dev-1"}, nil)
 
 			assert.False(t, claimed)
 			require.NoError(t, err)
@@ -173,7 +173,7 @@ func TestGivenAWriterThatFailsWhenASelectIsAnsweredThenTheFailureIsReported(t *t
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			_, claimed, err := answerTransportSelect(failingWriter{}, testCase.request, testCase.attached)
+			_, claimed, err := answerTransportSelect(failingWriter{}, testCase.request, testCase.attached, nil)
 
 			assert.False(t, claimed, "an unwritten reply claims nothing")
 			assert.ErrorIs(t, err, errWriteRefused)
@@ -279,7 +279,7 @@ func TestGivenAClientsOpeningWhenItIsReadThenOnlyTheUnansweredBytesArePending(t 
 				attached = nil
 			}
 
-			clientOpening, err := readOpening(context.Background(), client, attached)
+			clientOpening, err := readOpening(context.Background(), client, attached, nil)
 
 			if testCase.wantErr != nil {
 				require.ErrorIs(t, err, testCase.wantErr)
@@ -397,7 +397,7 @@ func TestGivenASelectNamingNoAttachedDeviceWhenAnsweredThenAdbsRefusalEndsTheCon
 		t.Run(testCase.name, func(t *testing.T) {
 			var reply bytes.Buffer
 
-			_, claimed, err := answerTransportSelect(&reply, testCase.request, testCase.attached)
+			_, claimed, err := answerTransportSelect(&reply, testCase.request, testCase.attached, nil)
 
 			assert.False(t, claimed, "a refused select leaves no second request to read")
 			assert.ErrorIs(t, err, errSelectRefused)
@@ -583,7 +583,7 @@ func TestGivenADetachWhileTheOpeningIsReadWhenItIsCancelledThenTheReadEndsAtOnce
 	ctx, cancel := context.WithCancel(context.Background())
 	opened := make(chan error, 1)
 	go func() {
-		_, err := readOpening(ctx, daemon, &DeviceInfo{})
+		_, err := readOpening(ctx, daemon, &DeviceInfo{}, nil)
 		opened <- err
 	}()
 

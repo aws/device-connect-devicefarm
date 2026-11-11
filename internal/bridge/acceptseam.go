@@ -145,10 +145,12 @@ func (clientOpening opening) ridesPreSelected() bool {
 
 // readOpening reads everything the client says before anything is dialed: its service
 // request, plus the transport select the daemon answers itself when one comes first. attached
-// is the device a select may name. nil: no device, the select gets adb's FAIL.
+// is the device a select may name. nil: no device, the select gets adb's FAIL. decorateMiss, when
+// set, rewrites that FAIL's text (answerTransportSelect).
 //
 // Nothing is dialed from here, so a client that says nothing mints no session.
-func readOpening(ctx context.Context, tcpConn net.Conn, attached *DeviceInfo) (clientOpening opening, err error) {
+func readOpening(ctx context.Context, tcpConn net.Conn, attached *DeviceInfo,
+	decorateMiss func(adbText string) string) (clientOpening opening, err error) {
 	// The watcher below is a goroutine, so a cancel that already landed would not stop the
 	// first read.
 	if err := ctx.Err(); err != nil {
@@ -166,7 +168,7 @@ func readOpening(ctx context.Context, tcpConn net.Conn, attached *DeviceInfo) (c
 	if err != nil {
 		return opening{}, err
 	}
-	selector, selected, err := answerTransportSelect(tcpConn, service, attached)
+	selector, selected, err := answerTransportSelect(tcpConn, service, attached, decorateMiss)
 	if err != nil {
 		return opening{}, err
 	}
@@ -208,8 +210,10 @@ func loneOpening(clientOpening opening) opening {
 // The reply shape follows the select's spelling. A tport: form waits for OKAY plus the
 // transport id; every other spelling takes a bare OKAY. Which spellings adb and Android Studio
 // send, and before which services, is at adbwire.SplitHostPrefix and adbwire.ParseTransportSelect.
-func answerTransportSelect(writer io.Writer, request string, attached *DeviceInfo) (selector adbwire.AdbDeviceSelector,
-	claimed bool, err error) {
+//
+// decorateMiss, when set, rewrites a refused select's FAIL text before it is written.
+func answerTransportSelect(writer io.Writer, request string, attached *DeviceInfo,
+	decorateMiss func(adbText string) string) (selector adbwire.AdbDeviceSelector, claimed bool, err error) {
 	// adb's client puts every select behind the plain `host:` prefix and names its device
 	// in the service (adb_client.cpp switch_socket_transport).
 	// Any other prefix carries a selector this seam does not read, so it goes to the
@@ -222,11 +226,15 @@ func answerTransportSelect(writer io.Writer, request string, attached *DeviceInf
 	if !ok {
 		return adbwire.AdbDeviceSelector{}, false, nil
 	}
-	if attached == nil {
-		return adbwire.AdbDeviceSelector{}, false, refuseSelect(writer, forward.MissReason(selector))
+	missReason, selectorMissed := forward.MissReason(selector), true
+	if attached != nil {
+		missReason, selectorMissed = forward.SelectorMiss(selector, attached.Serial, syntheticTransportID)
 	}
-	if reason, selectorMissed := forward.SelectorMiss(selector, attached.Serial, syntheticTransportID); selectorMissed {
-		return adbwire.AdbDeviceSelector{}, false, refuseSelect(writer, reason)
+	if selectorMissed {
+		if decorateMiss != nil {
+			missReason = decorateMiss(missReason)
+		}
+		return adbwire.AdbDeviceSelector{}, false, refuseSelect(writer, missReason)
 	}
 
 	var writeErr error

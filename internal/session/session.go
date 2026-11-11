@@ -100,6 +100,14 @@ func (rejected *RequestRejectedError) Unwrap() error { return rejected.Cause }
 
 func (*RequestRejectedError) Is(target error) bool { return target == ErrRequestRejected }
 
+// expiredCredentialCodes are the service's codes for expired credentials.
+var expiredCredentialCodes = map[string]bool{"ExpiredTokenException": true, "ExpiredToken": true}
+
+// CredentialsExpired reports whether the code names expired credentials.
+func (rejected *RequestRejectedError) CredentialsExpired() bool {
+	return expiredCredentialCodes[rejected.Code]
+}
+
 // throttleErrorCodes are the API error codes the SDK treats as throttles: aws/retry
 // DefaultThrottleErrorCodes (standard.go) in aws-sdk-go-v2 v1.41.12, copied so the retry package
 // stays out of this package's imports.

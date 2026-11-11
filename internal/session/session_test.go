@@ -238,11 +238,13 @@ func TestGivenAClassifiedAPIErrorWhenResolvedThenTheErrorCarriesItsSentinel(t *t
 
 func TestGivenAFourHundredThatIsNoThrottleWhenResolvedThenTheErrorIsARejectedRequestWithItsCode(t *testing.T) {
 	tests := []struct {
-		name   string
-		status int
-		code   string
+		name    string
+		status  int
+		code    string
+		expired bool
 	}{
-		{name: "expired token", status: http.StatusForbidden, code: "ExpiredTokenException"},
+		{name: "expired token", status: http.StatusForbidden, code: "ExpiredTokenException", expired: true},
+		{name: "expired token, the older code", status: http.StatusForbidden, code: "ExpiredToken", expired: true},
 		{name: "unknown key", status: http.StatusBadRequest, code: "UnrecognizedClientException"},
 		{name: "bad signature", status: http.StatusForbidden, code: "InvalidSignatureException"},
 	}
@@ -256,6 +258,7 @@ func TestGivenAFourHundredThatIsNoThrottleWhenResolvedThenTheErrorIsARejectedReq
 			require.ErrorAs(t, err, &rejected)
 			assert.ErrorIs(t, err, ErrRequestRejected)
 			assert.Equal(t, tc.code, rejected.Code)
+			assert.Equal(t, tc.expired, rejected.CredentialsExpired())
 			assert.Equal(t, failure, errors.Unwrap(rejected), "the SDK's chain stays reachable behind the class")
 			assert.ErrorContains(t, err, "request rejected ("+tc.code+"): ", "the code reads in place")
 			assert.ErrorContains(t, err, "refused", "the SDK text stays inside the wrap")

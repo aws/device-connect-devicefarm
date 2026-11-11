@@ -611,8 +611,8 @@ var classifiedFailures = []error{session.ErrAccessDenied, session.ErrInvalidARN,
 	session.ErrNoEndpointYet, session.ErrRequestRejected}
 
 // detachReason words one failed lookup for the user and says whether the device must go. Not
-// found, ended, or unreadable (classifiedFailures) detaches. Anything else keeps the device: the
-// next lookup may succeed.
+// found, ended, expired credentials, or unreadable (classifiedFailures) detaches. Anything else
+// keeps the device: the next lookup may succeed.
 func detachReason(sessionARN string, err error) (reason string, detach bool) {
 	switch {
 	case errors.Is(err, session.ErrSessionNotFound):
@@ -621,6 +621,13 @@ func detachReason(sessionARN string, err error) (reason string, detach bool) {
 	case errors.Is(err, session.ErrSessionEnded):
 		return fmt.Sprintf("remote access session %s %s; start a new session and %s <new ARN>'",
 			sessionARN, endedState(err), reattachCommand), true
+	}
+	// No flags in the restart: a FAIL line must not quote --allow-adb-reverse without its caveat.
+	var rejected *session.RequestRejectedError
+	if errors.As(err, &rejected) && rejected.CredentialsExpired() {
+		return fmt.Sprintf("the AWS credentials the bridge started with have expired, so it can no longer read remote access "+
+			"session %s; refresh the credentials, run '%s bridge stop', start the bridge again from that shell with the same "+
+			"options, then %s %s'", sessionARN, config.BinaryName, reattachCommand, sessionARN), true
 	}
 	for _, class := range classifiedFailures {
 		if errors.Is(err, class) {
