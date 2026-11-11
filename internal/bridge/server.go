@@ -11,6 +11,9 @@ import (
 	"net"
 	"strconv"
 	"sync"
+
+	"github.com/aws/device-connect-devicefarm/internal/adbwire"
+	"github.com/aws/device-connect-devicefarm/internal/forward"
 )
 
 // AdbProxyServer presents itself to local adb clients as the adb host, piping each
@@ -152,8 +155,9 @@ func (s *AdbProxyServer) Run(ctx context.Context) error {
 // lists and the features probe are answered from cached server replies. A device tracker gets
 // the current list, cached or empty, then is held and pushed the list at every attach and detach,
 // with or without a device (serveDeviceTracker). With no device, host:version gets the last
-// version a server reported and a device list is empty (answerServerQuery); every other request
-// gets the close alone. While reverse is off, a reverse-family request gets a local FAIL and never dials
+// version a server reported and a device list is empty (answerServerQuery). A request that names
+// no attached device, and any other request with no device, gets adb's FAIL for its selector;
+// bytes that form no request get the close alone (refuseUnresolved). While reverse is off, a reverse-family request gets a local FAIL and never dials
 // either. With reverse on, a reverse-family request waits until the attachment's clear of the
 // server's reverse rules settles, or gets a local FAIL at the bound. While the server's notifier
 // slot is held elsewhere, it gets a local FAIL at once, on arrival or mid-wait. Every other
@@ -202,7 +206,8 @@ func (s *AdbProxyServer) handleConn(ctx context.Context, tcp net.Conn) {
 	}
 	if !ok {
 		// A device attached since the accept is not this connection's; the client's next one sees it.
-		connLogger.Warn("local adb client connected while no device was attached; closing", "service", clientOpening.service)
+		selector, _, _ := clientOpening.requestedService()
+		refuseUnresolved(tcp, clientOpening, forward.MissReason(selector), connLogger)
 		return
 	}
 	if respondForwardLocally(tcp, clientOpening, forwarding, info.Serial, connLogger) {
@@ -212,6 +217,14 @@ func (s *AdbProxyServer) handleConn(ctx context.Context, tcp net.Conn) {
 	if answerHostQuery(connCtx, tcp, clientOpening, forwarding, info.Serial, connLogger) {
 		connLogger.Debug("answered the host request locally", "service", clientOpening.service)
 		return
+	}
+	// The forward family and the features probe judged their transport id above; the server
+	// denies every relayed transport-id form, so the daemon judges the rest here.
+	if selector, _, _ := clientOpening.requestedService(); selector.Kind == adbwire.AdbSelectorTransportID {
+		if failReason, missed := forward.SelectorMiss(selector, info.Serial, syntheticTransportID); missed {
+			refuseUnresolved(tcp, clientOpening, failReason, connLogger)
+			return
+		}
 	}
 	if refuseReverseFamily(tcp, clientOpening, forwarding, connLogger) {
 		connLogger.Debug("refused a reverse request: reverse is off", "service", clientOpening.service)
@@ -255,6 +268,15 @@ func (s *AdbProxyServer) handleConn(ctx context.Context, tcp net.Conn) {
 		return
 	}
 	connLogger.Debug("connection closed cleanly")
+}
+
+// refuseUnresolved ends a connection that names no attached device. A framed request gets adb's
+// reason; bytes that form no request get the close alone.
+func refuseUnresolved(tcp net.Conn, clientOpening opening, failReason string, logger *slog.Logger) {
+	logger.Warn("refused a local adb connection: the request names no attached device", "reason", failReason)
+	if clientOpening.service != "" {
+		refuseOpening(tcp, failReason, "could not refuse a local adb connection", logger)
+	}
 }
 
 // openClientSession dials the device (the parked pre-selected websocket when the opening may ride

@@ -48,6 +48,11 @@ func FailDeviceNotFound(serial string) string {
 	return fmt.Sprintf("device '%s' not found", serial)
 }
 
+// FailNoTransportID is the miss text for a transport id selector.
+func FailNoTransportID(transportID uint64) string {
+	return fmt.Sprintf("no device with transport id '%d'", transportID)
+}
+
 // WriteOkay writes one OKAY status word.
 func WriteOkay(writer io.Writer) error {
 	_, err := io.WriteString(writer, okayReply)

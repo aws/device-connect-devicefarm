@@ -212,26 +212,75 @@ func TestGivenServerPipingToEchoWhenClientSendsBytesThenSameBytesReturn(t *testi
 	assert.Equal(t, payload, got)
 }
 
-func TestGivenNoDeviceAttachedWhenAClientAsksForAnythingButATrackerThenItIsClosedAndTheServerSurvives(t *testing.T) {
-	for name, request := range map[string]string{
-		"a host query":       relayedHostRequest,
-		"the features probe": hostFeaturesRequest,
-		"a transport select": "000ehost:tport:any0008shell:ls",
-	} {
-		t.Run(name, func(t *testing.T) {
-			// ActiveDevice with nothing bound.
-			addr, _ := runProxy(t, NewActiveDevice(), testPolicy())
+func TestGivenNoDeviceAttachedWhenAFramedRequestArrivesThenTheSelectorsMissTextAndTheServerSurvives(t *testing.T) {
+	// No device: a request adb acquires a transport for gets its selector's miss text.
+	// host:host-features gets the any text too: adb answers it with no transport, but the daemon
+	// has no server to answer from.
+	tests := []struct {
+		name    string
+		request string
+		want    string
+	}{
+		{name: "a device-bound host request", request: "host:get-state", want: "no devices/emulators found"},
+		{name: "the features probe", request: "host:features", want: "no devices/emulators found"},
+		{name: "the host features, the daemon's own refusal", request: "host:host-features", want: "no devices/emulators found"},
+		{name: "a bare device service", request: "shell:ls", want: "no devices/emulators found"},
+		{name: "a forward request", request: "host:forward:tcp:0;tcp:1", want: "no devices/emulators found"},
+		{name: "a transport select", request: "host:tport:any", want: "no devices/emulators found"},
+		{name: "a serial prefix", request: "host-serial:dev-1:features", want: "device 'dev-1' not found"},
+		{name: "a transport id prefix", request: "host-transport-id:1:features", want: "no device with transport id '1'"},
+		{name: "a usb prefix", request: "host-usb:features", want: "no devices found"},
+		{name: "a local prefix", request: "host-local:features", want: "no emulators found"},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			proxyAddress, _ := runProxy(t, NewActiveDevice(), testPolicy())
+			client := dialClient(t, proxyAddress)
 
-			refused := dialClient(t, addr)
-			writeAll(t, refused, []byte(request))
+			writeAll(t, client, framed(testCase.request))
 
-			_, readErr := refused.Read(make([]byte, 1))
-			assert.ErrorIs(t, readErr, io.EOF, "client must be closed with no reply when no device is attached")
-			second, err := net.Dial("tcp", addr)
-			require.NoError(t, err)
-			second.Close()
+			want := "FAIL" + string(framed(testCase.want))
+			assert.Equal(t, want, string(readN(t, client, len(want))), "the client reads adb's reason")
+			_, readErr := client.Read(make([]byte, 1))
+			assert.ErrorIs(t, readErr, io.EOF, "the daemon closes a connection it refused")
+			second := dialClient(t, proxyAddress)
+			require.NoError(t, second.Close())
 		})
 	}
+}
+
+func TestGivenNoDeviceAttachedWhenAForwardRequestAdbAnswersWithNoTransportArrivesThenItIsAnsweredOverNoRules(t *testing.T) {
+	for name, testCase := range map[string]struct{ request, want string }{
+		"list-forward":                       {request: "host:list-forward", want: "OKAY0000"},
+		"killforward-all":                    {request: "host:killforward-all", want: "OKAYOKAY"},
+		"list-forward under a serial prefix": {request: "host-serial:dev-1:list-forward", want: "OKAY0000"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			proxyAddress, _ := runProxy(t, NewActiveDevice(), testPolicy())
+
+			assert.Equal(t, testCase.want, askHost(t, proxyAddress, string(framed(testCase.request))))
+		})
+	}
+}
+
+func TestGivenNoDeviceAttachedWhenBareBytesArriveThenZeroBytesAndTheClose(t *testing.T) {
+	// No reply shape is known for bytes with no length prefix, so the refusal is the close.
+	proxyAddress, _ := runProxy(t, NewActiveDevice(), testPolicy())
+	client := dialClient(t, proxyAddress)
+
+	writeAll(t, client, []byte("hello world"))
+
+	assert.Empty(t, drainClosed(t, client), "a refused non-request opener must get zero bytes")
+}
+
+func TestGivenALoneRequestUnderAnotherTransportIDWhenReceivedThenAdbsMissTextAndNoDial(t *testing.T) {
+	client, mock := startSelectAwareProxy(t)
+
+	writeAll(t, client, framed("host-transport-id:7:get-state"))
+
+	want := "FAIL" + string(framed("no device with transport id '7'"))
+	assert.Equal(t, want, string(readN(t, client, len(want))), "the client reads adb's reason")
+	assertNoWebsocketDialed(t, mock)
 }
 
 func TestGivenDialFailsForClientWhenClientConnectsThenClientConnectionClosedAndServerSurvives(t *testing.T) {

@@ -80,9 +80,8 @@ const adbFeaturesService = "features"
 
 // localHostQuery resolves a request sent alone to the query that answers it. A features probe
 // may also name the device by serial or transport id, judged as the transport select is
-// (forward.SelectorMiss): another serial returns adb's miss text as refusal, any id matches.
-// host-usb: and host-local: relay: the server answers those by device kind. local false, no
-// refusal: relay.
+// (forward.SelectorMiss): a miss returns adb's text as refusal. host-usb: and host-local: relay:
+// the server answers those by device kind. local false, no refusal: relay.
 func localHostQuery(request, deviceSerial string) (query hostQuery, local bool, refusal string) {
 	if mapped, found := localHostQueries[request]; found {
 		return mapped, true, ""
@@ -92,7 +91,7 @@ func localHostQuery(request, deviceSerial string) (query hostQuery, local bool, 
 	if !ok || service != adbFeaturesService || !namesDevice {
 		return hostQuery{}, false, ""
 	}
-	if reason, missed := forward.SelectorMiss(selector, deviceSerial); missed {
+	if reason, missed := forward.SelectorMiss(selector, deviceSerial, syntheticTransportID); missed {
 		return hostQuery{}, false, reason
 	}
 	return featuresQuery, true, ""
@@ -229,9 +228,10 @@ func (fetcher *hostReplyFetcher) fetch(ctx context.Context, request string) ([]b
 }
 
 // answerServerQuery answers, with no device attached, the lone host requests an adb server
-// answers without one: host:version (ActiveDevice.writeVersionWithNoDevice), and the device
-// lists as the empty list. One reply, then the close. answered false: a device is attached (its
-// copies answer), any other request, or one behind a select.
+// answers without one: host:version (ActiveDevice.writeVersionWithNoDevice), the device lists as
+// the empty list, and the forward requests adb answers with no transport
+// (noTransportForwardReply). One reply, then the close. answered false: a device is attached
+// (its copies answer), any other request, or one behind a select.
 func answerServerQuery(tcp net.Conn, clientOpening opening, deviceAttached bool, device *ActiveDevice,
 	logger *slog.Logger) (answered bool) {
 	if deviceAttached || clientOpening.selected {
@@ -244,7 +244,9 @@ func answerServerQuery(tcp net.Conn, clientOpening opening, deviceAttached bool,
 	case "host:devices", "host:devices-l":
 		write = writeEmptyDeviceList
 	default:
-		return false
+		if write = noTransportForwardReply(clientOpening.service); write == nil {
+			return false
+		}
 	}
 	// No pump watches this socket; the deadline stops a client that asks, then stops reading.
 	_ = tcp.SetWriteDeadline(time.Now().Add(openingRequestTimeout))
@@ -252,6 +254,24 @@ func answerServerQuery(tcp net.Conn, clientOpening opening, deviceAttached bool,
 		logger.Debug("could not answer a host request", "error", err)
 	}
 	return true
+}
+
+// noTransportForwardReply is the reply to a lone forward request adb answers with no transport,
+// over no rules: killforward-all removes none, list-forward lists none. nil for any other
+// request.
+func noTransportForwardReply(request string) func(io.Writer) error {
+	_, service, ok := adbwire.SplitHostPrefix(request)
+	forwardRequest, isForward, parseErr := adbwire.ParseForwardService(service)
+	if !ok || !isForward || parseErr != nil {
+		return nil
+	}
+	switch forwardRequest.Action {
+	case adbwire.AdbActionKillForwardAll:
+		return func(writer io.Writer) error { return adbwire.WriteForwardSuccess(writer, 0) }
+	case adbwire.AdbActionListForward:
+		return func(writer io.Writer) error { return adbwire.WriteListForward(writer, "") }
+	}
+	return nil
 }
 
 // writeEmptyDeviceList writes a device list reply with no rows.
@@ -262,7 +282,7 @@ func writeEmptyDeviceList(writer io.Writer) error {
 
 // answerHostQuery answers a request that localHostQuery resolves, from the attachment's cached
 // reply, fetching it first if there is none. One reply, then the close. A features probe naming
-// another serial gets adb's FAIL. A failed fetch closes the client unless the connection is live
+// another device gets adb's FAIL. A failed fetch closes the client unless the connection is live
 // and query.relayOnFetchFailure is set. answered false: relay the request. Either it is not a
 // local query, the server's reply was not one to keep, or a fetch the query relays failed.
 func answerHostQuery(connCtx context.Context, tcp net.Conn, clientOpening opening, features *attachmentFeatures,

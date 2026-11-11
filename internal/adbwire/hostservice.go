@@ -121,9 +121,8 @@ func SplitHostPrefix(request string) (AdbDeviceSelector, string, bool) {
 // and the older transport-any|usb|local and transport:<serial>, which adb's
 // server answers (adb.cpp handle_host_request) and Android Studio's adb
 // libraries send. All forms are frozen, so they are matched whole and no arm
-// depends on being tried before another. Any transport id is accepted:
-// `adb devices -l` prints the remote adb server's ids, so a client may pass
-// one back.
+// depends on being tried before another. Any transport id parses; the caller
+// judges it against the daemon's own.
 func ParseTransportSelect(service string) (selector AdbDeviceSelector, carriesID bool, ok bool) {
 	switch service {
 	case "tport:any":
