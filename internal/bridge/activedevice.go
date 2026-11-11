@@ -7,6 +7,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 
@@ -379,6 +380,17 @@ func (device *ActiveDevice) LastDetach() (LastDetach, bool) {
 	device.mu.Lock()
 	defer device.mu.Unlock()
 	return device.lastDetach, device.lastDetach.Reason != ""
+}
+
+// withDetachReason is adbText, then "; " and the last detach reason while one stands (LastDetach).
+// adb's text stays first, so a tool that matches it still does. The reason is the daemon's own.
+// A line past the FAIL length cap (four hex digits) keeps adb's text alone.
+func (device *ActiveDevice) withDetachReason(adbText string) string {
+	last, detached := device.LastDetach()
+	if joined := adbText + "; " + last.Reason; detached && len(joined) <= math.MaxUint16 {
+		return joined
+	}
+	return adbText
 }
 
 // Current returns the bound device and true, or a zero value and false when none

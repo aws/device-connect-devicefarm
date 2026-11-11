@@ -48,9 +48,14 @@ func TestGivenEachLookupFailureWhenWordedThenTheReasonNamesTheStateAndOnlyADeadS
 		{name: "no endpoint yet", err: fmt.Errorf("remote access session %q %w (status PREPARING)", verdictARN, session.ErrNoEndpointYet),
 			wantReason: "the bridge can no longer read remote access session " + verdictARN +
 				": has no interactive endpoint yet; restart the bridge from a shell with working AWS credentials", wantDetach: true},
-		{name: "rejected credentials", err: &session.RequestRejectedError{Code: "ExpiredTokenException", Cause: errors.New("api error")},
+		{name: "expired credentials", err: &session.RequestRejectedError{Code: "ExpiredTokenException", Cause: errors.New("api error")},
+			wantReason: "the AWS credentials the bridge started with have expired, so it can no longer read remote access session " +
+				verdictARN + "; refresh the credentials, run 'devicefarm-connect bridge stop', start the bridge again from that " +
+				"shell with the same options, then run 'devicefarm-connect device add --session-arn " + verdictARN + "'",
+			wantDetach: true},
+		{name: "rejected credentials", err: &session.RequestRejectedError{Code: "UnrecognizedClientException", Cause: errors.New("api error")},
 			wantReason: "the bridge can no longer read remote access session " + verdictARN +
-				": request rejected (ExpiredTokenException); restart the bridge from a shell with working AWS credentials",
+				": request rejected (UnrecognizedClientException); restart the bridge from a shell with working AWS credentials",
 			wantDetach: true},
 		{name: "throttled", err: errors.New("api error ThrottlingException: slow down"),
 			wantReason: "the bridge could not look up remote access session " + verdictARN +
