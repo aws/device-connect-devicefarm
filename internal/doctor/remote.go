@@ -70,8 +70,8 @@ const (
 	// reverseHeldSummary replaces bridge.ErrNotifierSlotTaken's text, which names the mechanism.
 	reverseHeldSummary = "another client, or an earlier run of this client, still uses adb reverse on this session"
 	// adbHostVersionTail ends the broken-adb WARN hints.
-	adbHostVersionTail = " The remote adb server is 1.0.%[3]d, and a local adb on another version stops that server with its " +
-		"first command."
+	adbHostVersionTail = " The remote adb server is 1.0.%[3]d, and a local adb on another version cannot connect through " +
+		"the daemon."
 	// Broken-adb WARN format args: quoted `<adb> version` command, quoted doctor rerun, remote adb server's version.
 	adbFailedHint = "the local %[1]s failed or did not finish, so that adb's version is unknown. Run %[1]s by hand and fix what it " +
 		"reports, then rerun %[2]s." + adbHostVersionTail
@@ -390,9 +390,9 @@ func slotHeldHint(inputs Inputs) string {
 }
 
 // checkAdbVersionSkew compares every local adb's protocol version with the remote adb server's.
-// A local adb on another version sends host:kill on its first command, which the relay passes
-// on, and the remote server exits. The local step runs first under its own bound; the probe
-// takes what is left of the row's budget.
+// A local adb on another version gets its stop request refused, cannot start its own server on
+// the daemon's port, and fails every command. The local step runs first under its own bound;
+// the probe takes the rest of the row's budget.
 func checkAdbVersionSkew(ctx context.Context, inputs Inputs, state *runState) Result {
 	inputs = withSessionToCheck(inputs, state)
 	adbs, hiddenAdb := inspectLocalAdbs(ctx, runtime.GOOS)
@@ -451,7 +451,7 @@ func matchSummary(adbs []localAdb, hostVersion int) string {
 func hiddenAdbHint(hiddenAdb string, inputs Inputs) string {
 	return fmt.Sprintf("an adb exists at '%s', reached only through the current directory or a relative PATH entry, so it was not run "+
 		"and its version is unknown. Add that directory to PATH by its absolute path if you meant that adb, then rerun %s. A local adb "+
-		"on another version stops the remote adb server with its first command.", safeValue(hiddenAdb), doctorRerun(inputs))
+		"on another version cannot connect through the daemon.", safeValue(hiddenAdb), doctorRerun(inputs))
 }
 
 // platformToolsExample: a leading-comma clause naming a platform-tools release whose adb speaks
@@ -463,7 +463,7 @@ func platformToolsExample(hostVersion int) string {
 	return ""
 }
 
-// skewSummary names each mismatched adb, then what would stop the remote adb server.
+// skewSummary names each mismatched adb, then the failing command family.
 func skewSummary(mismatched []localAdb, named bool, hostVersion int) string {
 	labels := make([]string, len(mismatched))
 	for index, adb := range mismatched {
@@ -473,13 +473,13 @@ func skewSummary(mismatched []localAdb, named bool, hostVersion int) string {
 	if len(mismatched) > 1 {
 		verb = "differ"
 	}
-	return fmt.Sprintf("%s %s from the remote adb server (1.0.%d); the first %s would stop that server",
-		joinAnd(labels), verb, hostVersion, fatalCommand(mismatched, named))
+	return fmt.Sprintf("%s %s from the remote adb server (1.0.%d); every %s fails",
+		joinAnd(labels), verb, hostVersion, failingCommand(mismatched, named))
 }
 
-// fatalCommand is what would stop the remote adb server: any adb command for a lone PATH adb,
+// failingCommand is the command family a mismatch breaks: any adb command for a lone PATH adb,
 // else a command from the named adb or adbs.
-func fatalCommand(mismatched []localAdb, named bool) string {
+func failingCommand(mismatched []localAdb, named bool) string {
 	switch {
 	case !named:
 		return "adb command"
@@ -503,13 +503,15 @@ func skewHint(mismatched []localAdb, named bool, hostVersion int, inputs Inputs)
 		}
 	}
 	labels = append(labels, fmt.Sprintf("the remote adb server is 1.0.%d", hostVersion))
-	cause := fmt.Sprintf("%s, so the first %s would stop that server", joinAnd(labels), fatalCommand(mismatched, named))
+	command := failingCommand(mismatched, named)
+	cause := fmt.Sprintf("%s, so every %s fails: that adb tries to start its own adb server on the daemon's port and cannot",
+		joinAnd(labels), command)
 	fix := fmt.Sprintf("Install platform-tools whose adb is 1.0.%d%s, or put such an adb first on PATH", hostVersion,
 		platformToolsExample(hostVersion))
 	if sdkPath != "" {
 		if !named {
-			cause += fmt.Sprintf("; Android Studio runs the SDK's adb at '%s', so a mismatch there stops the remote adb server when "+
-				"Studio starts it", safeValue(sdkPath))
+			cause += fmt.Sprintf("; Android Studio runs the SDK's adb at '%s', so Studio lists no device while that adb is on "+
+				"another version", safeValue(sdkPath))
 		}
 		alsoPath := ""
 		if pathOnly {
@@ -518,8 +520,8 @@ func skewHint(mismatched []localAdb, named bool, hostVersion int, inputs Inputs)
 		fix = fmt.Sprintf("Update Android SDK Platform-Tools in Android Studio's SDK Manager to a release whose adb is 1.0.%d%s%s",
 			hostVersion, platformToolsExample(hostVersion), alsoPath)
 	}
-	return fmt.Sprintf("%s. %s, then rerun %s. Until then every %s through the daemon ends the remote adb server.",
-		cause, fix, doctorRerun(inputs), fatalCommand(mismatched, named))
+	return fmt.Sprintf("%s. %s, then rerun %s. Until then no %s reaches the device. The remote adb server is not affected.",
+		cause, fix, doctorRerun(inputs), command)
 }
 
 // brokenAdbHint: the failed command, its by-hand run, the rerun, the remote adb server's version.
@@ -542,7 +544,7 @@ func noAdbHint(hiddenAdb string, hostVersion int, inputs Inputs) string {
 	}
 	return fmt.Sprintf("adb was not found on PATH or in an Android SDK (%s), so the doctor could not check that its version "+
 		"matches the remote adb server (1.0.%d)%s. %s Android platform-tools whose adb is 1.0.%d%s, then add its directory to "+
-		"PATH and rerun %s. A local adb on another version stops the remote adb server with its first command.", sdkLocations,
+		"PATH and rerun %s. A local adb on another version cannot connect through the daemon.", sdkLocations,
 		hostVersion, hidden, action, hostVersion, platformToolsExample(hostVersion), doctorRerun(inputs))
 }
 
