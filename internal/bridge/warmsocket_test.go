@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -47,7 +48,13 @@ func warmParams() AttachmentParams {
 // newWarmDevice attaches a device whose keeper runs under policy against endpoint.
 func newWarmDevice(t *testing.T, endpoint string, policy WSRefreshPolicy) *ActiveDevice {
 	t.Helper()
-	featureOption := testFeatures(newTestDialer(testWait), policy, warmParams(), noopLogger())
+	return newWarmDeviceWith(t, endpoint, policy, warmParams())
+}
+
+// newWarmDeviceWith is newWarmDevice under params.
+func newWarmDeviceWith(t *testing.T, endpoint string, policy WSRefreshPolicy, params AttachmentParams) *ActiveDevice {
+	t.Helper()
+	featureOption := testFeatures(newTestDialer(testWait), policy, params, noopLogger())
 	device := NewActiveDevice(featureOption)
 	t.Cleanup(func() { device.Clear() })
 	require.True(t, device.Set(DeviceInfo{ARN: testDeviceARN, Endpoint: endpoint, Label: "Test Device - OS 1"}))
@@ -64,10 +71,18 @@ func newKeeper(device *ActiveDevice, dialer *WSDialer, rotation time.Duration) *
 func startKeeper(t *testing.T, endpoint string, rotation, retryDelay time.Duration) (*ActiveDevice,
 	*warmSocketKeeper) {
 	t.Helper()
+	return startPingingKeeper(t, endpoint, rotation, retryDelay, 0)
+}
+
+// startPingingKeeper is startKeeper pinging the parked socket every pingInterval; zero pings none.
+func startPingingKeeper(t *testing.T, endpoint string, rotation, retryDelay, pingInterval time.Duration) (
+	*ActiveDevice, *warmSocketKeeper) {
+	t.Helper()
 	device := NewActiveDevice()
 	require.True(t, device.Set(DeviceInfo{ARN: testDeviceARN, Endpoint: endpoint, Label: "Test Device - OS 1"}))
 	keeper := newKeeper(device, newTestDialer(testWait), rotation)
 	keeper.retryDelay = retryDelay
+	keeper.cfg.params.ParkPingInterval = pingInterval
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := make(chan struct{})
 	go func() {
@@ -162,11 +177,16 @@ func slowRefillMock(t *testing.T, refillReply string) *testsupport.SessionMockWS
 	})
 }
 
-// fakeWS is a WSConn whose reads a test feeds by hand.
+// fakeWS is a WSConn whose reads a test feeds by hand. It answers each Ping with a pong, unless
+// silent withholds it or pingErr fails the write.
 type fakeWS struct {
-	reads  chan receivedMessage
-	closed chan struct{}
-	once   sync.Once
+	reads   chan receivedMessage
+	closed  chan struct{}
+	once    sync.Once
+	silent  bool
+	pingErr error
+	pings   atomic.Int32
+	pongs   atomic.Uint64
 }
 
 func newFakeWS() *fakeWS {
@@ -174,6 +194,19 @@ func newFakeWS() *fakeWS {
 }
 
 func (ws *fakeWS) Send([]byte) error { return nil }
+
+func (ws *fakeWS) Ping() error {
+	ws.pings.Add(1)
+	if ws.pingErr != nil {
+		return ws.pingErr
+	}
+	if !ws.silent {
+		ws.pongs.Add(1)
+	}
+	return nil
+}
+
+func (ws *fakeWS) PongsSeen() uint64 { return ws.pongs.Load() }
 
 func (ws *fakeWS) Receive() ([]byte, error) {
 	select {
@@ -973,4 +1006,162 @@ func TestGivenAStaleSocketClosingWhenTheKeeperRotatesThenItsPreDialStepWaitsForT
 	case <-time.After(testWait):
 		t.Fatal("the pre-dial step never resumed after the close")
 	}
+}
+
+// parkPingInterval is short enough that a test sees several pings, wide enough that a loaded
+// machine answers one inside it.
+const parkPingInterval = 60 * time.Millisecond
+
+// pingingKeeperHolding is keeperHolding pinging its slot every parkPingInterval.
+func pingingKeeperHolding(socket *warmSocket) *warmSocketKeeper {
+	keeper := keeperHolding(socket)
+	keeper.cfg.params.ParkPingInterval = parkPingInterval
+	return keeper
+}
+
+// silentAfterPreSelect answers the pre-select of the first websocket it serves, then reads every
+// frame without answering a ping. Every later websocket closes at once, unanswered.
+func silentAfterPreSelect(t *testing.T) (endpoint string, accepted *atomic.Int32) {
+	t.Helper()
+	accepted = &atomic.Int32{}
+	endpoint = testsupport.NewMockWSS(t, func(ws *websocket.Conn) {
+		if accepted.Add(1) > 1 {
+			ws.Close()
+			return
+		}
+		if !answerPreSelect(ws) {
+			return
+		}
+		// Raw frame reads: x/net answers a ping only inside HandleFrame.
+		for {
+			frame, err := ws.NewFrameReader()
+			if err != nil {
+				return
+			}
+			io.Copy(io.Discard, frame)
+		}
+	})
+	return endpoint, accepted
+}
+
+func TestGivenAParkedSocketWhenThePingIntervalPassesThenItIsPingedAndStaysParked(t *testing.T) {
+	mock := switchReplyMock(t, statusOkay)
+	_, keeper := startPingingKeeper(t, mock.URL, warmInterval, warmInterval, parkPingInterval)
+	first := awaitPark(t, keeper)
+
+	waitFor(t, func() bool { return mock.PingsSeen() >= 3 }, "the parked socket was never pinged on its interval")
+
+	assert.Same(t, first, parkedSocket(keeper), "an answered ping keeps the socket parked")
+	assert.Equal(t, 1, mock.ConnectionsAccepted(), "answered pings cost no redial")
+}
+
+func TestGivenNoPingIntervalWhenASocketIsParkedThenNoPingIsSent(t *testing.T) {
+	mock := switchReplyMock(t, statusOkay)
+	_, keeper := startKeeper(t, mock.URL, warmInterval, warmInterval)
+	awaitPark(t, keeper)
+
+	time.Sleep(notifierSettle)
+
+	assert.Zero(t, mock.PingsSeen())
+}
+
+func TestGivenAParkedSocketWhosePongIsMissedWhenTheNextPingIsDueThenItClosesAndANewSocketParksWithNoTake(t *testing.T) {
+	// Through an attachment, so the ping interval travels in the attachment's params.
+	mock := switchReplyMock(t, statusOkay)
+	mock.SwallowPongs(true)
+	params := warmParams()
+	params.ParkPingInterval = parkPingInterval
+	device := newWarmDeviceWith(t, mock.URL, warmPolicy(warmInterval), params)
+	keeper := attachedFeatures(t, device).warmSockets()
+	first := awaitPark(t, keeper)
+
+	waitFor(t, func() bool {
+		replacement := parkedSocket(keeper)
+		return first.ended() && replacement != nil && replacement != first
+	}, "an unanswered ping never replaced the parked socket")
+
+	assert.GreaterOrEqual(t, mock.PingsSeen(), 1, "the drop follows an unanswered ping")
+	assert.GreaterOrEqual(t, mock.ConnectionsAccepted(), 2, "the replacement is a new dial")
+}
+
+func TestGivenAParkedSocketWhosePingWriteFailsWhenPingedThenItClosesAndTheTurnEndsAtOnce(t *testing.T) {
+	// The turn's end is where run closes the slot and dials the replacement.
+	raw := newFakeWS()
+	raw.pingErr = errors.New("broken pipe")
+	keeper := pingingKeeperHolding(parkSocket(raw, parkedSessionUUID, warmInterval))
+	started := time.Now()
+
+	nextTurn := keeper.waitForTurn(context.Background(), warmInterval)
+
+	assert.True(t, nextTurn)
+	assert.Less(t, time.Since(started), testWait, "the failed ping ends the turn, not the rotation")
+	assert.True(t, raw.isClosed(), "the socket whose ping failed closes")
+	assert.Nil(t, parkedSocket(keeper), "the slot empties")
+}
+
+func TestGivenTheServerClosedAParkedSocketWhenThePingIntervalPassesThenNoPingIsSentAndTheKeeperWaitsForTheRotation(t *testing.T) {
+	raw := newFakeWS()
+	socket := parkSocket(raw, parkedSessionUUID, warmInterval)
+	raw.reads <- receivedMessage{err: errors.New("EOF")}
+	require.Eventually(t, socket.ended, testWait, notifierPoll, "a server close must end the parked socket")
+	keeper := pingingKeeperHolding(socket)
+	started := time.Now()
+
+	keeper.waitForTurn(context.Background(), notifierSettle)
+
+	assert.GreaterOrEqual(t, time.Since(started), notifierSettle, "only the turn's own end ends the wait")
+	assert.Zero(t, raw.pings.Load(), "a socket the server closed is not pinged")
+	assert.Same(t, socket, parkedSocket(keeper), "the next take or rotation handles it")
+	assert.False(t, keeper.dropParked(socket, errPongMissed), "a socket the server closed is never dropped")
+	assert.False(t, raw.isClosed())
+}
+
+func TestGivenAMissedPongWhenTheReplacementsPreSelectIsUnansweredThenTheKeeperWaitsForTheRotation(t *testing.T) {
+	// The replacement meets a full pool's refusal: a close before any frame. The short retry delay
+	// must not apply.
+	endpoint, accepted := silentAfterPreSelect(t)
+	startPingingKeeper(t, endpoint, warmInterval, time.Millisecond, parkPingInterval)
+
+	waitFor(t, func() bool { return accepted.Load() == 2 }, "an unanswered ping never brought a replacement dial")
+	time.Sleep(notifierSettle)
+
+	assert.Equal(t, int32(2), accepted.Load(), "after the unanswered pre-select the keeper waits for the rotation")
+}
+
+func TestGivenASocketTakenBetweenTwoPingsWhenItsPongIsMissingThenTheTakenSocketIsNotClosed(t *testing.T) {
+	raw := newFakeWS()
+	raw.silent = true
+	socket := parkSocket(raw, parkedSessionUUID, warmInterval)
+	keeper := pingingKeeperHolding(socket)
+	require.False(t, keeper.pingParked(), "the first ping only marks the socket")
+
+	taken := keeper.take(context.Background())
+
+	require.Same(t, socket, taken)
+	assert.Equal(t, int32(1), raw.pings.Load(), "the take sends no ping")
+	assert.False(t, keeper.pingParked(), "an empty slot is not a missed pong")
+	assert.False(t, keeper.dropParked(socket, errPongMissed), "a drop leaves a taken socket alone")
+	assert.False(t, raw.isClosed(), "the taker owns the socket")
+}
+
+// pinglessWS hides fakeWS's pinger methods, so a parked socket over it is not a pinger.
+type pinglessWS struct {
+	ws *fakeWS
+}
+
+func (plain *pinglessWS) Send(data []byte) error   { return plain.ws.Send(data) }
+func (plain *pinglessWS) Receive() ([]byte, error) { return plain.ws.Receive() }
+func (plain *pinglessWS) Close() error             { return plain.ws.Close() }
+
+func TestGivenAParkedSocketThatCannotPingWhenTheIntervalPassesThenItWaitsForTheRotation(t *testing.T) {
+	raw := newFakeWS()
+	socket := parkSocket(&pinglessWS{ws: raw}, parkedSessionUUID, warmInterval)
+	keeper := pingingKeeperHolding(socket)
+
+	assert.False(t, keeper.pingParked())
+	assert.False(t, keeper.pingParked(), "a socket that cannot ping is never a missed pong")
+
+	assert.Zero(t, raw.pings.Load())
+	assert.False(t, raw.isClosed())
+	assert.Same(t, socket, parkedSocket(keeper))
 }

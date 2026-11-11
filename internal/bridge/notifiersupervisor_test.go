@@ -180,10 +180,18 @@ func runSupervisor(t *testing.T, mock *testsupport.ReverseMockWSS, params Attach
 func runSupervisorAt(t *testing.T, endpoint string, params AttachmentParams, logger *slog.Logger,
 	admittedPorts ...int) (*ActiveDevice, *notifierSupervisor, context.CancelFunc) {
 	t.Helper()
+	return runSettlingSupervisorAt(t, endpoint, params, logger, notifierSettledAfter, admittedPorts...)
+}
+
+// runSettlingSupervisorAt is runSupervisorAt with settledAfter in place of notifierSettledAfter.
+func runSettlingSupervisorAt(t *testing.T, endpoint string, params AttachmentParams, logger *slog.Logger,
+	settledAfter time.Duration, admittedPorts ...int) (*ActiveDevice, *notifierSupervisor, context.CancelFunc) {
+	t.Helper()
 	device := deviceAt(t, endpoint)
 	cfg := &featureConfig{dialer: newTestDialer(testWait), params: params, logger: logger}
 	supervisor := newNotifierSupervisor(device, cfg, testDeviceARN, nil, installedReverseRules(admittedPorts...),
 		&streamBudget{limit: params.MaxDeviceStreams})
+	supervisor.settledAfter = settledAfter
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go supervisor.run(ctx)
@@ -522,17 +530,34 @@ func TestGivenADroppedNotifierWhenItDiesThenItIsRedialedWithBackoff(t *testing.T
 		"a short-lived notifier must wait out its backoff before redialing")
 }
 
-func TestGivenALongLivedNotifierWhenItDropsThenItRedialsWithoutWaitingTheBackoff(t *testing.T) {
+func TestGivenANotifierThatServedPastTheSettledTimeWhenItDropsThenItRedialsWithoutWaitingTheBackoff(t *testing.T) {
 	mock := serverReverseMock(t)
 	// The backoff outlasts the whole test, so a redial inside it can only be the immediate one a
-	// notifier earns by serving longer than one heartbeat interval.
-	runSupervisor(t, mock, notifierParams(notifierKeepAlive, parkedBackoff))
+	// notifier earns by serving longer than the settled time.
+	runSettlingSupervisorAt(t, mock.URL, notifierParams(notifierKeepAlive, parkedBackoff), noopLogger(), notifierKeepAlive)
 	require.Eventually(t, func() bool { return mock.PingsSeen() >= 2 }, testWait, notifierPoll,
-		"the notifier must serve past one heartbeat interval")
+		"the notifier must serve past the settled time")
 
 	require.True(t, mock.DropNotifier())
 
 	awaitAccepts(t, mock, 2)
+}
+
+func TestGivenANotifierThatServedLongerThanOnePingIntervalButNotSettledWhenItDropsThenItWaitsTheBackoff(t *testing.T) {
+	// A notifier that dies after a few pings each time must not redial in a tight loop.
+	mock := serverReverseMock(t)
+	const backoff = 300 * time.Millisecond
+	runSupervisor(t, mock, notifierParams(notifierKeepAlive, backoff))
+	require.Eventually(t, func() bool { return mock.PingsSeen() >= 2 }, testWait, notifierPoll,
+		"the notifier must serve past one heartbeat interval")
+
+	dropTime := time.Now()
+	require.True(t, mock.DropNotifier())
+
+	awaitAccepts(t, mock, 2)
+	// The jitter band can shorten the wait.
+	assert.GreaterOrEqual(t, time.Since(dropTime), backoff*9/10,
+		"a notifier that served under the settled time waits out its backoff")
 }
 
 func TestGivenARefusedNotifierWhenRedialedRepeatedlyThenItRetriesUntilTheSlotFrees(t *testing.T) {

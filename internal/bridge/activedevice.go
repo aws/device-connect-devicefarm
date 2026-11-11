@@ -97,6 +97,9 @@ type AttachmentParams struct {
 	// reverse family. ListenPort is the daemon's own adb port, kept only for the reverse port screen.
 	ReverseEnabled bool
 	ListenPort     int
+
+	// ParkPingInterval is the parked adb websocket's ping cadence; zero sends no ping.
+	ParkPingInterval time.Duration
 }
 
 // featureConfig is what WithAttachmentFeatures stores: the ingredients of an

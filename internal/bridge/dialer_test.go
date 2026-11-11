@@ -524,3 +524,136 @@ func TestGivenAnUnreachableServerWhenDialedThenTheErrorIsNotUpgradeRefused(t *te
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, ErrUpgradeRefused, "a failed connect is not a refused upgrade")
 }
+
+// keepReceiving runs Receive until it fails, so pongs are read and counted. Cleanup closes
+// the websocket, which ends it.
+func keepReceiving(t *testing.T, websocketConn WSConn) {
+	t.Helper()
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		for {
+			if _, err := websocketConn.Receive(); err != nil {
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		websocketConn.Close()
+		<-ended
+	})
+}
+
+func TestGivenADialedWebsocketWhenPingedThenTheServerSeesOnePingFrameAndThePongIsCounted(t *testing.T) {
+	mock := testsupport.NewSessionEchoWSS(t)
+	websocketConn, err := newTestDialer(testTimeout).Dial(context.Background(), mock.URL, RouteAdb)
+	require.NoError(t, err)
+	keepReceiving(t, websocketConn)
+	pinging, ok := websocketConn.(pinger)
+	require.True(t, ok, "a dialed websocket can ping")
+
+	require.NoError(t, pinging.Ping())
+
+	waitFor(t, func() bool { return pinging.PongsSeen() == 1 }, "the server's pong was never counted")
+	assert.Equal(t, 1, mock.PingsSeen(), "one ping frame reaches the server")
+}
+
+func TestGivenAPongBetweenTwoMessagesWhenReceivedThenOnlyTheMessagesAreReturned(t *testing.T) {
+	frames := [][]byte{binaryFrame([]byte("one")), serverFrame(true, websocket.PongFrame, nil), binaryFrame([]byte("two"))}
+	websocketConn := &wsConn{conn: dialScriptedServer(t, frames, scriptedPayloadCap)}
+
+	first, err := websocketConn.Receive()
+	require.NoError(t, err)
+	second, err := websocketConn.Receive()
+	require.NoError(t, err)
+
+	assert.Equal(t, "one", string(first))
+	assert.Equal(t, "two", string(second), "the pong is not a message")
+	assert.Equal(t, uint64(1), websocketConn.PongsSeen())
+}
+
+func TestGivenAClosedWebsocketWhenPingedThenThePingFails(t *testing.T) {
+	mock := testsupport.NewSessionEchoWSS(t)
+	websocketConn, err := newTestDialer(testTimeout).Dial(context.Background(), mock.URL, RouteAdb)
+	require.NoError(t, err)
+	require.NoError(t, websocketConn.Close())
+
+	assert.Error(t, websocketConn.(pinger).Ping())
+}
+
+func TestGivenASendOlderThanTheWriteDeadlineWhenTheServerPingsThenThePongStillGoesOut(t *testing.T) {
+	// x/net writes the pong on its own, long after the last Send armed the deadline.
+	const writeDeadline = 50 * time.Millisecond
+	sent := make(chan struct{})
+	pongs := make(chan []byte, 1)
+	wssURL := testsupport.NewMockWSS(t, func(serverConn *websocket.Conn) {
+		var request []byte
+		if websocket.Message.Receive(serverConn, &request) != nil {
+			return
+		}
+		<-sent
+		pinging, err := serverConn.NewFrameWriter(websocket.PingFrame)
+		if err != nil {
+			return
+		}
+		pinging.Write([]byte("late"))
+		answer, err := serverConn.NewFrameReader()
+		if err == nil && answer.PayloadType() == websocket.PongFrame {
+			payload, _ := io.ReadAll(answer)
+			pongs <- payload
+		}
+		io.Copy(io.Discard, serverConn)
+	})
+	dialer := newTestDialer(testTimeout)
+	dialer.writeDeadline = writeDeadline
+	websocketConn, err := dialer.Dial(context.Background(), wssURL, RouteAdb)
+	require.NoError(t, err)
+	keepReceiving(t, websocketConn)
+	require.NoError(t, websocketConn.Send([]byte("request")))
+
+	time.Sleep(3 * writeDeadline)
+	close(sent)
+
+	assert.Equal(t, []byte("late"), await(t, pongs, "the pong"), "a pong after the send's deadline still goes out")
+}
+
+// handshakeOverPipe plays the server's side of the opening handshake on serverEnd, then reads
+// firstFrameBytes of the client's first frame and nothing more.
+func handshakeOverPipe(t *testing.T, serverEnd net.Conn, firstFrameBytes int) {
+	t.Helper()
+	go func() {
+		reader := bufio.NewReader(serverEnd)
+		request, err := http.ReadRequest(reader)
+		if err != nil {
+			return
+		}
+		acceptKey := sha1.Sum([]byte(request.Header.Get("Sec-WebSocket-Key") + websocketAcceptGUID))
+		fmt.Fprintf(serverEnd, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"+
+			"Sec-WebSocket-Accept: %s\r\n\r\n", base64.StdEncoding.EncodeToString(acceptKey[:]))
+		io.ReadFull(reader, make([]byte, firstFrameBytes))
+	}()
+}
+
+func TestGivenAPeerThatStopsReadingAfterOneSendWhenClosedThenCloseReturnsWithinTheWriteDeadline(t *testing.T) {
+	// A successful Send clears the write deadline; the close frame x/net writes must still be
+	// bounded. net.Pipe blocks every unread write, as a wedged peer does.
+	clientEnd, serverEnd := net.Pipe()
+	t.Cleanup(func() { clientEnd.Close(); serverEnd.Close() })
+	// One masked frame with a one-byte payload: 2 header bytes, 4 mask bytes, the payload.
+	handshakeOverPipe(t, serverEnd, 7)
+	config, err := websocket.NewConfig("ws://pipe.invalid/", wsOrigin)
+	require.NoError(t, err)
+	websocketConn, err := websocket.NewClient(config, clientEnd)
+	require.NoError(t, err)
+	conn := &wsConn{conn: websocketConn, writeDeadline: 100 * time.Millisecond}
+	require.NoError(t, conn.Send([]byte("x")))
+
+	closed := make(chan error, 1)
+	go func() { closed <- conn.Close() }()
+
+	select {
+	case <-closed:
+	case <-time.After(testWait):
+		t.Fatal("Close hung on the unread close frame")
+	}
+}

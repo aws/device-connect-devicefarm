@@ -233,7 +233,7 @@ func (mock *ReverseMockWSS) serve(ws *websocket.Conn) {
 		return
 	}
 
-	first, err := receive(ws)
+	first, err := receive(ws, nil)
 	if err != nil {
 		// The client hung up before its hello. A text frame does not land here: x/net's
 		// Message codec ignores the opcode on a []byte receive, so a text hello is refused
@@ -273,7 +273,7 @@ func (mock *ReverseMockWSS) serve(ws *websocket.Conn) {
 	}
 
 	for {
-		message, err := receive(ws)
+		message, err := receive(ws, nil)
 		if err != nil {
 			return
 		}

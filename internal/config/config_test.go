@@ -246,6 +246,8 @@ func TestGivenInvalidForwardReverseKnobsWhenValidatedThenRejected(t *testing.T) 
 			c.NotifierBackoffInitial = 10 * time.Second
 			c.NotifierBackoffMax = 9 * time.Second
 		}},
+		{name: "zero park ping interval", mutate: func(cfg *ProxyConfig) { cfg.ParkPingInterval = 0 }},
+		{name: "negative park ping interval", mutate: func(cfg *ProxyConfig) { cfg.ParkPingInterval = -time.Second }},
 	}
 
 	for _, tc := range tests {
@@ -292,6 +294,7 @@ func TestGivenNotifierEnvOverridesWhenReadFromEnvThenPositiveMillisWinElseFallba
 			assert.Equal(t, DefaultMaxDeviceStreams, cfg.MaxDeviceStreams)
 			assert.Equal(t, DefaultMaxForwardRules, cfg.MaxForwardRules)
 			assert.Equal(t, DefaultMaxReverseRules, cfg.MaxReverseRules)
+			assert.Equal(t, DefaultParkPingInterval, cfg.ParkPingInterval)
 		})
 	}
 }
@@ -303,6 +306,7 @@ func TestGivenEveryForwardReverseOverrideSetWhenReadFromEnvThenEachFieldTakesIts
 	t.Setenv(maxReverseRulesEnvVar, "5")
 	t.Setenv(notifierKeepAliveEnvVar, "800")
 	t.Setenv(notifierBackoffEnvVar, "50")
+	t.Setenv(parkPingEnvVar, "250")
 
 	cfg := Default().WithForwardReverseOverridesFromEnv()
 
@@ -312,6 +316,7 @@ func TestGivenEveryForwardReverseOverrideSetWhenReadFromEnvThenEachFieldTakesIts
 	assert.Equal(t, 5, cfg.MaxReverseRules)
 	assert.Equal(t, 800*time.Millisecond, cfg.NotifierKeepAlive)
 	assert.Equal(t, 50*time.Millisecond, cfg.NotifierBackoffInitial)
+	assert.Equal(t, 250*time.Millisecond, cfg.ParkPingInterval)
 	assert.Equal(t, DefaultNotifierBackoffMax, cfg.NotifierBackoffMax,
 		"the backoff override moves the initial delay only; the cap has no override")
 }

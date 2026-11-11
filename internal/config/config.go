@@ -33,6 +33,7 @@ const (
 	maxReverseRulesEnvVar    = "DEVICEFARM_CONNECT_MAX_REVERSE_RULES"
 	notifierKeepAliveEnvVar  = "DEVICEFARM_CONNECT_NOTIFIER_KEEPALIVE_MS"
 	notifierBackoffEnvVar    = "DEVICEFARM_CONNECT_NOTIFIER_BACKOFF_MS" // initial delay only; the cap has none
+	parkPingEnvVar           = "DEVICEFARM_CONNECT_PARK_PING_MS"
 )
 
 // Default flag values. 5037 matches adb's own default server port, so a plain
@@ -96,8 +97,14 @@ const (
 	// balancer drops a websocket idle for loadBalancerIdleTimeout. The websocket
 	// relay forwards no ping or pong. The remote access service evicts the
 	// longest-idle connection first. Only frames on that connection, either
-	// direction, reset its idle clock; an idle notifier sends none.
-	DefaultNotifierKeepAlive = 60 * time.Second
+	// direction, reset its idle clock; an idle notifier sends none. The same
+	// cadence finds a dead notifier: a run of unanswered PINGs closes it.
+	DefaultNotifierKeepAlive = 5 * time.Second
+
+	// Websocket ping cadence on the parked adb websocket. A pong missed by the
+	// next ping closes it and parks a new one. The websocket relay answers the
+	// ping itself, so a pong proves the path to the relay only.
+	DefaultParkPingInterval = 5 * time.Second
 
 	// Jittered redial backoff for a notifier that dropped while attached.
 	DefaultNotifierBackoffInitial = 1 * time.Second
@@ -177,6 +184,9 @@ type ProxyConfig struct {
 	NotifierBackoffInitial time.Duration
 	NotifierBackoffMax     time.Duration
 	ReverseEnabled         bool
+
+	// Ping cadence on the parked adb websocket, a fixed runtime constant.
+	ParkPingInterval time.Duration
 }
 
 // Default returns a ProxyConfig with the default values. The CLI binds cobra
@@ -201,6 +211,7 @@ func Default() ProxyConfig {
 		NotifierBackoffInitial:    DefaultNotifierBackoffInitial,
 		NotifierBackoffMax:        DefaultNotifierBackoffMax,
 		ReverseEnabled:            DefaultReverseEnabled,
+		ParkPingInterval:          DefaultParkPingInterval,
 	}
 }
 
@@ -279,6 +290,9 @@ func (c ProxyConfig) Validate() error {
 	if c.NotifierBackoffMax < c.NotifierBackoffInitial {
 		return fmt.Errorf("notifier backoff max %s must not be below the initial %s", c.NotifierBackoffMax, c.NotifierBackoffInitial)
 	}
+	if c.ParkPingInterval <= 0 {
+		return fmt.Errorf("park ping interval must be positive, got %s", c.ParkPingInterval)
+	}
 	return nil
 }
 
@@ -322,10 +336,10 @@ func (c ProxyConfig) WithRefreshOverridesFromEnv() ProxyConfig {
 	return c
 }
 
-// WithForwardReverseOverridesFromEnv returns a copy of c with the forward and
-// notifier knobs taken from the hidden env overrides. Each field falls back
-// independently; the backoff override moves the initial delay only. Only the
-// daemon body calls it.
+// WithForwardReverseOverridesFromEnv returns a copy of c with the forward,
+// notifier and park ping knobs taken from the hidden env overrides. Each field
+// falls back independently; the backoff override moves the initial delay only.
+// Only the daemon body calls it.
 func (c ProxyConfig) WithForwardReverseOverridesFromEnv() ProxyConfig {
 	c.DeviceStreamStatusTimeout = durationFromEnv(deviceStreamStatusEnvVar, c.DeviceStreamStatusTimeout)
 	c.MaxDeviceStreams = countFromEnv(maxDeviceStreamsEnvVar, c.MaxDeviceStreams)
@@ -333,6 +347,7 @@ func (c ProxyConfig) WithForwardReverseOverridesFromEnv() ProxyConfig {
 	c.MaxReverseRules = countFromEnv(maxReverseRulesEnvVar, c.MaxReverseRules)
 	c.NotifierKeepAlive = durationFromEnv(notifierKeepAliveEnvVar, c.NotifierKeepAlive)
 	c.NotifierBackoffInitial = durationFromEnv(notifierBackoffEnvVar, c.NotifierBackoffInitial)
+	c.ParkPingInterval = durationFromEnv(parkPingEnvVar, c.ParkPingInterval)
 	return c
 }
 
