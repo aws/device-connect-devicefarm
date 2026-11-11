@@ -132,13 +132,154 @@ func TestGivenNoCredentialsSeamWhenTheCheckRunsThenTheRealChainIsWalked(t *testi
 }
 
 func TestGivenNoSessionArnWhenTheSessionCheckRunsThenItSkipsNamingTheFlag(t *testing.T) {
+	tests := []struct {
+		name  string
+		state func() *runState
+	}{
+		{name: "no daemon", state: func() *runState { return &runState{} }},
+		{name: "a daemon with no device", state: func() *runState {
+			state := &runState{}
+			state.setDaemon(control.Response{OK: true, Port: 6000}, 42)
+			return state
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resolver := &fakeResolver{}
+
+			result := runRemote(t, Inputs{Resolver: resolver}, tc.state(), checkSession)
+
+			assert.Equal(t, Result{Status: Skip, Summary: "pass --session-arn to check the session, the device connection and adb versions"}, result)
+			assert.NotRegexp(t, `(local|aws|session|relay)\.[a-z-]+`, result.Summary, "no check id in a user row")
+			assert.Empty(t, resolver.arns, "no ARN, no call")
+		})
+	}
+}
+
+func TestGivenNoSessionArnAndOneAttachedDeviceWhenTheSessionCheckRunsThenItResolvesTheAttachedSessionAndNamesIt(t *testing.T) {
+	resolver := &fakeResolver{info: session.RemoteAccessInfo{Endpoint: testsupport.PresignedUnreachableEndpoint, Label: "Pixel 9 (OS 16)"}}
+	state := &runState{}
+	state.setDaemon(control.Response{OK: true, Port: 6000,
+		Devices: []control.AttachedDevice{{SessionARN: testSessionARN, Label: "Pixel 9 (OS 16)", Serial: "localhost:6000"}}}, 42)
+
+	result := runRemote(t, Inputs{Config: config.Default(), Resolver: resolver}, state, checkSession)
+
+	assert.Equal(t, []string{testSessionARN}, resolver.arns, "the attached session is the one resolved")
+	assert.Equal(t, Result{Status: Pass, Summary: "RUNNING: Pixel 9 (OS 16) (the session the daemon holds: " + testSessionARN + ")"}, result)
+	assert.Equal(t, testsupport.PresignedUnreachableEndpoint, state.endpoint, "the endpoint stays in the state for the relay rows")
+}
+
+func TestGivenNoSessionArnAndSeveralAttachedDevicesWhenTheSessionCheckRunsThenItSkipsWithTheCount(t *testing.T) {
 	resolver := &fakeResolver{}
+	state := &runState{}
+	state.setDaemon(control.Response{OK: true, Port: 6000, Devices: []control.AttachedDevice{
+		{SessionARN: testSessionARN, Label: "Pixel 9 (OS 16)"},
+		{SessionARN: testSessionARN + "1", Label: "Pixel 8 (OS 15)"}}}, 42)
 
-	result := runRemote(t, Inputs{Resolver: resolver}, &runState{}, checkSession)
+	result := runRemote(t, Inputs{Resolver: resolver}, state, checkSession)
 
-	assert.Equal(t, Result{Status: Skip, Summary: "pass --session-arn to check the session, the device connection and adb versions"}, result)
-	assert.NotRegexp(t, `(local|aws|session|relay)\.[a-z-]+`, result.Summary, "no check id in a user row")
-	assert.Empty(t, resolver.arns, "no ARN, no call")
+	assert.Equal(t, Result{Status: Skip, Summary: "the daemon holds 2 devices; pass --session-arn to pick the session to check"}, result)
+	assert.Empty(t, resolver.arns, "several devices, no call")
+}
+
+func TestGivenASessionArnAndAnotherAttachedSessionWhenTheSessionCheckRunsThenTheFlagIsResolved(t *testing.T) {
+	resolver := &fakeResolver{info: session.RemoteAccessInfo{Endpoint: testsupport.PresignedUnreachableEndpoint, Label: "Pixel 9 (OS 16)"}}
+	state := &runState{}
+	state.setDaemon(control.Response{OK: true, Port: 6000,
+		Devices: []control.AttachedDevice{{SessionARN: testSessionARN + "1", Label: "Pixel 8 (OS 15)"}}}, 42)
+
+	result := runRemote(t, Inputs{Config: config.Default(), SessionARN: testSessionARN, Resolver: resolver}, state, checkSession)
+
+	assert.Equal(t, []string{testSessionARN}, resolver.arns, "the flag wins over the attached session")
+	assert.Equal(t, Result{Status: Pass, Summary: "RUNNING: Pixel 9 (OS 16)"}, result, "a flagged session is not called the daemon's")
+}
+
+func TestGivenTheAttachedSessionDoesNotResolveFromThisShellWhenTheSessionCheckRunsThenItFailsWithTheHintForThatArn(t *testing.T) {
+	resolveErr := fmt.Errorf("GetRemoteAccessSession: %w", session.ErrSessionNotFound)
+	resolver := &fakeResolver{err: resolveErr}
+	state := &runState{}
+	state.setDaemon(control.Response{OK: true, Port: 6000,
+		Devices: []control.AttachedDevice{{SessionARN: testSessionARN, Label: "Pixel 9 (OS 16)"}}}, 42)
+	inputs := Inputs{Config: config.Default(), Resolver: resolver}
+
+	result := runRemote(t, inputs, state, checkSession)
+
+	effective := inputs
+	effective.SessionARN = testSessionARN
+	assert.Equal(t, Result{Status: Fail, Summary: resolveErr.Error(), Hint: sessionGoneHint(effective)}, result)
+	assert.Contains(t, result.Hint, testSessionARN, "the hint quotes the attached ARN")
+}
+
+func TestGivenAnAttachedArnWithControlCharactersWhenTheSummaryIsBuiltThenItStaysOnOneLine(t *testing.T) {
+	forgedARN := testSessionARN + "\n[PASS] forged: injected row\x1b[0m"
+	resolver := &fakeResolver{info: session.RemoteAccessInfo{Endpoint: testsupport.PresignedUnreachableEndpoint, Label: "Pixel 9 (OS 16)"}}
+	state := &runState{}
+	state.setDaemon(control.Response{OK: true, Port: 6000,
+		Devices: []control.AttachedDevice{{SessionARN: forgedARN, Label: "Pixel 9 (OS 16)"}}}, 42)
+
+	result := runRemote(t, Inputs{Config: config.Default(), Resolver: resolver}, state, checkSession)
+
+	assert.Equal(t, Pass, result.Status)
+	assert.NotContains(t, result.Summary, "\n", "a row is one line")
+	assert.NotContains(t, result.Summary, "\x1b", "no terminal control codes")
+	assert.Contains(t, result.Summary, testSessionARN+`\n[PASS] forged: injected row\x1b[0m`, "the ARN is shown escaped, not dropped")
+}
+
+func TestGivenTheAttachedSessionWhenARelayRowFailsThenTheRerunQuotesItsArn(t *testing.T) {
+	noProxy(t)
+	isolateLocalAdb(t) // the version row finds no adb and its WARN hint quotes the rerun
+	unreachable := func(*testing.T) (string, *bridge.WSDialer) {
+		return testsupport.PresignedUnreachableEndpoint, bridge.NewWSDialer(time.Second)
+	}
+	tests := []struct {
+		name       string
+		id         string
+		endpoint   func(t *testing.T) (string, *bridge.WSDialer)
+		wantStatus Status
+	}{
+		{name: "the session row fails", id: checkRelaySession, endpoint: unreachable, wantStatus: Fail},
+		{name: "the reattach row fails", id: checkReattach, endpoint: unreachable, wantStatus: Fail},
+		{name: "the version row warns with no adb", id: checkAdbVersion, wantStatus: Warn,
+			endpoint: func(t *testing.T) (string, *bridge.WSDialer) {
+				sessions, _, dialer := relayMock(t, testsupport.SessionMockConfig{
+					OnMessage: func(_ *testsupport.MockSession, data []byte) []byte {
+						if string(data) == "000chost:version" {
+							return []byte("OKAY00040029")
+						}
+						return data
+					},
+				})
+				return sessions.URL, dialer
+			}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			endpoint, dialer := tc.endpoint(t)
+			inputs, state := relayInputs(endpoint, dialer)
+			inputs.SessionARN = ""
+			state.sessionUUID = "11111111-2222-4333-8444-000000000001"
+			state.setDaemon(control.Response{OK: true, Port: 6000,
+				Devices: []control.AttachedDevice{{SessionARN: testSessionARN, Label: "Pixel 9 (OS 16)"}}}, 42)
+
+			result := runRemote(t, inputs, state, tc.id)
+
+			assert.Equal(t, tc.wantStatus, result.Status, result.Summary)
+			assert.Contains(t, result.Hint, "--session-arn "+testSessionARN, "the rerun quotes the attached session")
+		})
+	}
+}
+
+func TestGivenTheAttachedSessionAndReverseOnWhenTheReverseRowRunsThenItPassesWithNoProbe(t *testing.T) {
+	sessions, reverse, dialer := relayMock(t, answeringAdb("OKAY"))
+	inputs, state := relayInputs(sessions.URL, dialer)
+	inputs.SessionARN = ""
+	state.setDaemon(control.Response{OK: true, Port: 6000, ARN: testSessionARN, ReverseEnabled: true,
+		Devices: []control.AttachedDevice{{SessionARN: testSessionARN, Label: "Pixel 9 (OS 16)"}}}, 42)
+
+	result := runRemote(t, inputs, state, checkReverse)
+
+	assert.Equal(t, Result{Status: Pass, Summary: reverseOnSummary}, result)
+	assert.Zero(t, reverse.NotifiersAccepted(), "no probe beside a reverse-on daemon on the attached session")
 }
 
 func TestGivenAResolverWhenTheSessionCheckRunsThenTheRowFollowsTheResolverOutcome(t *testing.T) {

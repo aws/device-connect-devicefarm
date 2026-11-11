@@ -13,9 +13,10 @@ import (
 )
 
 // Inputs is what one run reads. Config is the listener config the daemon would start with;
-// local.listen-port renders a Validate failure as its FAIL. Empty SessionARN skips the session
-// and relay rows. Nil Credentials means session.ResolveCredentials, nil Resolver the real
-// client, nil Dialer one on Config.DialTimeout, nil Logger slog.Default.
+// local.listen-port renders a Validate failure as its FAIL. An empty SessionARN means the
+// session of the one device the running daemon holds; with no daemon, no device or several
+// devices the session and relay rows skip. Nil Credentials means session.ResolveCredentials,
+// nil Resolver the real client, nil Dialer one on Config.DialTimeout, nil Logger slog.Default.
 type Inputs struct {
 	Config      config.ProxyConfig
 	SessionARN  string
@@ -27,9 +28,23 @@ type Inputs struct {
 
 // Checks builds the table in run order. Later checks read what earlier ones store in runState.
 func Checks(inputs Inputs) []Check {
+	checks, _ := checksWithState(inputs)
+	return checks
+}
+
+// Diagnose builds the table, runs it, and records on the report the session the run checked.
+func Diagnose(ctx context.Context, inputs Inputs) Report {
+	checks, state := checksWithState(inputs)
+	report := Run(ctx, checks)
+	report.SessionARN, _, _ = sessionToCheck(inputs, state)
+	return report
+}
+
+// checksWithState builds the table and the run state its checks share.
+func checksWithState(inputs Inputs) ([]Check, *runState) {
 	inputs = withDefaults(inputs)
 	state := &runState{}
-	return append(localChecks(inputs, state), remoteChecks(inputs, state)...)
+	return append(localChecks(inputs, state), remoteChecks(inputs, state)...), state
 }
 
 // withDefaults fills the nil seams.

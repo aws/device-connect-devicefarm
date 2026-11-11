@@ -14,8 +14,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/report"
 	"github.com/aws/device-connect-devicefarm/internal/session"
+	"github.com/aws/device-connect-devicefarm/internal/testsupport"
 )
 
 // constantCheck answers result at once.
@@ -549,7 +551,7 @@ doctor: 0 of 4 categories passed, 4 not checked
 }
 
 func TestGivenMixedResultsWhenWrittenAsJSONThenOneCompactObjectCarriesEveryRow(t *testing.T) {
-	report := Report{Rows: []Row{
+	report := Report{SessionARN: "arn:aws:devicefarm:us-west-2:123456789012:session:a/b/0", Rows: []Row{
 		{ID: "local.runtime-dir", Title: "working directory", Category: CategoryLocal,
 			Result: Result{Status: Pass, Summary: "working directory /run/user/1000/devicefarm-connect is writable"}, Elapsed: 1500 * time.Microsecond},
 		{ID: "local.daemon", Title: "bridge daemon", Category: CategoryLocal, Needs: []string{"local.runtime-dir"},
@@ -563,7 +565,7 @@ func TestGivenMixedResultsWhenWrittenAsJSONThenOneCompactObjectCarriesEveryRow(t
 	}}
 	var out bytes.Buffer
 
-	require.NoError(t, WriteJSON(&out, report, "arn:aws:devicefarm:us-west-2:123456789012:session:a/b/0"))
+	require.NoError(t, WriteJSON(&out, report))
 
 	assert.Equal(t, `{"ok":false,"sessionArn":"arn:aws:devicefarm:us-west-2:123456789012:session:a/b/0",`+
 		`"checks":[`+
@@ -583,7 +585,7 @@ func TestGivenAFreshMachineAndNoSessionArnWhenWrittenAsJSONThenOkIsTrueAndTheSes
 	var out bytes.Buffer
 
 	report := Run(context.Background(), Checks(inputs))
-	require.NoError(t, WriteJSON(&out, report, ""))
+	require.NoError(t, WriteJSON(&out, report))
 
 	var decoded struct {
 		OK         bool   `json:"ok"`
@@ -607,4 +609,48 @@ func TestGivenAFreshMachineAndNoSessionArnWhenWrittenAsJSONThenOkIsTrueAndTheSes
 		"relay.reattach": "skip", "relay.reverse": "skip", "relay.adb-version": "skip"}, statuses,
 		"without a session the session and relay rows skip")
 	assert.Equal(t, map[string]int{"pass": 5, "warn": 0, "fail": 0, "skip": 5}, decoded.Summary)
+}
+
+func TestGivenARunningDaemonWithOneDeviceWhenDiagnosedWithNoSessionArnThenTheJsonReportNamesTheAttachedSession(t *testing.T) {
+	isolateLocalAdb(t) // the version row's local step finds no adb and warns at once
+	sessions, _, dialer := relayMock(t, testsupport.SessionMockConfig{
+		OnMessage: func(_ *testsupport.MockSession, data []byte) []byte {
+			if string(data) == "000chost:version" {
+				return []byte("OKAY00040029")
+			}
+			return []byte("OKAY")
+		},
+	})
+	inputs := localInputs(t)
+	fakeDaemon(t, control.Response{OK: true, Port: inputs.Config.ListenPort, ARN: testSessionARN, ReverseEnabled: true,
+		DeviceLabel: "Pixel 9 (OS 16)",
+		Devices:     []control.AttachedDevice{{SessionARN: testSessionARN, Label: "Pixel 9 (OS 16)", Serial: "localhost:5037"}}})
+	inputs.Credentials = func(context.Context) (session.CredentialSummary, error) {
+		return session.CredentialSummary{Source: "StaticCredentials"}, nil
+	}
+	inputs.Resolver = &fakeResolver{info: session.RemoteAccessInfo{Endpoint: sessions.URL, Label: "Pixel 9 (OS 16)"}}
+	inputs.Dialer = dialer
+	var out bytes.Buffer
+
+	results := Diagnose(context.Background(), inputs)
+	require.NoError(t, WriteJSON(&out, results))
+
+	assert.Equal(t, testSessionARN, results.SessionARN, "the report names the attached session the run checked")
+	assert.Contains(t, out.String(), `"sessionArn":"`+testSessionARN+`"`)
+	sessionRow := rowByID(t, results, "session.resolve")
+	assert.Equal(t, Pass, sessionRow.Status, sessionRow.Summary)
+	assert.Equal(t, "RUNNING: Pixel 9 (OS 16) (the session the daemon holds: "+testSessionARN+")", sessionRow.Summary)
+	assert.Zero(t, results.Failed(), "a healthy machine with an attached device fails nothing")
+}
+
+// rowByID finds the row named by id in results.
+func rowByID(t *testing.T, results Report, id string) Row {
+	t.Helper()
+	for _, row := range results.Rows {
+		if row.ID == id {
+			return row
+		}
+	}
+	t.Fatalf("no row %q", id)
+	return Row{}
 }
