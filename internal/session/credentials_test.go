@@ -5,11 +5,13 @@ package session
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -34,12 +36,26 @@ func TestGivenEnvironmentCredentialsWhenResolvedThenTheSummaryNamesTheSource(t *
 	assert.Equal(t, "EnvConfigCredentials", summary.Source)
 }
 
-func TestGivenAnEmptyCredentialChainWhenResolvedThenItFails(t *testing.T) {
+func TestGivenAnEmptyCredentialChainWhenResolvedThenItFailsAsNoCredentials(t *testing.T) {
 	noEnvCredentials(t)
 
 	_, err := ResolveCredentials(context.Background())
 
-	assert.Error(t, err)
+	assert.ErrorIs(t, err, ErrNoCredentials)
+}
+
+func TestGivenAnEmptyCredentialChainWhenASessionIsResolvedThenTheErrorIsNoCredentialsAndAddsNoWords(t *testing.T) {
+	noEnvCredentials(t)
+	t.Setenv("AWS_ENDPOINT_URL_DEVICE_FARM", closedEndpoint(t))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client, err := NewRemoteAccessClient(ctx, nil)
+	require.NoError(t, err)
+
+	_, err = client.GetSession(ctx, testSessionARN)
+
+	assert.ErrorIs(t, err, ErrNoCredentials)
+	assert.NotContains(t, err.Error(), ErrNoCredentials.Error(), "the provider's text reads alone")
 }
 
 func TestGivenACredentialProcessPrintingAKeyWhenItsOutputIsUnusableThenTheErrorHidesTheOutput(t *testing.T) {
@@ -55,6 +71,7 @@ func TestGivenACredentialProcessPrintingAKeyWhenItsOutputIsUnusableThenTheErrorH
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errCredentialProcessOutput)
+	assert.ErrorIs(t, err, ErrNoCredentials)
 	assert.NotContains(t, err.Error(), keyMarker, "the helper's output must not reach the caller")
 }
 
@@ -88,5 +105,22 @@ func TestGivenACredentialProcessPrintingAKeyWhenASessionIsResolvedThenTheErrorHi
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errCredentialProcessOutput)
+	assert.ErrorIs(t, err, ErrNoCredentials)
 	assert.NotContains(t, err.Error(), keyMarker, "the helper's output must not reach the caller")
+}
+
+func TestGivenAFailingProviderWhenRetrievedThenTheFailureIsNoCredentialsUnlessTheContextEnded(t *testing.T) {
+	providerFailure := errors.New("no EC2 IMDS role found")
+	marked := markedCredentials{provider: aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
+		return aws.Credentials{}, providerFailure
+	})}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, liveErr := marked.Retrieve(context.Background())
+	_, cancelledErr := marked.Retrieve(cancelled)
+
+	assert.ErrorIs(t, liveErr, ErrNoCredentials)
+	assert.Equal(t, providerFailure.Error(), liveErr.Error(), "the mark adds no words")
+	assert.NotErrorIs(t, cancelledErr, ErrNoCredentials, "an ended context is the caller's failure, not the chain's")
 }

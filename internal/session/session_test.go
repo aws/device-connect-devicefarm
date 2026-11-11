@@ -363,6 +363,7 @@ func TestGivenValidARNWhenSessionFetchedThenCallsThroughToTheAPI(t *testing.T) {
 
 	require.Error(t, err, "a call to a closed endpoint must surface as an error")
 	assert.Contains(t, err.Error(), "GetRemoteAccessSession", "the error must come from the API call, not client construction")
+	assert.NotErrorIs(t, err, ErrNoCredentials, "a connection failure is not a credentials failure")
 }
 
 func TestGivenAResponseWithAMalformedDateHeaderWhenSessionFetchedThenTheSDKWritesNothingToStderr(t *testing.T) {

@@ -46,17 +46,20 @@ type Request struct {
 }
 
 // Response is the daemon's reply. OK reports whether the operation succeeded;
-// Error carries the reason when it did not. DeviceLabel and Port describe the
-// daemon's resulting state so the CLI can print the listening line without a
-// second round trip. Devices is one entry per connected device; OpStatus and OpList both
-// fill it. An OpList reply carries no Port. OpStatus also fills ARN (the attached session)
-// and ReverseEnabled (--allow-adb-reverse was set). LastDetachReason and LastDetachAt say
-// why and when the daemon last detached a device on its own (a session gone or ended);
+// Error carries the reason when it did not. Fixes carries the remedies the daemon
+// knows (failure.Split); the CLI prints each as a fix line. DeviceLabel and Port
+// describe the daemon's resulting state so the CLI can print the listening line
+// without a second round trip. Devices is one entry per connected device; OpStatus
+// and OpList both fill it. An OpList reply carries no Port. OpStatus also fills ARN
+// (the attached session) and ReverseEnabled (--allow-adb-reverse was set).
+// LastDetachReason and LastDetachAt say why and when the daemon last detached a
+// device on its own (a session gone or ended);
 // OpStatus and OpList carry them while no device is attached, and a remove by the user
 // leaves them empty.
 type Response struct {
 	OK               bool             `json:"ok"`
 	Error            string           `json:"error,omitempty"`
+	Fixes            []string         `json:"fixes,omitempty"`
 	DeviceLabel      string           `json:"deviceLabel,omitempty"`
 	Port             int              `json:"port,omitempty"`
 	Devices          []AttachedDevice `json:"devices,omitempty"`

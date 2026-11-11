@@ -84,6 +84,9 @@ var (
 	// itself is bad (credentials, signature, token, ARN shape). RequestRejectedError carries the
 	// code. Throttles, 5xx and transport failures carry no sentinel.
 	ErrRequestRejected = errors.New("request rejected")
+	// ErrNoCredentials: the credential chain gave no credentials (none configured, or a provider
+	// such as SSO that can no longer refresh). The provider's text stays; this adds no words.
+	ErrNoCredentials = errors.New("no usable AWS credentials")
 )
 
 // RequestRejectedError is the ErrRequestRejected failure with the service's error code, for a
@@ -217,6 +220,9 @@ func loadConfig(ctx context.Context) (aws.Config, error) {
 	)
 	if err != nil {
 		return aws.Config{}, fmt.Errorf("load AWS config: %w", err)
+	}
+	if cfg.Credentials != nil {
+		cfg.Credentials = markedCredentials{provider: cfg.Credentials}
 	}
 	return cfg, nil
 }

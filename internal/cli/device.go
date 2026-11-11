@@ -84,7 +84,7 @@ func newDeviceListCommand(state *rootState) *cobra.Command {
 				return err
 			}
 			if !resp.OK {
-				return &failure.Explained{Problem: "could not list the devices", Cause: errors.New(resp.Error)}
+				return &failure.Explained{Problem: "could not list the devices", Cause: daemonRefusal(resp)}
 			}
 			stdout, now := cmd.OutOrStdout(), time.Now()
 			switch {
@@ -199,7 +199,7 @@ func newDeviceRemoveCommand(state *rootState) *cobra.Command {
 				return err
 			}
 			if !resp.OK {
-				return &failure.Explained{Problem: "could not detach the device", Cause: errors.New(resp.Error)}
+				return &failure.Explained{Problem: "could not detach the device", Cause: daemonRefusal(resp)}
 			}
 
 			cmd.Printf("Removed %s from the bridge\n", resp.DeviceLabel)

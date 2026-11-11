@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 )
 
@@ -63,6 +64,15 @@ func Write(writer io.Writer, program string, err error) {
 	for index := len(fixes) - 1; index >= 0; index-- {
 		fmt.Fprintf(writer, "  fix:   %s\n", fixes[index])
 	}
+}
+
+// Split returns err's one-line text without its fixes, and the fixes in Write's order, for a
+// channel that carries them apart. Wrapping the text in each fix with WithFix, in order,
+// rebuilds the fix lines.
+func Split(err error) (cause string, fixes []string) {
+	lines, fixes := unroll(err)
+	slices.Reverse(fixes)
+	return strings.Join(lines, ": "), fixes
 }
 
 // unroll walks the chain outermost first and splits it at each Explained. An
