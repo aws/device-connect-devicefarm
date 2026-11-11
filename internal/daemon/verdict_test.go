@@ -73,6 +73,12 @@ func TestGivenEachLookupFailureWhenWordedThenTheReasonNamesTheStateAndOnlyADeadS
 	}
 }
 
+func TestGivenTheSessionStoppingCloseWhenItsDetachReasonIsWordedThenTheCauseAndTheFixAreOneLine(t *testing.T) {
+	reason := sessionStoppingReason(verdictARN)
+
+	assert.Equal(t, "remote access session "+verdictARN+" is stopping; "+recoveryCommand, reason)
+}
+
 func TestGivenTheRefusalHandlerWhenTheSessionResolvesOrFailsThenTheVerdictCarriesTheEndpointOrTheReason(t *testing.T) {
 	client := newFakeClient(testEndpointRenewed, "Pixel 10 (OS 17)")
 	manager := newTestManagerWithClient(t, config.Default(), client)

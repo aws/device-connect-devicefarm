@@ -21,7 +21,15 @@ const (
 	// sessionEndedCloseCode is the server's close once a session can no longer be resumed, for
 	// example when the device side of the adb stream closes.
 	sessionEndedCloseCode = 4000
+	// sessionStoppingCloseCode is the websocket relay's close of a fresh adb or adbreverse
+	// websocket when the remote access session is stopping. The client never reads its reason.
+	sessionStoppingCloseCode = 4001
 )
+
+// IsSessionStopping reports whether err is the relay's session-stopping close.
+func IsSessionStopping(err error) bool {
+	return isCloseWithCode(err, sessionStoppingCloseCode)
+}
 
 // isCloseWithCode reports whether err is a peer close frame that carries code.
 func isCloseWithCode(err error, code int) bool {
@@ -258,6 +266,11 @@ func (c *adbConn) Receive() ([]byte, error) {
 			// teardown so the refresher dials nothing; it never waits on the seam a refresh holds.
 			if isCloseWithCode(err, sessionEndedCloseCode) {
 				c.logger.Debug("the server ended the adb session", "session", sessionUUID, "error", err)
+				c.Close()
+				return nil, err
+			}
+			// Also a fresh-session fallback's first read: the device goes, nothing is resumed.
+			if _, stopping := c.device.detachIfSessionStopping(c.arn, err); stopping {
 				c.Close()
 				return nil, err
 			}

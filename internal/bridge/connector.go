@@ -72,6 +72,10 @@ func openConnector(ctx context.Context, cfg *featureConfig, device *ActiveDevice
 	// it here, while the token is in hand, rather than trust every caller to scrub before logging.
 	// Returned as text, not wrapped, so the unscrubbed error cannot be reached through the chain.
 	if err := stream.awaitHandshake(timeout); err != nil {
+		// Keep only the code: the wire reason may echo the token.
+		if IsSessionStopping(err) {
+			return &wsCloseError{code: sessionStoppingCloseCode}
+		}
 		return fmt.Errorf("redeem the announced reverse connection: %s",
 			strings.ReplaceAll(err.Error(), token, "<token>"))
 	}

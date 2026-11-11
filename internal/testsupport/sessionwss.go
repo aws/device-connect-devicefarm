@@ -6,6 +6,7 @@ package testsupport
 import (
 	"cmp"
 	"crypto/tls"
+	"encoding/binary"
 	"fmt"
 	"regexp"
 	"sync"
@@ -193,6 +194,10 @@ type SessionMockWSS struct {
 	// newSessionRefusalsLeft is how many more fresh sessions are refused; negative is every one.
 	newSessionRefusalsLeft int
 	newSessionsRefused     int
+	// closeNewCode and closeNewReason close every later websocket after its first frame; zero code:
+	// off. See CloseNewConnections.
+	closeNewCode   int
+	closeNewReason string
 }
 
 // NewSessionMockWSS starts a session-aware mock /adb endpoint, torn down via t.Cleanup.
@@ -219,6 +224,15 @@ func (m *SessionMockWSS) RefuseNewSessions(count int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.newSessionRefusalsLeft = count
+}
+
+// CloseNewConnections closes every later websocket with closeCode and reason after its first frame
+// and before any reply, as the relay does for a stopping session. A zero
+// closeCode turns it off.
+func (m *SessionMockWSS) CloseNewConnections(closeCode int, reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.closeNewCode, m.closeNewReason = closeCode, reason
 }
 
 // NewSessionsRefused returns how many fresh sessions were refused with an ERROR frame.
@@ -310,6 +324,13 @@ func (m *SessionMockWSS) serve(ws *websocket.Conn) {
 	first, err := receive(ws)
 	if err != nil {
 		ws.Close()
+		return
+	}
+	m.mu.Lock()
+	closeCode, closeReason := m.closeNewCode, m.closeNewReason
+	m.mu.Unlock()
+	if closeCode != 0 {
+		closeWithCode(ws, closeCode, closeReason)
 		return
 	}
 
@@ -488,7 +509,7 @@ func (m *SessionMockWSS) EndSession(session *MockSession, closeCode int) {
 	session.closed = true
 	session.mu.Unlock()
 	m.drop(session.UUID)
-	closeWithCode(attached, closeCode)
+	closeWithCode(attached, closeCode, "")
 }
 
 // DropAttached closes the attached websocket with closeCode and keeps the session, as a relay
@@ -497,12 +518,13 @@ func (s *MockSession) DropAttached(closeCode int) {
 	s.mu.Lock()
 	attached := s.attached
 	s.mu.Unlock()
-	closeWithCode(attached, closeCode)
+	closeWithCode(attached, closeCode, "")
 }
 
-// closeWithCode sends a close frame carrying closeCode, then closes ws; NoCloseFrame sends none.
-// x/net's Close sends a second close frame; a client stops reading at the first. Nil is a no-op.
-func closeWithCode(ws *websocket.Conn, closeCode int) {
+// closeWithCode sends a close frame carrying closeCode and reason, then closes ws; NoCloseFrame
+// sends none. x/net's Close sends a second close frame; a client stops reading at the first. Nil
+// is a no-op.
+func closeWithCode(ws *websocket.Conn, closeCode int, reason string) {
 	if ws == nil {
 		return
 	}
@@ -510,7 +532,13 @@ func closeWithCode(ws *websocket.Conn, closeCode int) {
 		dropWithoutCloseFrame(ws)
 		return
 	}
-	ws.WriteClose(closeCode)
+	if reason == "" {
+		ws.WriteClose(closeCode)
+	} else if writer, err := ws.NewFrameWriter(websocket.CloseFrame); err == nil {
+		// WriteClose carries no reason. Callers pass one only before any other write.
+		_, _ = writer.Write(append(binary.BigEndian.AppendUint16(nil, uint16(closeCode)), reason...))
+		_ = writer.Close()
+	}
 	ws.Close()
 }
 
@@ -542,11 +570,11 @@ func (s *MockSession) takeOver(ws *websocket.Conn, cleanCutDelay time.Duration, 
 	if cleanCutDelay > 0 {
 		go func() {
 			time.Sleep(cleanCutDelay)
-			closeWithCode(superseded, closeCode)
+			closeWithCode(superseded, closeCode, "")
 		}()
 		return
 	}
-	closeWithCode(superseded, closeCode)
+	closeWithCode(superseded, closeCode, "")
 }
 
 // detach clears ws and arms the grace timer. A superseded websocket's detach is
