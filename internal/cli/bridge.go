@@ -13,6 +13,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/config"
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/failure"
+	"github.com/aws/device-connect-devicefarm/internal/report"
 )
 
 // newBridgeCommand groups the daemon-lifecycle subcommands under one parent:
@@ -121,28 +122,37 @@ func newBridgeStopCommand(state *rootState) *cobra.Command {
 }
 
 // newBridgeStatusCommand reports whether the daemon is running and how many devices
-// are attached; "device list" names them. It prints a human-readable line to stdout
-// (status output, not a log event).
+// are attached; "device list" names them. The report goes to stdout, as lines or
+// one --json object. It exits 0 in every bridge state (running, stopped, stale
+// pidfile).
 func newBridgeStatusCommand(state *rootState) *cobra.Command {
-	return &cobra.Command{
+	jsonView := false
+	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Report whether the bridge is running and how many devices are attached",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			stdout := cmd.OutOrStdout()
 			pid, running := state.newManager().Status()
-			if !running {
-				cmd.Println(config.BinaryName + " bridge is not running")
-				return nil
-			}
-
-			// The daemon is up; ask it over the control channel what is attached so
-			// status reflects live state, not just liveness.
-			resp, err := state.send(control.Request{Op: control.OpStatus})
-			if err != nil {
-				if errors.Is(err, errNotListening) {
-					cmd.Println(config.BinaryName + " bridge is not running")
-					return nil
+			var resp control.Response
+			var err error
+			if running {
+				// The daemon is up; ask it over the control channel what is attached so
+				// status reflects live state, not just liveness.
+				resp, err = state.send(control.Request{Op: control.OpStatus})
+				switch {
+				case errors.Is(err, errNotListening):
+					// A live pidfile over a dead socket reads as not running.
+					running = false
+				case err != nil:
+					return err
 				}
+			}
+			if jsonView {
+				return report.WriteJSON(stdout, bridgeStatusJSON(running, pid, resp))
+			}
+			if !running {
+				_, err = fmt.Fprintln(stdout, config.BinaryName+" bridge is not running")
 				return err
 			}
 			if len(resp.Devices) == 0 {
@@ -150,12 +160,35 @@ func newBridgeStatusCommand(state *rootState) *cobra.Command {
 				if note := lastDetachNote(resp, time.Now()); note != "" {
 					line += "; " + note
 				}
-				cmd.Println(line)
-			} else {
-				cmd.Printf("%s bridge is running (pid %d), %s attached; run 'device list' for details\n",
-					config.BinaryName, pid, countNoun(len(resp.Devices), "device"))
+				_, err = fmt.Fprintln(stdout, line)
+				return err
 			}
-			return nil
+			_, err = fmt.Fprintf(stdout, "%s bridge is running (pid %d), %s attached; run 'device list' for details\n",
+				config.BinaryName, pid, countNoun(len(resp.Devices), "device"))
+			return err
 		},
 	}
+	cmd.Flags().BoolVar(&jsonView, "json", false, "print one JSON object instead of the report line")
+	return cmd
+}
+
+// jsonBridgeStatus is the status --json shape. The running-only members are
+// pointers so a stopped bridge prints exactly {"running":false,"devices":[]},
+// while reverseEnabled still appears when it is false on a running one.
+type jsonBridgeStatus struct {
+	Running        bool                     `json:"running"`
+	PID            *int                     `json:"pid,omitempty"`
+	Port           *int                     `json:"port,omitempty"`
+	ReverseEnabled *bool                    `json:"reverseEnabled,omitempty"`
+	Devices        []control.AttachedDevice `json:"devices"`
+	LastDetach     jsonLastDetach           `json:"lastDetach,omitzero"`
+}
+
+func bridgeStatusJSON(running bool, pid int, resp control.Response) jsonBridgeStatus {
+	status := jsonBridgeStatus{Running: running, Devices: report.NonNil(resp.Devices)}
+	if running {
+		status.PID, status.Port, status.ReverseEnabled = &pid, &resp.Port, &resp.ReverseEnabled
+		status.LastDetach = jsonLastDetach{Reason: resp.LastDetachReason, At: resp.LastDetachAt}
+	}
+	return status
 }
