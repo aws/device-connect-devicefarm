@@ -262,7 +262,7 @@ func (m *DaemonManager) clearListenPort() error {
 	if occupant != portAdbServer {
 		return portError(occupant, bindErr, listenAddr, port)
 	}
-	// A concurrent start's daemon answers host:version once it holds a device. Never stop it.
+	// A concurrent start's daemon answers host:version too. Never stop it.
 	if _, running := m.pidFile.RunningPID(); running {
 		return errStartedMeanwhile
 	}

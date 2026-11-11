@@ -26,8 +26,9 @@
 //     OKAY and the 8 raw little-endian bytes of a uint64 transport id for
 //     host:tport:*, a bare OKAY for every other spelling (adb.cpp
 //     handle_host_request; adb.h TransportId).
-//   - host:version: the framed request and the reply parser, for a caller that
-//     asks an adb server its protocol version (adb.cpp handle_host_request).
+//   - host:version: the framed request, the reply parser, for a caller that
+//     asks an adb server its protocol version, and the daemon's fallback reply
+//     (adb.cpp handle_host_request; adb.h ADB_SERVER_VERSION).
 //   - host:kill: the framed request 'adb kill-server' sends (client/adb_client.cpp
 //     adb_kill_server).
 //

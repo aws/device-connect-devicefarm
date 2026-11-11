@@ -151,8 +151,9 @@ func (s *AdbProxyServer) Run(ctx context.Context) error {
 // request is answered from the local table and never dials at all. host:version, the device
 // lists and the features probe are answered from cached server replies. A device tracker gets
 // the current list, cached or empty, then is held and pushed the list at every attach and detach,
-// with or without a device (serveDeviceTracker). With no device, every other request gets the
-// close alone. While reverse is off, a reverse-family request gets a local FAIL and never dials
+// with or without a device (serveDeviceTracker). With no device, host:version gets the last
+// version a server reported and a device list is empty (answerServerQuery); every other request
+// gets the close alone. While reverse is off, a reverse-family request gets a local FAIL and never dials
 // either. With reverse on, a reverse-family request waits until the attachment's clear of the
 // server's reverse rules settles, or gets a local FAIL at the bound. While the server's notifier
 // slot is held elsewhere, it gets a local FAIL at once, on arrival or mid-wait. Every other
@@ -193,6 +194,10 @@ func (s *AdbProxyServer) handleConn(ctx context.Context, tcp net.Conn) {
 	// drops it, then waits unregistered.
 	if serveDeviceTracker(ctx, tcp, clientOpening, s.device, connLogger) {
 		connLogger.Debug("device tracker ended", "service", clientOpening.service)
+		return
+	}
+	if answerServerQuery(tcp, clientOpening, ok, s.device, connLogger) {
+		connLogger.Debug("answered the host request from the daemon's own state", "service", clientOpening.service)
 		return
 	}
 	if !ok {

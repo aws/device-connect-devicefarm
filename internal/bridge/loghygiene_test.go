@@ -61,7 +61,7 @@ func TestGivenAPresignedEndpointThatRefusesTheDialWhenEachSiteFailsThenTheLogCar
 				client, err := net.Dial("tcp", waitForAddr(t, server))
 				require.NoError(t, err)
 				t.Cleanup(func() { client.Close() })
-				_, err = client.Write([]byte("000chost:version"))
+				_, err = client.Write([]byte(relayedHostRequest))
 				require.NoError(t, err)
 				assertClosed(t, client, "a failed dial must close the client with nothing written")
 			}},
@@ -111,7 +111,7 @@ func TestGivenAPresignedEndpointThatRefusesTheDialWhenEachSiteFailsThenTheLogCar
 				stopped := make(chan error, 1)
 				go func() { stopped <- server.Run(ctx) }()
 				t.Cleanup(func() { cancel(); <-stopped })
-				assertClosed(t, sendOnly(t, waitForAddr(t, server), hostVersionRequest),
+				assertClosed(t, sendOnly(t, waitForAddr(t, server), hostDevicesRequest),
 					"a failed fetch must close the client with nothing written")
 			}},
 		{name: "warm socket keeper", failureLine: `msg="could not dial a warm websocket; retrying"`,

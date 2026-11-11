@@ -30,6 +30,15 @@ const (
 	trackDevicesLongRequest = "0014host:track-devices-l"
 	serverVersionReply      = "OKAY00040029"
 	testSerial              = "R3CN30ABCDE"
+	// anotherVersionReply and thirdVersionReply are servers on adb versions other than
+	// adbwire.AdbServerVersion.
+	anotherVersionReply = "OKAY00040027"
+	thirdVersionReply   = "OKAY00040028"
+	// fallbackVersionReply is the answer before any attachment has kept a version:
+	// adbwire.AdbServerVersion.
+	fallbackVersionReply = "OKAY00040029"
+	// emptyDeviceListReply is the answer to a device list with no device.
+	emptyDeviceListReply = "OKAY0000"
 )
 
 var (
@@ -311,6 +320,88 @@ func TestGivenADetachWhenTheDeviceAttachesAgainThenTheRepliesAreFetchedAgain(t *
 	assert.Equal(t, serverVersionReply, askHost(t, proxyAddress, hostVersionRequest))
 
 	assert.Equal(t, 2, mock.ConnectionsAccepted(), "the new attachment must fetch its own reply")
+}
+
+func TestGivenAServerOnAnotherAdbVersionWhenHostVersionIsAskedThenTheServersVersionAnswersFromOneFetch(t *testing.T) {
+	// An adb client kills a server whose version differs from its own, so the client must meet
+	// the remote server's version: the one the doctor's version check compares with.
+	proxyAddress, mock, _ := startHostReplyProxy(t, map[string]string{hostVersionRequest: anotherVersionReply})
+
+	for range 2 {
+		assert.Equal(t, anotherVersionReply, askHost(t, proxyAddress, hostVersionRequest), "the server's own version")
+	}
+
+	assert.Equal(t, 1, mock.ConnectionsAccepted(), "one fetch, then the copy answers")
+}
+
+func TestGivenADetachedDeviceWhenHostVersionIsAskedThenTheLastServersVersionAnswersWithNoDial(t *testing.T) {
+	proxyAddress, mock, device := startHostReplyProxy(t, map[string]string{hostVersionRequest: anotherVersionReply})
+	require.Equal(t, anotherVersionReply, askHost(t, proxyAddress, hostVersionRequest))
+	_, ok := device.Clear()
+	require.True(t, ok)
+
+	for range 2 {
+		assert.Equal(t, anotherVersionReply, askHost(t, proxyAddress, hostVersionRequest),
+			"the version the last attachment's server reported")
+	}
+
+	assert.Equal(t, 1, mock.ConnectionsAccepted(), "nothing is dialed with no device")
+}
+
+func TestGivenABridgeThatNeverHeldADeviceWhenHostVersionIsAskedThenTheFallbackVersionAnswers(t *testing.T) {
+	proxyAddress, _ := runProxy(t, NewActiveDevice(), testPolicy())
+
+	assert.Equal(t, fallbackVersionReply, askHost(t, proxyAddress, hostVersionRequest))
+}
+
+func TestGivenAnAttachPrefetchAloneWhenTheDeviceDetachesThenTheVersionItKeptAnswers(t *testing.T) {
+	// No client asks while attached: the copy the attach itself fetched is what the detach keeps.
+	mock := hostReplyMock(t, map[string]string{hostVersionRequest: anotherVersionReply})
+	device := attachPrefetching(t, newTestDialer(testWait), mock.URL, noopLogger())
+	waitFor(t, func() bool {
+		features, _, _ := device.snapshot()
+		return features != nil && features.hostReplies.kept(hostVersionRequest) != nil
+	}, "the attach never kept the server's version")
+	proxyAddress, _ := runProxy(t, device, testPolicy())
+	_, ok := device.Clear()
+	require.True(t, ok)
+
+	assert.Equal(t, anotherVersionReply, askHost(t, proxyAddress, hostVersionRequest))
+}
+
+func TestGivenTwoAttachmentsWhenTheSecondDetachesThenItsServersVersionAnswers(t *testing.T) {
+	proxyAddress, _, device := startHostReplyProxy(t, map[string]string{hostVersionRequest: anotherVersionReply})
+	require.Equal(t, anotherVersionReply, askHost(t, proxyAddress, hostVersionRequest))
+	_, ok := device.Clear()
+	require.True(t, ok)
+	second := hostReplyMock(t, map[string]string{hostVersionRequest: thirdVersionReply})
+	require.True(t, device.Set(DeviceInfo{ARN: "arn:test", Endpoint: second.URL, Label: "Test Device - OS 1"}))
+	require.Equal(t, thirdVersionReply, askHost(t, proxyAddress, hostVersionRequest))
+	_, ok = device.Clear()
+	require.True(t, ok)
+
+	assert.Equal(t, thirdVersionReply, askHost(t, proxyAddress, hostVersionRequest), "the last attachment's, not the first's")
+}
+
+func TestGivenAnAttachmentThatKeptNoVersionWhenItDetachesThenTheFallbackVersionAnswers(t *testing.T) {
+	// A refused reply is relayed, never kept, so the detach has no copy to carry over.
+	refused := "FAIL0006closed"
+	proxyAddress, _, device := startHostReplyProxy(t, map[string]string{hostVersionRequest: refused})
+	require.Equal(t, refused, string(readN(t, sendOnly(t, proxyAddress, hostVersionRequest), len(refused))))
+	_, ok := device.Clear()
+	require.True(t, ok)
+
+	assert.Equal(t, fallbackVersionReply, askHost(t, proxyAddress, hostVersionRequest))
+}
+
+func TestGivenNoDeviceWhenADeviceListIsAskedThenTheEmptyListAnswers(t *testing.T) {
+	for name, request := range map[string]string{"short": hostDevicesRequest, "long": hostDevicesLongRequest} {
+		t.Run(name, func(t *testing.T) {
+			proxyAddress, _ := runProxy(t, NewActiveDevice(), testPolicy())
+
+			assert.Equal(t, emptyDeviceListReply, askHost(t, proxyAddress, request))
+		})
+	}
 }
 
 func TestGivenAServerThatRefusesAHostQueryWhenAskedThenTheRequestIsRelayedEveryTime(t *testing.T) {
