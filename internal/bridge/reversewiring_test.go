@@ -74,8 +74,14 @@ type reverseProxy struct {
 
 func startReverseProxy(t *testing.T, behavior reverseMockBehavior) *reverseProxy {
 	t.Helper()
+	return startReverseProxyWith(t, behavior, forwardingParams())
+}
+
+// startReverseProxyWith is startReverseProxy with the attachment under params.
+func startReverseProxyWith(t *testing.T, behavior reverseMockBehavior, params AttachmentParams) *reverseProxy {
+	t.Helper()
 	mock := testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{OnMessage: behavior.answer})
-	device := newForwardingDevice(t)
+	device := newAttachedDevice(t, params)
 	require.True(t, device.Set(DeviceInfo{ARN: "arn:test", Endpoint: mock.URL, Label: "Test Device - OS 1"}))
 	address, _ := runProxy(t, device, testPolicy())
 	return &reverseProxy{address: address, mock: mock, device: device}
@@ -146,16 +152,10 @@ func reverseInstall(port int) string { return fmt.Sprintf("reverse:forward:tcp:%
 func TestGivenAnInstallThroughTheSeamWhenAnOpenIsScreenedThenOnlyThePortItNamedIsAdmitted(t *testing.T) {
 	// The seam feeds the table and the attachment hands it to the supervisor; a daemon port is set so
 	// the screen reaches the rule check.
-	params := forwardingParams()
-	params.ListenPort = notifierListenPort
-	mock := testsupport.NewSessionMockWSS(t, testsupport.SessionMockConfig{OnMessage: reverseMockBehavior{}.answer})
-	device := newAttachedDevice(t, params)
-	require.True(t, device.Set(DeviceInfo{ARN: "arn:test", Endpoint: mock.URL, Label: "Test Device - OS 1"}))
-	address, _ := runProxy(t, device, testPolicy())
-	proxy := &reverseProxy{address: address, mock: mock, device: device}
+	proxy := startListenPortProxy(t)
 	require.Equal(t, "OKAYOKAY", proxy.command(t, "reverse:forward:tcp:1;tcp:9001"))
 
-	supervisor := attachedFeatures(t, device).notifier
+	supervisor := attachedFeatures(t, proxy.device).notifier
 
 	assert.Empty(t, supervisor.refuseCustomerPort(9001), "the port the seam read is admitted")
 	assert.Equal(t, "no reverse rule names it", supervisor.refuseCustomerPort(9002))
@@ -287,4 +287,74 @@ func TestGivenRepeatedReverseRefusalsWhenLoggedThenOneWarnNamesTheLimit(t *testi
 	warn := `level=WARN msg="refused a reverse rule: the attachment holds its limit"`
 	assert.Equal(t, 1, strings.Count(logs.String(), warn), "refusals inside one interval must log once")
 	assert.Contains(t, logs.String(), "maxReverseRules=2", "the Warn must name the limit")
+}
+
+// startListenPortProxy is startReverseProxy with ListenPort set to notifierListenPort.
+func startListenPortProxy(t *testing.T) *reverseProxy {
+	t.Helper()
+	params := forwardingParams()
+	params.ListenPort = notifierListenPort
+	return startReverseProxyWith(t, reverseMockBehavior{}, params)
+}
+
+func TestGivenAReverseInstallOntoTheListenPortWhenScreenedThenItIsRefusedWithTheListenPortTextAndNothingIsDialed(t *testing.T) {
+	// The literal, not the constant: adb prints this after "error: ".
+	want := "FAIL003bcannot reverse to tcp:5037: the bridge listens on that port"
+	tests := []struct {
+		name        string
+		service     string
+		selectFirst bool
+		fullTable   bool
+	}{
+		{name: "an install behind a select", service: "reverse:forward:tcp:1;tcp:5037", selectFirst: true},
+		{name: "a norebind install", service: "reverse:forward:norebind:tcp:1;tcp:5037", selectFirst: true},
+		{name: "an install alone under a serial prefix", service: "host-serial:dev-1:reverse:forward:tcp:1;tcp:5037"},
+		{name: "a new spec at a full table, refused before the count", service: "reverse:forward:tcp:9999;tcp:5037",
+			selectFirst: true, fullTable: true},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			proxy := startListenPortProxy(t)
+			if testCase.fullTable {
+				proxy.fill(t)
+			}
+			dials := proxy.mock.ConnectionsAccepted()
+
+			reply := proxy.exchange(t, testCase.service, testCase.selectFirst)
+
+			assert.Equal(t, want, reply)
+			assert.Equal(t, dials, proxy.mock.ConnectionsAccepted(), "a refused install must not dial")
+			if !testCase.fullTable {
+				assert.False(t, attachedFeatures(t, proxy.device).reverseRules.holdsAny(), "a refused install holds no rule slot")
+			}
+		})
+	}
+}
+
+func TestGivenAReverseRequestThatIsNoInstallOntoTheListenPortWhenScreenedThenItIsRelayed(t *testing.T) {
+	for name, service := range map[string]string{
+		"an install onto another port":    "reverse:forward:tcp:1;tcp:9000",
+		"a kill naming the port's spec":   "reverse:killforward:tcp:5037",
+		"a device spec that is that port": "reverse:forward:tcp:5037;tcp:9000",
+	} {
+		t.Run(name, func(t *testing.T) {
+			proxy := startListenPortProxy(t)
+
+			assert.Equal(t, "OKAYOKAY", proxy.command(t, service))
+		})
+	}
+}
+
+func TestGivenAnUnknownListenPortWhenAReverseInstallIsScreenedThenItIsNotRefusedHere(t *testing.T) {
+	// A spec with no port parses to port 0, the unknown listen port's value.
+	for name, service := range map[string]string{
+		"the default adb port": "reverse:forward:tcp:1;tcp:5037",
+		"a spec with no port":  "reverse:forward:tcp:1;localabstract:target",
+	} {
+		t.Run(name, func(t *testing.T) {
+			proxy := startReverseProxy(t, reverseMockBehavior{})
+
+			assert.Equal(t, "OKAYOKAY", proxy.command(t, service))
+		})
+	}
 }
