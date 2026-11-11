@@ -439,6 +439,10 @@ build follows in a later release. If you build the Windows binary yourself:
   device. It gets the list again at every `device add`, `device remove` and session end, and nothing in
   between. It ends when its client closes or writes to it, when the bridge stops, when a newly attached
   device's list cannot be copied, or when the client does not read a push in time.
+- With no matching device attached, `adb wait-for-device` waits and returns when you attach one,
+  `adb wait-for-disconnect` returns at once, and a wait for another state, such as `adb wait-for-recovery`,
+  never returns. With a matching device attached, the device's adb server answers them. If that device
+  detaches during the wait, the command fails with a protocol error; run it again.
 
 ## Security notes
 
