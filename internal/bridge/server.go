@@ -155,7 +155,8 @@ func (s *AdbProxyServer) Run(ctx context.Context) error {
 // lists and the features probe are answered from cached server replies. A device tracker gets
 // the current list, cached or empty, then is held and pushed the list at every attach and detach,
 // with or without a device (serveDeviceTracker). With no device, host:version gets the last
-// version a server reported and a device list is empty (answerServerQuery).
+// version a server reported and a device list is empty; the bridge identity request gets the
+// daemon's pid with or without a device (answerServerQuery).
 // A wait-for request that names no attached
 // device is answered and held until one it names attaches (serveWaitFor). Another request that
 // names no attached device, and any other request with no device, gets adb's FAIL for its

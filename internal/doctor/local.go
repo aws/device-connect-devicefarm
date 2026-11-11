@@ -38,9 +38,9 @@ const (
 	localTimeout = 2 * time.Second
 	// daemonTimeout fits the control client's dial plus request timeouts.
 	daemonTimeout = 15 * time.Second
-	// listenPortTimeout covers one bind plus one occupant round trip.
+	// listenPortTimeout covers one bind plus the two occupant round trips (identity, then version).
 	listenPortTimeout = 5 * time.Second
-	// occupantReplyTimeout bounds the host:version exchange with whatever holds the port.
+	// occupantReplyTimeout bounds each exchange with whatever holds the port.
 	occupantReplyTimeout = time.Second
 	// maxControlSocketPath is the longest socket path every supported OS binds; macOS sun_path
 	// is 104 bytes with the NUL, Linux 108.
@@ -393,9 +393,10 @@ func notAttachedHint(reply control.Response, askedARN string) string {
 
 // checkListenPortFree binds the listen address once and frees it; a running daemon on the port
 // passes with no bind. A bind refused for want of permission fails at once. When a local socket
-// holds the port (daemon.HolderMayAnswer), one host:version tells an adb server from any other
-// occupant; otherwise, or with no answer, the bind error itself picks the hint. An adb server is
-// a WARN: bridge start stops it, the doctor never does.
+// holds the port (daemon.HolderMayAnswer), the bridge identity request, then one host:version,
+// tell another bridge, an adb server and any other occupant apart; otherwise, or with no answer,
+// the bind error itself picks the hint. Another bridge is a FAIL: no command here stops it. An
+// adb server is a WARN: bridge start stops it, the doctor never does.
 func checkListenPortFree(inputs Inputs, state *runState) Result {
 	cfg := inputs.Config
 	if err := cfg.Validate(); err != nil {
@@ -420,8 +421,15 @@ func checkListenPortFree(inputs Inputs, state *runState) Result {
 	}
 	summary, hint := bindErrorHint(err, runtime.GOOS, cfg.ListenAddr, cfg.ListenPort)
 	if daemon.HolderMayAnswer(err, runtime.GOOS) {
-		version, connected, adbServer := daemon.ProbeOccupant(daemon.OccupantAddress(cfg.ListenAddr, cfg.ListenPort), occupantReplyTimeout)
-		if adbServer {
+		occupantAddress := daemon.OccupantAddress(cfg.ListenAddr, cfg.ListenPort)
+		pid, isBridge, identityRefused := daemon.ProbeBridge(occupantAddress, occupantReplyTimeout)
+		if isBridge {
+			return Result{Status: Fail,
+				Summary: fmt.Sprintf("another %s bridge (pid %d) is listening on %s", config.BinaryName, pid, safeValue(address)),
+				Hint:    daemon.BridgeHoldsPortText(safeValue(cfg.ListenAddr), cfg.ListenPort, pid)}
+		}
+		version, connected, adbServer := daemon.ProbeOccupant(occupantAddress, occupantReplyTimeout)
+		if adbServer && identityRefused {
 			return Result{Status: Warn, Summary: fmt.Sprintf("an adb server (version %d) is listening on %s", version, safeValue(address)),
 				Hint: adbServerHint(safeValue(cfg.ListenAddr), cfg.ListenPort)}
 		}
