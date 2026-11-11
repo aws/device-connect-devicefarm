@@ -351,8 +351,8 @@ func TestGivenRunningDaemonWithDeviceWhenListDevicesInvokedWithListThenPrintsOne
 	out, err := execRoot(t, "device", "list", "--list")
 
 	require.NoError(t, err)
-	assert.Equal(t, "arn:aws:devicefarm:us-west-2:1:session:a/b/0\tGoogle Pixel 9 (OS 16)\tserial R3CN30ABCDE\t"+
-		"attached 12 minutes ago\tsession started 25 minutes ago\tsession expires in 2 hours 5 minutes\n", out.String())
+	assert.Equal(t, "arn:aws:devicefarm:us-west-2:1:session:a/b/0\tGoogle Pixel 9 (OS 16)\tR3CN30ABCDE\t"+
+		"12 minutes ago\t25 minutes ago\tin 2 hours 5 minutes\n", out.String())
 }
 
 func TestGivenAStdoutThatRefusesWritesWhenListDevicesInvokedThenEveryViewReturnsTheWriteError(t *testing.T) {
@@ -422,7 +422,19 @@ func TestGivenNoBridgeWhenListDevicesInvokedThenStartsTheBridge(t *testing.T) {
 	assert.Contains(t, out.String(), "* bridge not running; starting it now")
 }
 
-func TestGivenRunningDaemonWithDevicesWhenStatusInvokedThenReportsTheCountNotTheLabels(t *testing.T) {
+// statusRoot runs `bridge status` with the given flags, stdout and stderr
+// captured apart.
+func statusRoot(t *testing.T, flags ...string) (stdout, stderr *bytes.Buffer, err error) {
+	t.Helper()
+	root := newRootCommand()
+	stdout, stderr = &bytes.Buffer{}, &bytes.Buffer{}
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.SetArgs(append([]string{"bridge", "status"}, flags...))
+	return stdout, stderr, root.Execute()
+}
+
+func TestGivenRunningDaemonWithDevicesWhenStatusInvokedThenTheCountLineIsOnStdoutAndStderrIsEmpty(t *testing.T) {
 	pixel := control.AttachedDevice{SessionARN: "arn:aws:devicefarm:us-west-2:1:session:a/b/0", Label: "Google Pixel 8 (OS 15)"}
 	tests := []struct {
 		name    string
@@ -439,36 +451,117 @@ func TestGivenRunningDaemonWithDevicesWhenStatusInvokedThenReportsTheCountNotThe
 				return control.Response{OK: true, DeviceLabel: pixel.Label, ARN: pixel.SessionARN, Devices: tc.devices}
 			})
 
-			out, err := execRoot(t, "bridge", "status")
+			stdout, stderr, err := statusRoot(t)
 
 			require.NoError(t, err)
 			assert.Equal(t, fmt.Sprintf("devicefarm-connect bridge is running (pid %d), %s; run 'device list' for details\n",
-				os.Getpid(), tc.want), out.String())
+				os.Getpid(), tc.want), stdout.String())
+			assert.Empty(t, stderr.String())
 		})
 	}
 }
 
-func TestGivenRunningDaemonWithoutDeviceWhenStatusInvokedThenReportsNoDevice(t *testing.T) {
+func TestGivenRunningDaemonWithoutDeviceWhenStatusInvokedThenTheNoDeviceLineAndNoteAreOnStdout(t *testing.T) {
+	detachedAt := time.Now().Add(-42 * time.Second)
 	fakeDaemon(t, func(control.Request) control.Response {
-		return control.Response{OK: true}
+		return control.Response{OK: true, LastDetachReason: "the session has ended", LastDetachAt: detachedAt}
 	})
 
-	out, err := execRoot(t, "bridge", "status")
+	stdout, stderr, err := statusRoot(t)
 
 	require.NoError(t, err)
 	// Literal on purpose: a changed BinaryName must fail here.
-	assert.Contains(t, out.String(), "devicefarm-connect bridge is running (pid ")
-	assert.Contains(t, out.String(), "no device attached")
+	assert.Contains(t, stdout.String(), "devicefarm-connect bridge is running (pid ")
+	assert.Contains(t, stdout.String(), "no device attached; the last device detached")
+	assert.Contains(t, stdout.String(), "the session has ended")
+	assert.Empty(t, stderr.String())
 }
 
-func TestGivenPidfileButNoControlSocketWhenStatusInvokedThenReportsNotRunning(t *testing.T) {
+func TestGivenPidfileButNoControlSocketWhenStatusInvokedThenNotRunningIsOnStdout(t *testing.T) {
 	// Pidfile says running, no socket bound: status reports not running, no error.
 	fakeRuntimePaths(t)
 
-	out, err := execRoot(t, "bridge", "status")
+	stdout, stderr, err := statusRoot(t)
 
 	require.NoError(t, err)
-	assert.Equal(t, config.BinaryName+" bridge is not running\n", out.String())
+	assert.Equal(t, config.BinaryName+" bridge is not running\n", stdout.String())
+	assert.Empty(t, stderr.String())
+}
+
+func TestGivenRunningDaemonWhenStatusInvokedWithJSONThenOneObjectCarriesRunningPidPortReverseAndDevices(t *testing.T) {
+	pixel := control.AttachedDevice{SessionARN: "arn:aws:devicefarm:us-west-2:1:session:a/b/0", Label: "Google Pixel 8 (OS 15)"}
+	fakeDaemon(t, func(control.Request) control.Response {
+		return control.Response{OK: true, Port: 5037, ReverseEnabled: false, Devices: []control.AttachedDevice{pixel}}
+	})
+
+	stdout, stderr, err := statusRoot(t, "--json")
+
+	require.NoError(t, err)
+	var status map[string]any
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &status))
+	assert.Equal(t, true, status["running"])
+	assert.Equal(t, float64(os.Getpid()), status["pid"])
+	assert.Equal(t, float64(5037), status["port"])
+	reverse, present := status["reverseEnabled"]
+	assert.True(t, present, "reverseEnabled appears also when false")
+	assert.Equal(t, false, reverse)
+	assert.Len(t, status["devices"], 1)
+	assert.NotContains(t, status, "lastDetach")
+	assert.Empty(t, stderr.String())
+}
+
+func TestGivenLastDetachWhenStatusInvokedWithJSONThenLastDetachCarriesReasonAndTime(t *testing.T) {
+	detachedAt := time.Now().UTC().Truncate(time.Second)
+	fakeDaemon(t, func(control.Request) control.Response {
+		return control.Response{OK: true, Port: 5037, LastDetachReason: "the session has ended", LastDetachAt: detachedAt}
+	})
+
+	stdout, _, err := statusRoot(t, "--json")
+
+	require.NoError(t, err)
+	var status struct {
+		LastDetach struct {
+			Reason string    `json:"reason"`
+			At     time.Time `json:"at"`
+		} `json:"lastDetach"`
+	}
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &status))
+	assert.Equal(t, "the session has ended", status.LastDetach.Reason)
+	assert.True(t, status.LastDetach.At.Equal(detachedAt))
+}
+
+func TestGivenPidfileButNoControlSocketWhenStatusInvokedWithJSONThenRunningIsFalse(t *testing.T) {
+	// The trickiest state: a live pidfile over a dead socket must fold into the
+	// same exact object as no daemon at all, with no pid member.
+	fakeRuntimePaths(t)
+
+	stdout, stderr, err := statusRoot(t, "--json")
+
+	require.NoError(t, err)
+	assert.Equal(t, `{"running":false,"devices":[]}`+"\n", stdout.String())
+	assert.Empty(t, stderr.String())
+}
+
+func TestGivenNoDaemonWhenStatusInvokedWithJSONThenRunningIsFalseAndDevicesIsAnEmptyArray(t *testing.T) {
+	shortRuntimeDir(t)
+
+	stdout, stderr, err := statusRoot(t, "--json")
+
+	require.NoError(t, err)
+	assert.Equal(t, `{"running":false,"devices":[]}`+"\n", stdout.String(), "exact bytes: nothing else may appear")
+	assert.Empty(t, stderr.String())
+}
+
+func TestGivenStdoutRefusesWritesWhenStatusInvokedThenTheWriteErrorIsReturned(t *testing.T) {
+	fakeDaemon(t, func(control.Request) control.Response {
+		return control.Response{OK: true}
+	})
+	root := newRootCommand()
+	root.SetOut(refusingWriter{})
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"bridge", "status"})
+
+	require.EqualError(t, root.Execute(), "stdout is closed")
 }
 
 // fakeRestart fakes the whole restart under a running daemon: a stop that
