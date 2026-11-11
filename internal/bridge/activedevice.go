@@ -5,10 +5,12 @@ package bridge
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/aws/device-connect-devicefarm/internal/adbwire"
 	"github.com/aws/device-connect-devicefarm/internal/forward"
 )
 
@@ -47,6 +49,11 @@ type ActiveDevice struct {
 	present    bool
 	info       DeviceInfo
 	lastDetach LastDetach
+
+	// lastServerVersion is the copy of its adb server's host:version reply that the last
+	// attachment kept, taken at the detach; nil until an attachment has kept one. See
+	// writeVersionWithNoDevice.
+	lastServerVersion []byte
 
 	// changed is closed and replaced under mu by every Set and every clear; a holder from
 	// snapshot wakes on the next change. Holders wait outside mu.
@@ -201,6 +208,22 @@ func (a *ActiveDevice) Set(info DeviceInfo) bool {
 	return true
 }
 
+// writeVersionWithNoDevice answers host:version while no device is attached: the copy of its adb
+// server's reply that the last attachment kept, so an adb client meets the version it met with
+// the device. Until an attachment has kept a copy there is none to repeat (in practice: the
+// daemon has never held a device), and the answer is adbwire.AdbServerVersion, the version the
+// device hosts are expected to run.
+func (device *ActiveDevice) writeVersionWithNoDevice(writer io.Writer) error {
+	device.mu.Lock()
+	kept := device.lastServerVersion
+	device.mu.Unlock()
+	if kept == nil {
+		return adbwire.WriteServerVersion(writer)
+	}
+	_, err := writer.Write(kept)
+	return err
+}
+
 // signalChangeLocked wakes every holder of the current change signal and arms the next one.
 // Caller holds mu.
 func (device *ActiveDevice) signalChangeLocked() {
@@ -293,6 +316,12 @@ func (a *ActiveDevice) clearLocked() (DeviceInfo, bool) {
 	a.info = DeviceInfo{}
 	features := a.features
 	a.features = nil
+	if features != nil {
+		// The version outlives the attachment; every other copy ends with it.
+		if kept := features.hostReplies.kept(hostVersionRequest); kept != nil {
+			a.lastServerVersion = kept
+		}
+	}
 	features.close()
 	for _, cancel := range a.conns {
 		cancel()

@@ -5,8 +5,15 @@ package adbwire
 
 import (
 	"fmt"
+	"io"
 	"strconv"
 )
+
+// AdbServerVersion is the protocol version (adb.h ADB_SERVER_VERSION) the daemon reports to
+// host:version until an attachment has kept its adb server's own reply: in practice, a daemon
+// that has never held a device. An adb client kills a server of another version, so this is the
+// version the device hosts are expected to run.
+const AdbServerVersion = 41
 
 // HostVersionRequest is the framed host:version service, which an adb server answers itself
 // (adb.cpp handle_host_request), as EncodeRequest frames it; a test pins the two.
@@ -16,6 +23,12 @@ const HostVersionRequest = "000chost:version"
 // it; a test pins the two. The server answers OKAY and exits, or FAIL when started to reject kills
 // (adb.cpp handle_host_request).
 const HostKillRequest = "0009host:kill"
+
+// WriteServerVersion answers host:version: OKAY, then AdbServerVersion as four hex digits
+// (adb.cpp handle_host_request, version).
+func WriteServerVersion(writer io.Writer) error {
+	return writeFramed(writer, okayReply, fmt.Sprintf("%04x", AdbServerVersion))
+}
 
 // HostVersionReplyLen is the byte count after OKAY in the reply: a length prefix of 0004 and
 // four hex digits.

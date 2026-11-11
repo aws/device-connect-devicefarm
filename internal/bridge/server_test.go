@@ -154,7 +154,7 @@ func TestGivenListenCalledBeforeRunWhenRunThenServesOnThePreBoundListener(t *tes
 	client, err := net.Dial("tcp", bound.String())
 	require.NoError(t, err)
 	defer client.Close()
-	payload := []byte("000chost:version")
+	payload := []byte(relayedHostRequest)
 	writeAll(t, client, payload)
 	assert.Equal(t, payload, readN(t, client, len(payload)), "the pre-bound listener must actually serve")
 }
@@ -214,7 +214,8 @@ func TestGivenServerPipingToEchoWhenClientSendsBytesThenSameBytesReturn(t *testi
 
 func TestGivenNoDeviceAttachedWhenAClientAsksForAnythingButATrackerThenItIsClosedAndTheServerSurvives(t *testing.T) {
 	for name, request := range map[string]string{
-		"a host query":       hostVersionRequest,
+		"a host query":       relayedHostRequest,
+		"the features probe": hostFeaturesRequest,
 		"a transport select": "000ehost:tport:any0008shell:ls",
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -521,7 +522,7 @@ func TestGivenProxiedConnectionWhenIdleThenExactlyOneSessionExistsPerConnection(
 	require.NoError(t, err)
 	defer client.Close()
 
-	payload := []byte("000chost:version")
+	payload := []byte(relayedHostRequest)
 	writeAll(t, client, payload)
 	assert.Equal(t, payload, readN(t, client, len(payload)))
 
