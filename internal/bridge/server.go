@@ -155,12 +155,15 @@ func (s *AdbProxyServer) Run(ctx context.Context) error {
 // lists and the features probe are answered from cached server replies. A device tracker gets
 // the current list, cached or empty, then is held and pushed the list at every attach and detach,
 // with or without a device (serveDeviceTracker). With no device, host:version gets the last
-// version a server reported and a device list is empty (answerServerQuery). A request that names
-// no attached device, and any other request with no device, gets adb's FAIL for its selector;
-// bytes that form no request get the close alone (refuseUnresolved). A lone host-transport-id: request for the daemon's id
-// is re-framed for the device (loneOpening). While reverse is off, a reverse-family request gets a local FAIL and never dials
-// either. With reverse on, a reverse-family request waits until the attachment's clear of the
-// server's reverse rules settles, or gets a local FAIL at the bound. While the server's notifier
+// version a server reported and a device list is empty (answerServerQuery).
+// A wait-for request that names no attached
+// device is answered and held until one it names attaches (serveWaitFor). Another request that
+// names no attached device, and any other request with no device, gets adb's FAIL for its
+// selector; bytes that form no request get the close alone (refuseUnresolved). A lone
+// host-transport-id: request for the daemon's id is re-framed for the device (loneOpening).
+// While reverse is off, a reverse-family request gets a local FAIL and never dials either. With
+// reverse on, a reverse-family request waits until the attachment's clear of the server's reverse
+// rules settles, or gets a local FAIL at the bound. While the server's notifier
 // slot is held elsewhere, it gets a local FAIL at once, on arrival or mid-wait. Every other
 // request takes one of the attachment's device-stream slots before the dial. No free slot, no
 // dial. A reverse install past the attachment's rule limit is refused after that, still with no
@@ -203,6 +206,11 @@ func (s *AdbProxyServer) handleConn(ctx context.Context, tcp net.Conn) {
 	}
 	if answerServerQuery(tcp, clientOpening, ok, s.device, connLogger) {
 		connLogger.Debug("answered the host request from the daemon's own state", "service", clientOpening.service)
+		return
+	}
+	// Held on the daemon's context: the wait outlives a detach.
+	if serveWaitFor(ctx, tcp, clientOpening, attached, s.device, connLogger) {
+		connLogger.Debug("wait-for request ended", "service", clientOpening.service)
 		return
 	}
 	if !ok {
