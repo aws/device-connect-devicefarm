@@ -477,9 +477,10 @@ func TestGivenAHostRequestNotAnsweredLocallyWhenSentThenItIsRelayed(t *testing.T
 	}
 }
 
-func TestGivenAFeaturesProbeNamingADeviceWhenAskedTwiceThenOneFetchAnswersTheAttachedDeviceAndAnotherSerialIsRefused(t *testing.T) {
+func TestGivenAFeaturesProbeNamingADeviceWhenAskedTwiceThenOneFetchAnswersTheAttachedDeviceAndAnotherIsRefused(t *testing.T) {
 	// One fetch of the plain probe answers each form the transport select would accept: the
-	// attached serial and any transport id. Another serial gets adb's miss text, with no dial.
+	// attached serial and the daemon's transport id. Another serial or id gets adb's miss text,
+	// with no dial.
 	tests := map[string]struct {
 		service   string
 		wantReply string
@@ -487,7 +488,7 @@ func TestGivenAFeaturesProbeNamingADeviceWhenAskedTwiceThenOneFetchAnswersTheAtt
 	}{
 		"the attached serial":        {service: "host-serial:" + testSerial + ":features", wantReply: serverFeaturesReply, wantDials: 1},
 		"the daemon's transport id":  {service: "host-transport-id:1:features", wantReply: serverFeaturesReply, wantDials: 1},
-		"another transport id":       {service: "host-transport-id:7:features", wantReply: serverFeaturesReply, wantDials: 1},
+		"another transport id":       {service: "host-transport-id:7:features", wantReply: "FAIL" + string(framed("no device with transport id '7'"))},
 		"another serial":             {service: "host-serial:emulator-5554:features", wantReply: "FAIL" + string(framed("device 'emulator-5554' not found"))},
 		"another serial with a port": {service: "host-serial:192.168.0.1:5555:features", wantReply: "FAIL" + string(framed("device '192.168.0.1:5555' not found"))},
 	}

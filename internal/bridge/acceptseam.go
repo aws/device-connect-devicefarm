@@ -34,9 +34,9 @@ const syntheticTransportID = 1
 // Chosen, not derived.
 const openingRequestTimeout = 30 * time.Second
 
-// errSelectRefused means the client's select missed the device the attachment holds and
-// already has its FAIL, so there is nothing left to serve it.
-var errSelectRefused = errors.New("the transport select missed the attached device")
+// errSelectRefused: the select named no attached device. The client has adb's FAIL; nothing to
+// serve.
+var errSelectRefused = errors.New("the transport select named no attached device")
 
 // requestScanner reassembles smart-socket requests from a byte stream and keeps every
 // byte: RequestReader drops what it consumes, and a declined request must reach the
@@ -97,8 +97,7 @@ type opening struct {
 	// are not a smart-socket request.
 	service string
 	// selector is what an answered select named. It comes from the select, not from
-	// service, which is stored bare behind one. The zero value is the any selector, which
-	// the attached device always matches.
+	// service, which is stored bare behind one. The zero value is the any selector.
 	selector adbwire.AdbDeviceSelector
 	// pending is every byte the device must receive, an answered select excluded.
 	pending []byte
@@ -142,8 +141,7 @@ func (clientOpening opening) ridesPreSelected() bool {
 
 // readOpening reads everything the client says before anything is dialed: its service
 // request, plus the transport select the daemon answers itself when one comes first. attached
-// is the device a select names. nil answers no select: the select is returned as the service,
-// and the caller closes it.
+// is the device a select may name. nil: no device, the select gets adb's FAIL.
 //
 // Nothing is dialed from here, so a client that says nothing mints no session.
 func readOpening(ctx context.Context, tcpConn net.Conn, attached *DeviceInfo) (clientOpening opening, err error) {
@@ -164,36 +162,34 @@ func readOpening(ctx context.Context, tcpConn net.Conn, attached *DeviceInfo) (c
 	if err != nil {
 		return opening{}, err
 	}
-	var selector adbwire.AdbDeviceSelector
-	var selected bool
-	if attached != nil {
-		if selector, selected, err = answerTransportSelect(tcpConn, service, attached.Serial); err != nil {
-			return opening{}, err
-		}
+	selector, selected, err := answerTransportSelect(tcpConn, service, attached)
+	if err != nil {
+		return opening{}, err
 	}
-	if selected {
-		// A client says what it came for only after its select is answered. adb keeps the
-		// plain `host:` prefix on the forward family behind it (`host:forward:...`); the
-		// select named the device, so the prefix goes, as adb's host server drops it.
-		scanner.dropAnswered()
-		if service, err = scanner.readRequest(tcpConn); err != nil {
-			return opening{}, err
-		}
-		service = strings.TrimPrefix(service, "host:")
+	if !selected {
+		return opening{service: service, pending: scanner.pending()}, nil
 	}
-	return opening{service: service, selector: selector, pending: scanner.pending(), selected: selected}, nil
+	// A client says what it came for only after its select is answered. adb keeps the
+	// plain `host:` prefix on the forward family behind it (`host:forward:...`); the
+	// select named the device, so the prefix goes, as adb's host server drops it.
+	scanner.dropAnswered()
+	if service, err = scanner.readRequest(tcpConn); err != nil {
+		return opening{}, err
+	}
+	service = strings.TrimPrefix(service, "host:")
+	return opening{service: service, selector: selector, pending: scanner.pending(), selected: true}, nil
 }
 
 // answerTransportSelect answers request itself when it is a transport select, which a
 // client sends ahead of the service it came for; only the daemon knows which device the
 // attachment holds. claimed means the reply went out, so the service is a second request
 // on this connection and selector is what it named. An error ends the connection: the
-// reply would not write, or the select missed the attached device and now has its FAIL.
+// reply did not write, or the select named no attached device and has adb's FAIL.
 //
 // The reply shape follows the select's spelling. A tport: form waits for OKAY plus the
 // transport id; every other spelling takes a bare OKAY. Which spellings adb and Android Studio
 // send, and before which services, is at adbwire.SplitHostPrefix and adbwire.ParseTransportSelect.
-func answerTransportSelect(writer io.Writer, request, deviceSerial string) (selector adbwire.AdbDeviceSelector,
+func answerTransportSelect(writer io.Writer, request string, attached *DeviceInfo) (selector adbwire.AdbDeviceSelector,
 	claimed bool, err error) {
 	// adb's client puts every select behind the plain `host:` prefix and names its device
 	// in the service (adb_client.cpp switch_socket_transport).
@@ -207,11 +203,11 @@ func answerTransportSelect(writer io.Writer, request, deviceSerial string) (sele
 	if !ok {
 		return adbwire.AdbDeviceSelector{}, false, nil
 	}
-	if reason, selectorMissed := forward.SelectorMiss(selector, deviceSerial); selectorMissed {
-		if writeErr := adbwire.WriteFail(writer, reason); writeErr != nil {
-			return adbwire.AdbDeviceSelector{}, false, fmt.Errorf("refuse the transport select: %w", writeErr)
-		}
-		return adbwire.AdbDeviceSelector{}, false, fmt.Errorf("%w: %s", errSelectRefused, reason)
+	if attached == nil {
+		return adbwire.AdbDeviceSelector{}, false, refuseSelect(writer, forward.MissReason(selector))
+	}
+	if reason, selectorMissed := forward.SelectorMiss(selector, attached.Serial, syntheticTransportID); selectorMissed {
+		return adbwire.AdbDeviceSelector{}, false, refuseSelect(writer, reason)
 	}
 
 	var writeErr error
@@ -224,6 +220,14 @@ func answerTransportSelect(writer io.Writer, request, deviceSerial string) (sele
 		return adbwire.AdbDeviceSelector{}, false, fmt.Errorf("answer the transport select: %w", writeErr)
 	}
 	return selector, true, nil
+}
+
+// refuseSelect writes adb's FAIL and returns errSelectRefused. No service is read.
+func refuseSelect(writer io.Writer, reason string) error {
+	if writeErr := adbwire.WriteFail(writer, reason); writeErr != nil {
+		return fmt.Errorf("refuse the transport select: %w", writeErr)
+	}
+	return fmt.Errorf("%w: %s", errSelectRefused, reason)
 }
 
 // respondForwardLocally answers the forward family from the daemon's own table, so a rule
@@ -257,25 +261,29 @@ func respondForwardLocally(tcpConn net.Conn, clientOpening opening, forwarding *
 	acquiresTransport := parseErr != nil || request.Action == adbwire.AdbActionForward ||
 		request.Action == adbwire.AdbActionKillForward
 	if forwarding.ctx.Err() != nil && acquiresTransport {
-		if writeErr := adbwire.WriteFail(tcpConn, adbwire.MsgNoDevices); writeErr != nil {
+		if writeErr := adbwire.WriteFail(tcpConn, forward.MissReason(selector)); writeErr != nil {
 			logger.Debug("could not refuse a forward request for a detached device", "error", writeErr)
 		}
 		return true
 	}
-	if parseErr != nil {
-		// adb acquires the transport before it reads a request's pieces (see
-		// adbwire.ParseForwardService), so a device miss outranks a malformed request.
-		// Only forward: and killforward: can be malformed, and both acquire one.
-		reason := parseErr.Error()
-		if missReason, selectorMissed := forward.SelectorMiss(selector, deviceSerial); selectorMissed {
-			reason = missReason
+	// adb acquires the transport before it reads a request (adbwire.ParseForwardService), so a
+	// device miss outranks a malformed request, a missing listener and a norebind collision.
+	// killforward-all and list-forward acquire none: they answer for any prefix.
+	if acquiresTransport {
+		if missReason, selectorMissed := forward.SelectorMiss(selector, deviceSerial, syntheticTransportID); selectorMissed {
+			if writeErr := adbwire.WriteFail(tcpConn, missReason); writeErr != nil {
+				logger.Debug("could not refuse a forward request for another device", "error", writeErr)
+			}
+			return true
 		}
-		if writeErr := adbwire.WriteFail(tcpConn, reason); writeErr != nil {
+	}
+	if parseErr != nil {
+		if writeErr := adbwire.WriteFail(tcpConn, parseErr.Error()); writeErr != nil {
 			logger.Debug("could not refuse a malformed forward request", "error", writeErr)
 		}
 		return true
 	}
-	if respondErr := forward.Respond(tcpConn, selector, request, deviceSerial, forwarding.table); respondErr != nil {
+	if respondErr := forward.Respond(tcpConn, request, deviceSerial, forwarding.table); respondErr != nil {
 		logger.Debug("could not answer a forward request", "error", respondErr)
 	}
 	return true

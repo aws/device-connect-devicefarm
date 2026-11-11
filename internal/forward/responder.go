@@ -13,26 +13,15 @@ import (
 
 // Respond is the daemon's own handle_forward_request: it answers one parsed
 // forward-family request with the adb host server's exact reply bytes and
-// closes conn, as adb closes a host service after its reply. With the device
-// gone, forward: and killforward: get a FAIL carrying adbwire.MsgNoDevices,
-// which the caller writes; a closed table's Install returns the same text.
-// killforward-all and list-forward still answer here, over the emptied table.
+// closes conn, as adb closes a host service after its reply. The caller judges
+// the selector first (SelectorMiss), so only the table can refuse here. A
+// closed table's Install returns adbwire.MsgNoDevices. killforward-all and
+// list-forward still answer here, over the emptied table.
 //
 // The returned error is a write failure, for logging. Refusing a request is not
 // an error: it reaches the client as a FAIL.
-func Respond(conn io.WriteCloser, selector adbwire.AdbDeviceSelector, request adbwire.AdbForwardRequest, deviceSerial string, table *ForwardRulesTable) error {
+func Respond(conn io.WriteCloser, request adbwire.AdbForwardRequest, deviceSerial string, table *ForwardRulesTable) error {
 	defer conn.Close()
-
-	// adb acquires the transport before it reads the request pieces (see
-	// adbwire.ParseForwardService), so a device miss outranks both a malformed
-	// request and a listener failure.
-	// killforward-all and list-forward never acquire one, so they answer
-	// whatever device the prefix names.
-	if request.Action == adbwire.AdbActionForward || request.Action == adbwire.AdbActionKillForward {
-		if reason, selectorMissed := SelectorMiss(selector, deviceSerial); selectorMissed {
-			return adbwire.WriteFail(conn, reason)
-		}
-	}
 
 	switch request.Action {
 	case adbwire.AdbActionForward:
@@ -65,27 +54,49 @@ func isEmulatorSerial(serial string) bool {
 }
 
 // SelectorMiss reports whether selector names anything but the attached device,
-// with adb's FAIL text when it does. The daemon's own stand-in for adb's
-// transport lookup (transport.cpp acquire_one_transport), whose miss texts it
-// uses. A serial misses unless it is the device's; usb misses an emulator and
-// local anything else. The any selector matches the single attached device,
-// and so does a transport id: the ids this daemon reports are its own, adb
-// reads 0 as unset, and a client that echoes an id back must reach its device.
-func SelectorMiss(selector adbwire.AdbDeviceSelector, deviceSerial string) (string, bool) {
+// with adb's FAIL text when it does (MissReason). Stand-in for adb's transport
+// lookup (transport.cpp acquire_one_transport). The any selector matches. A
+// serial must be the device's. usb misses an emulator; local misses anything
+// else. A transport id must be deviceTransportID; id 0 is any, as adb reads 0
+// as unset.
+func SelectorMiss(selector adbwire.AdbDeviceSelector, deviceSerial string, deviceTransportID uint64) (failReason string, missed bool) {
 	isEmulator := isEmulatorSerial(deviceSerial)
-	switch {
-	case selector.Kind == adbwire.AdbSelectorSerial && selector.Serial != deviceSerial:
-		return adbwire.FailDeviceNotFound(selector.Serial), true
-	case selector.Kind == adbwire.AdbSelectorUSB && isEmulator:
-		return adbwire.MsgNoUSBDevices, true
-	case selector.Kind == adbwire.AdbSelectorLocal && !isEmulator:
-		return adbwire.MsgNoEmulators, true
+	switch selector.Kind {
+	case adbwire.AdbSelectorSerial:
+		missed = selector.Serial != deviceSerial
+	case adbwire.AdbSelectorUSB:
+		missed = isEmulator
+	case adbwire.AdbSelectorLocal:
+		missed = !isEmulator
+	case adbwire.AdbSelectorTransportID:
+		missed = selector.TransportID != 0 && selector.TransportID != deviceTransportID
 	}
-	return "", false
+	if !missed {
+		return "", false
+	}
+	return MissReason(selector), true
 }
 
-// listRows fills in the serial column the table does not record. The selector
-// is ignored, as adb lists every device's rules.
+// MissReason is adb's FAIL text for a selector that names no attached device,
+// or for any selector with no device (transport.cpp acquire_one_transport).
+func MissReason(selector adbwire.AdbDeviceSelector) string {
+	switch selector.Kind {
+	case adbwire.AdbSelectorSerial:
+		return adbwire.FailDeviceNotFound(selector.Serial)
+	case adbwire.AdbSelectorUSB:
+		return adbwire.MsgNoUSBDevices
+	case adbwire.AdbSelectorLocal:
+		return adbwire.MsgNoEmulators
+	case adbwire.AdbSelectorTransportID:
+		if selector.TransportID != 0 {
+			return adbwire.FailNoTransportID(selector.TransportID)
+		}
+	}
+	return adbwire.MsgNoDevices
+}
+
+// listRows fills in the serial column the table does not record. adb lists
+// every device's rules, so no selector applies.
 func listRows(table *ForwardRulesTable, deviceSerial string) []adbwire.AdbListedForward {
 	rows := table.List()
 	for i := range rows {

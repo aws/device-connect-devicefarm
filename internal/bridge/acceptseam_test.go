@@ -103,8 +103,8 @@ func TestGivenATransportSelectWhenAnsweredThenTheReplyShapeFollowsItsSpelling(t 
 			wantSelector: adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorAny}},
 		{name: "this device's serial", request: "host:tport:serial:dev-1", want: "OKAY" + transportIDReply,
 			wantSelector: adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorSerial, Serial: "dev-1"}},
-		{name: "a transport id", request: "host:transport-id:97", want: "OKAY",
-			wantSelector: adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorTransportID, TransportID: 97}},
+		{name: "the daemon's transport id", request: "host:transport-id:1", want: "OKAY",
+			wantSelector: adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorTransportID, TransportID: 1}},
 		{name: "the older serial spelling", request: "host:transport:dev-1", want: "OKAY",
 			wantSelector: adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorSerial, Serial: "dev-1"}},
 		{name: "the older any spelling", request: "host:transport-any", want: "OKAY",
@@ -116,7 +116,7 @@ func TestGivenATransportSelectWhenAnsweredThenTheReplyShapeFollowsItsSpelling(t 
 		t.Run(testCase.name, func(t *testing.T) {
 			var reply bytes.Buffer
 
-			selector, claimed, err := answerTransportSelect(&reply, testCase.request, "dev-1")
+			selector, claimed, err := answerTransportSelect(&reply, testCase.request, &DeviceInfo{Serial: "dev-1"})
 
 			require.NoError(t, err)
 			assert.Equal(t, testCase.wantSelector, selector,
@@ -145,7 +145,7 @@ func TestGivenARequestThatIsNotAPlainSelectWhenAnsweredThenItIsNotClaimed(t *tes
 		t.Run(testCase.name, func(t *testing.T) {
 			var reply bytes.Buffer
 
-			_, claimed, err := answerTransportSelect(&reply, testCase.request, "dev-1")
+			_, claimed, err := answerTransportSelect(&reply, testCase.request, &DeviceInfo{Serial: "dev-1"})
 
 			assert.False(t, claimed)
 			require.NoError(t, err)
@@ -163,16 +163,17 @@ func TestGivenAWriterThatFailsWhenASelectIsAnsweredThenTheFailureIsReported(t *t
 	// Both replies go to a client that may have vanished between its select and the
 	// answer, so neither write may be assumed to land.
 	tests := []struct {
-		name         string
-		request      string
-		deviceSerial string
+		name     string
+		request  string
+		attached *DeviceInfo
 	}{
-		{name: "an answered select", request: "host:tport:any"},
-		{name: "a refused select", request: "host:tport:serial:other-device", deviceSerial: "dev-1"},
+		{name: "an answered select", request: "host:tport:any", attached: &DeviceInfo{}},
+		{name: "a refused select", request: "host:tport:serial:other-device", attached: &DeviceInfo{Serial: "dev-1"}},
+		{name: "a select with no device", request: "host:tport:any"},
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			_, claimed, err := answerTransportSelect(failingWriter{}, testCase.request, testCase.deviceSerial)
+			_, claimed, err := answerTransportSelect(failingWriter{}, testCase.request, testCase.attached)
 
 			assert.False(t, claimed, "an unwritten reply claims nothing")
 			assert.ErrorIs(t, err, errWriteRefused)
@@ -189,13 +190,14 @@ func TestGivenAClientsOpeningWhenItIsReadThenOnlyTheUnansweredBytesArePending(t 
 		wantPending  string
 		wantService  string
 		wantSelected bool
+		wantSelector adbwire.AdbDeviceSelector
 		wantReplies  string
 		wantErr      error
 	}{
 		{
-			// No device, so no select is answered: the select is returned as the service.
+			// No device: the select reads adb's text, and no service is read.
 			name: "a select with no device", said: "000ehost:tport:any0008shell:ls", noDevice: true,
-			wantPending: "000ehost:tport:any0008shell:ls", wantService: "host:tport:any",
+			wantErr: errSelectRefused, wantReplies: "FAIL" + string(framed("no devices/emulators found")),
 		},
 		{
 			// Both requests in one segment: the second is already buffered when the daemon
@@ -219,7 +221,8 @@ func TestGivenAClientsOpeningWhenItIsReadThenOnlyTheUnansweredBytesArePending(t 
 		{
 			name: "a serial select and a host-prefixed killforward-all", said: "0017host:tport:serial:dev-10014host:killforward-all",
 			deviceSerial: "dev-1", wantPending: "0014host:killforward-all", wantService: "killforward-all", wantSelected: true,
-			wantReplies: "OKAY" + transportIDReply,
+			wantSelector: adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorSerial, Serial: "dev-1"},
+			wantReplies:  "OKAY" + transportIDReply,
 		},
 		{
 			// A host command and no select, as `adb -s dev-1 features` sends: the device gets
@@ -240,7 +243,9 @@ func TestGivenAClientsOpeningWhenItIsReadThenOnlyTheUnansweredBytesArePending(t 
 			name: "the older serial spelling and a reverse request", said: "0014host:transport:dev-1001breverse:forward:tcp:1;tcp:2",
 			deviceSerial: "dev-1", wantPending: "001breverse:forward:tcp:1;tcp:2", wantService: "reverse:forward:tcp:1;tcp:2",
 			wantSelected: true, wantReplies: "OKAY",
+			wantSelector: adbwire.AdbDeviceSelector{Kind: adbwire.AdbSelectorSerial, Serial: "dev-1"},
 		},
+
 		{
 			// Bytes with no length prefix the parser can read are relayed, not refused: the
 			// daemon is only a proxy, and its parser fails closed rather than guessing.
@@ -284,6 +289,7 @@ func TestGivenAClientsOpeningWhenItIsReadThenOnlyTheUnansweredBytesArePending(t 
 			assert.Equal(t, testCase.wantPending, string(clientOpening.pending), "only unanswered bytes may reach the device")
 			assert.Equal(t, testCase.wantService, clientOpening.service, "the service is what the client came for")
 			assert.Equal(t, testCase.wantSelected, clientOpening.selected)
+			assert.Equal(t, testCase.wantSelector, clientOpening.selector)
 			assert.Equal(t, testCase.wantReplies, client.replies.String())
 		})
 	}
@@ -335,16 +341,34 @@ func TestGivenAnOpeningWhenItAsksForThePreSelectedSocketThenOnlyANonReverseServi
 	}
 }
 
-func TestGivenASelectNamingAnotherDeviceWhenAnsweredThenAdbsRefusalEndsTheConnection(t *testing.T) {
-	// The client asked for a device this attachment does not hold. It gets adb's own text, so
-	// it prints a reason, and the caller is left with nothing to serve.
-	var reply bytes.Buffer
+func TestGivenASelectNamingNoAttachedDeviceWhenAnsweredThenAdbsRefusalEndsTheConnection(t *testing.T) {
+	// The client asked for a device the daemon does not hold. It gets adb's own text, so it
+	// prints a reason, and the caller is left with nothing to serve.
+	tests := []struct {
+		name     string
+		request  string
+		attached *DeviceInfo
+		want     string
+	}{
+		{name: "another serial", request: "host:tport:serial:other-device", attached: &DeviceInfo{Serial: "dev-1"},
+			want: "device 'other-device' not found"},
+		{name: "another transport id", request: "host:transport-id:97", attached: &DeviceInfo{Serial: "dev-1"},
+			want: "no device with transport id '97'"},
+		{name: "any device with none attached", request: "host:tport:any", want: "no devices/emulators found"},
+		{name: "a usb device with none attached", request: "host:transport-usb", want: "no devices found"},
+		{name: "a serial with none attached", request: "host:transport:dev-1", want: "device 'dev-1' not found"},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			var reply bytes.Buffer
 
-	_, claimed, err := answerTransportSelect(&reply, "host:tport:serial:other-device", "dev-1")
+			_, claimed, err := answerTransportSelect(&reply, testCase.request, testCase.attached)
 
-	assert.False(t, claimed, "a refused select leaves no second request to read")
-	assert.ErrorIs(t, err, errSelectRefused)
-	assert.Equal(t, "FAIL001fdevice 'other-device' not found", reply.String())
+			assert.False(t, claimed, "a refused select leaves no second request to read")
+			assert.ErrorIs(t, err, errSelectRefused)
+			assert.Equal(t, "FAIL"+string(framed(testCase.want)), reply.String())
+		})
+	}
 }
 
 func TestGivenTwoRequestsAndAppBytesInOneFeedWhenScannedThenTheAnsweredOneIsDroppedAndTheRestIsPending(t *testing.T) {
@@ -618,11 +642,11 @@ func TestGivenATportSelectWhenReceivedThenOkayAndEightBytesAndNoDial(t *testing.
 }
 
 func TestGivenATransportIDSelectWhenReceivedThenBareOkayAndNoDial(t *testing.T) {
-	// `adb -t 97` selects with transport-id:<n>, which takes a bare OKAY. Reading the echo
+	// `adb -t 1` selects with transport-id:<n>, which takes a bare OKAY. Reading the echo
 	// of the second request straight after the 4 bytes proves no payload followed them.
 	client, mock := startSelectAwareProxy(t)
 
-	writeAll(t, client, []byte("0014host:transport-id:97"))
+	writeAll(t, client, []byte("0013host:transport-id:1"))
 	assert.Equal(t, "OKAY", string(readN(t, client, 4)), "a transport-id select is answered with a bare OKAY")
 	assert.Equal(t, 0, mock.ConnectionsAccepted(), "answering a select dials nothing")
 
