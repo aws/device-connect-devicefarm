@@ -33,8 +33,10 @@ var errStartedMeanwhile = errors.New("another command started the bridge on this
 
 const (
 	bridgeStartCommand = config.BinaryName + " bridge start"
+	// anotherPortTail names the port flag and adb's matching flag.
+	anotherPortTail = "on another port with '" + bridgeStartCommand + " --port <n>' and point adb at it with 'adb -P <n>'"
 	// otherPortClause follows "start" in every text that moves the daemon off a held port.
-	otherPortClause = "the bridge on another port with '" + bridgeStartCommand + " --port <n>' and point adb at it with 'adb -P <n>'"
+	otherPortClause = "the bridge " + anotherPortTail
 )
 
 // portOccupant is what a bind of the listen address found.
@@ -43,6 +45,9 @@ type portOccupant int
 const (
 	portFree portOccupant = iota
 	portAdbServer
+	// portBridge: another bridge answered the identity request, from another runtime directory or
+	// user. It answers host:version too, so the probe asks the identity first.
+	portBridge
 	// portHeld: a program that is not an adb server answered, or nobody answered an in-use bind.
 	portHeld
 	// portUnbindable: any other bind error.
@@ -62,27 +67,73 @@ func OccupantAddress(listenAddr string, port int) string {
 	return net.JoinHostPort(host, strconv.Itoa(port))
 }
 
+// statusOkay opens every answer a probe accepts; statusFail opens adb's refusal.
+const (
+	statusOkay = "OKAY"
+	statusFail = "FAIL"
+)
+
+// askOccupant dials address, sends request and reads replyLength bytes, each step bounded by
+// within. conn is nil when the dial failed; else the caller closes it. err: no whole reply came.
+func askOccupant(address, request string, replyLength int, within time.Duration) (conn net.Conn, reply []byte, err error) {
+	conn, err = net.DialTimeout("tcp", address, within)
+	if err != nil {
+		return nil, nil, err
+	}
+	reply = make([]byte, replyLength)
+	if err = conn.SetDeadline(time.Now().Add(within)); err == nil {
+		if _, err = conn.Write([]byte(request)); err == nil {
+			_, err = io.ReadFull(conn, reply)
+		}
+	}
+	return conn, reply, err
+}
+
 // ProbeOccupant sends host:version to the port's occupant, each step bounded by within.
 // adbServer: the reply was OKAY, 0004 and four hex digits. connected: the dial succeeded.
 func ProbeOccupant(address string, within time.Duration) (version int, connected bool, adbServer bool) {
-	conn, err := net.DialTimeout("tcp", address, within)
-	if err != nil {
+	conn, reply, err := askOccupant(address, adbwire.HostVersionRequest, len(statusOkay)+adbwire.HostVersionReplyLen, within)
+	if conn == nil {
 		return 0, false, false
 	}
 	defer conn.Close()
-	if err = conn.SetDeadline(time.Now().Add(within)); err != nil {
+	if err != nil || string(reply[:len(statusOkay)]) != statusOkay {
 		return 0, true, false
 	}
-	const okay = "OKAY"
-	reply := make([]byte, len(okay)+adbwire.HostVersionReplyLen)
-	if _, err = conn.Write([]byte(adbwire.HostVersionRequest)); err == nil {
-		_, err = io.ReadFull(conn, reply)
-	}
-	if err != nil || string(reply[:len(okay)]) != okay {
-		return 0, true, false
-	}
-	parsed, err := adbwire.ParseHostVersionReply(reply[len(okay):])
+	parsed, err := adbwire.ParseHostVersionReply(reply[len(statusOkay):])
 	return parsed, true, err == nil
+}
+
+// ProbeBridge asks the port's occupant for its bridge identity (adbwire.BridgeIdentityService),
+// each step bounded by within. isBridge only for OKAY and the exact identity payload, read up to
+// adbwire.MaxBridgeIdentityLen bytes. refused: the occupant answered FAIL, as adb's server does
+// for a service it does not serve. Any other outcome (a failed dial, a close, silence, another
+// reply) is neither, and the caller must not take the occupant for an adb server: a bridge cut
+// mid-answer answers host:version too. The pid came from a socket any local program can hold:
+// print it, never signal or stop it.
+func ProbeBridge(address string, within time.Duration) (pid int, isBridge, refused bool) {
+	conn, status, err := askOccupant(address, adbwire.BridgeIdentityRequest, len(statusOkay), within)
+	if conn == nil {
+		return 0, false, false
+	}
+	defer conn.Close()
+	if err != nil || string(status) != statusOkay {
+		return 0, false, err == nil && string(status) == statusFail
+	}
+	digits := make([]byte, 4)
+	if _, err = io.ReadFull(conn, digits); err != nil {
+		return 0, false, false
+	}
+	length, err := strconv.ParseUint(string(digits), 16, 16)
+	if err != nil || length > adbwire.MaxBridgeIdentityLen {
+		return 0, false, false
+	}
+	payload := make([]byte, length)
+	if _, err = io.ReadFull(conn, payload); err != nil {
+		return 0, false, false
+	}
+	pid, isBridge = adbwire.ParseBridgeIdentity(string(payload))
+	return pid, isBridge, false
 }
 
 // StopAdbServer stops the adb server on the listen port as 'adb kill-server' does: host:kill,
@@ -147,6 +198,16 @@ func HeldPortText(listenAddr string, port int) string {
 	return fmt.Sprintf("another program is listening on %s, so the bridge cannot bind it. Start %s, or stop that program "+
 		"and run '%s'. The bridge listens on exactly the port you pass.", net.JoinHostPort(listenAddr, strconv.Itoa(port)),
 		otherPortClause, StartCommand(listenAddr, port))
+}
+
+// BridgeHoldsPortText is the fix when another bridge holds the listen port; the pid is its own answer.
+func BridgeHoldsPortText(listenAddr string, port, pid int) string {
+	return fmt.Sprintf("another %s bridge (pid %d) is listening on %s, so a new bridge cannot bind it. That bridge "+
+		"was started from another working directory or by another user, so this shell cannot stop it. Run '%s bridge "+
+		"stop' in the shell that started it, or check that process %d is %s and end it, then run '%s'. Or start a "+
+		"bridge %s.",
+		config.BinaryName, pid, net.JoinHostPort(listenAddr, strconv.Itoa(port)), config.BinaryName, pid,
+		config.BinaryName, StartCommand(listenAddr, port), anotherPortTail)
 }
 
 // StartCommand is 'bridge start' on port, with --listen-addr only off the default address: a user
@@ -216,26 +277,33 @@ func listenHost(listenAddr string) (string, error) {
 }
 
 // probeListenPort binds the daemon's own address and frees it. When a local socket holds the
-// port, one host:version tells an adb server from any other occupant. host is the address it
-// tried, for the stop.
-func probeListenPort(listenAddr string, port int) (occupant portOccupant, host string, bindErr error) {
+// port, the bridge identity request, then one host:version, tell another bridge, an adb server
+// and any other occupant apart. host is the address it tried, for the stop; pid is a bridge's.
+func probeListenPort(listenAddr string, port int) (occupant portOccupant, host string, pid int, bindErr error) {
 	if host, bindErr = listenHost(listenAddr); bindErr == nil {
 		bindErr = bindListenPort(host, port)
 	}
 	switch {
 	case bindErr == nil:
-		return portFree, host, nil
+		return portFree, host, 0, nil
 	case !HolderMayAnswer(bindErr, runtime.GOOS):
-		return portUnbindable, host, bindErr
+		return portUnbindable, host, 0, bindErr
 	}
-	_, connected, adbServer := ProbeOccupant(OccupantAddress(host, port), stopReplyTimeout)
+	address := OccupantAddress(host, port)
+	pid, isBridge, identityRefused := ProbeBridge(address, stopReplyTimeout)
+	if isBridge {
+		return portBridge, host, pid, bindErr
+	}
+	_, connected, adbServer := ProbeOccupant(address, stopReplyTimeout)
 	switch {
-	case adbServer:
-		return portAdbServer, host, bindErr
+	// Only adb's FAIL to the identity request makes a version answer an adb server's: any other
+	// occupant may be a bridge, so it is held, never stopped.
+	case adbServer && identityRefused:
+		return portAdbServer, host, 0, bindErr
 	case connected || bindErrorInUse(bindErr, runtime.GOOS):
-		return portHeld, host, bindErr
+		return portHeld, host, 0, bindErr
 	}
-	return portUnbindable, host, bindErr
+	return portUnbindable, host, 0, bindErr
 }
 
 // HolderMayAnswer reports whether a bind error means a socket on this machine holds the port, so
@@ -255,16 +323,19 @@ func bindErrorInUse(err error, goos string) bool {
 }
 
 // clearListenPort runs before the spawn: a free port passes, an adb server is stopped and its
-// address returned, anything else is Start's error.
+// address returned, anything else is Start's error. A bridge never gets host:kill.
 func (m *DaemonManager) clearListenPort() (stoppedAdbServer string, err error) {
 	listenAddr, port := m.config.ListenAddr, m.config.ListenPort
-	occupant, host, bindErr := probeListenPort(listenAddr, port)
-	if occupant != portAdbServer {
-		return "", portError(occupant, bindErr, listenAddr, port)
+	occupant, host, pid, bindErr := probeListenPort(listenAddr, port)
+	if occupant != portAdbServer && occupant != portBridge {
+		return "", portError(occupant, bindErr, listenAddr, port, pid)
 	}
-	// A concurrent start's daemon answers host:version too. Never stop it.
+	// A concurrent start's daemon in this directory answers too. Never stop it.
 	if _, running := m.pidFile.RunningPID(); running {
 		return "", errStartedMeanwhile
+	}
+	if occupant == portBridge {
+		return "", portError(occupant, bindErr, listenAddr, port, pid)
 	}
 	address := net.JoinHostPort(listenAddr, strconv.Itoa(port))
 	if cause := StopAdbServer(host, port, stopReplyTimeout); cause != nil {
@@ -278,7 +349,7 @@ func (m *DaemonManager) clearListenPort() (stoppedAdbServer string, err error) {
 // again.
 func lostBindError(listenAddr string, port int) error {
 	address := net.JoinHostPort(listenAddr, strconv.Itoa(port))
-	occupant, _, bindErr := probeListenPort(listenAddr, port)
+	occupant, _, pid, bindErr := probeListenPort(listenAddr, port)
 	switch occupant {
 	case portAdbServer:
 		return fmt.Errorf("an adb server took %s before the bridge could bind it; a program that restarts adb, such as Android "+
@@ -287,16 +358,18 @@ func lostBindError(listenAddr string, port int) error {
 		return fmt.Errorf("another program held %s while the bridge started and has released it. Run '%s'. "+
 			"The bridge binds the port on that start.", address, StartCommand(listenAddr, port))
 	}
-	return portError(occupant, bindErr, listenAddr, port)
+	return portError(occupant, bindErr, listenAddr, port, pid)
 }
 
-// portError words a held or unbindable listen port; nil when it is free. The rare bind errors
-// point at the doctor, which names their fixes.
-func portError(occupant portOccupant, bindErr error, listenAddr string, port int) error {
+// portError words a held or unbindable listen port; nil when it is free. pid is a bridge's. The
+// rare bind errors point at the doctor, which names their fixes.
+func portError(occupant portOccupant, bindErr error, listenAddr string, port, pid int) error {
 	address := net.JoinHostPort(listenAddr, strconv.Itoa(port))
 	switch occupant {
 	case portFree:
 		return nil
+	case portBridge:
+		return errors.New(BridgeHoldsPortText(listenAddr, port, pid))
 	case portHeld:
 		return errors.New(HeldPortText(listenAddr, port))
 	}

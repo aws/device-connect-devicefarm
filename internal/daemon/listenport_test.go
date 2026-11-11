@@ -4,9 +4,11 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -19,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/aws/device-connect-devicefarm/internal/adbwire"
+	"github.com/aws/device-connect-devicefarm/internal/bridge"
 	"github.com/aws/device-connect-devicefarm/internal/config"
 )
 
@@ -65,8 +68,12 @@ const (
 	killGarbled                         // four bytes that are neither OKAY nor FAIL
 )
 
+// unknownHostService is adb's FAIL reason for a host service it does not serve.
+const unknownHostService = "unknown host service"
+
 // fakeAdbServer plays an adb server on a loopback port: host:version gets adb 1.0.41's reply,
-// host:kill its answer.
+// host:kill its answer, any other service adb's FAIL. With identityPid set it plays a bridge,
+// which also answers the identity request.
 type fakeAdbServer struct {
 	listener net.Listener
 	answer   killAnswer
@@ -74,11 +81,25 @@ type fakeAdbServer struct {
 	killFrames chan string
 	// onVersion, when set, runs before each host:version reply.
 	onVersion func()
+	// identityPid, when set, answers adbwire.BridgeIdentityService with that pid.
+	identityPid int
+	// identityReply, when set, replaces any answer to the identity request with these raw bytes,
+	// written before the close; an empty one closes it unanswered.
+	identityReply *string
 }
 
 func startFakeAdbServer(t *testing.T, port int, answer killAnswer) *fakeAdbServer {
 	t.Helper()
 	server := &fakeAdbServer{answer: answer, killFrames: make(chan string, 8)}
+	server.listener = occupyPort(t, port, server.serve)
+	return server
+}
+
+// startFakeBridge plays another bridge on port: it answers the identity request with pid and,
+// as every bridge does, host:version too. killFrames records any host:kill it is sent.
+func startFakeBridge(t *testing.T, port, pid int) *fakeAdbServer {
+	t.Helper()
+	server := &fakeAdbServer{answer: killExits, killFrames: make(chan string, 8), identityPid: pid}
 	server.listener = occupyPort(t, port, server.serve)
 	return server
 }
@@ -107,6 +128,18 @@ func (server *fakeAdbServer) serve(conn net.Conn) {
 	case "host:kill":
 		server.killFrames <- string(header) + string(service)
 		server.answerKill(conn)
+	case adbwire.BridgeIdentityService:
+		if server.identityReply != nil {
+			_, _ = io.WriteString(conn, *server.identityReply)
+			return
+		}
+		if server.identityPid != 0 {
+			_ = adbwire.WriteBridgeIdentity(conn, server.identityPid)
+			return
+		}
+		fallthrough
+	default:
+		_, _ = fmt.Fprintf(conn, "FAIL%04x%s", len(unknownHostService), unknownHostService)
 	}
 }
 
@@ -327,7 +360,16 @@ func TestGivenEachOccupantWhenTheListenPortIsProbedThenItIsClassified(t *testing
 		// wantHost is the address the bind tried and a stop would dial.
 		wantHost    string
 		wantBindErr bool
+		wantPid     int
 	}{
+		{name: "another bridge with no device", setup: func(t *testing.T, port int) string {
+			startBridgeServer(t, port, false)
+			return "127.0.0.1"
+		}, wantOccupant: portBridge, wantHost: "127.0.0.1", wantBindErr: true, wantPid: os.Getpid()},
+		{name: "another bridge with a device", setup: func(t *testing.T, port int) string {
+			startBridgeServer(t, port, true)
+			return "127.0.0.1"
+		}, wantOccupant: portBridge, wantHost: "127.0.0.1", wantBindErr: true, wantPid: os.Getpid()},
 		{name: "free", setup: func(*testing.T, int) string { return "127.0.0.1" }, wantOccupant: portFree, wantHost: "127.0.0.1"},
 		{name: "an adb server", setup: func(t *testing.T, port int) string {
 			startFakeAdbServer(t, port, killExits)
@@ -352,11 +394,161 @@ func TestGivenEachOccupantWhenTheListenPortIsProbedThenItIsClassified(t *testing
 			port := freePort(t)
 			listenAddr := tc.setup(t, port)
 
-			occupant, host, bindErr := probeListenPort(listenAddr, port)
+			occupant, host, pid, bindErr := probeListenPort(listenAddr, port)
 
 			assert.Equal(t, tc.wantOccupant, occupant)
 			assert.Equal(t, tc.wantHost, host)
 			assert.Equal(t, tc.wantBindErr, bindErr != nil)
+			assert.Equal(t, tc.wantPid, pid)
 		})
 	}
+}
+
+// startBridgeServer runs a real bridge on port, as another working directory's daemon would, with
+// or without a device. With no device it answers the identity request and host:version. With one
+// it answers the identity request alone: the device's endpoint is unreachable.
+func startBridgeServer(t *testing.T, port int, withDevice bool) {
+	t.Helper()
+	device := bridge.NewActiveDevice()
+	if withDevice {
+		require.True(t, device.Set(bridge.DeviceInfo{ARN: "arn:other", Endpoint: "wss://127.0.0.1:1", Label: "Other Device"}))
+	}
+	server, err := bridge.NewAdbProxyServer("127.0.0.1", port, bridge.WSRefreshPolicy{}, bridge.NewWSDialer(time.Second),
+		device, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.NoError(t, server.Listen())
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() {
+		_ = server.Run(ctx)
+		close(stopped)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-stopped
+	})
+}
+
+func TestGivenTheIdentityPayloadWhenWrittenThenItNamesTheBinary(t *testing.T) {
+	// adbwire cannot import config, so it spells the binary name itself.
+	var reply strings.Builder
+	require.NoError(t, adbwire.WriteBridgeIdentity(&reply, 1))
+	assert.Contains(t, reply.String(), config.BinaryName+" bridge pid=1")
+}
+
+func TestGivenAnswersThatAreNoBridgeIdentityWhenProbedThenTheOccupantIsNoBridge(t *testing.T) {
+	tests := map[string]struct {
+		serve       func(net.Conn)
+		wantRefused bool
+	}{
+		"an adb server's FAIL":    {serve: startFakeAdbServerOn, wantRefused: true},
+		"a length over the cap":   {serve: answeringOccupant("OKAY0041" + strings.Repeat("x", 0x41))},
+		"another payload":         {serve: answeringOccupant("OKAY0005hello")},
+		"another status":          {serve: answeringOccupant("WHAT")},
+		"OKAY and then the close": {serve: answeringOccupant("OKAY")},
+		"the close alone":         {serve: closingOccupant},
+	}
+	for name, testCase := range tests {
+		t.Run(name, func(t *testing.T) {
+			port := freePort(t)
+			occupyPort(t, port, testCase.serve)
+
+			pid, isBridge, refused := ProbeBridge(OccupantAddress("127.0.0.1", port), testStopWithin)
+
+			assert.False(t, isBridge)
+			assert.Zero(t, pid)
+			assert.Equal(t, testCase.wantRefused, refused, "only adb's FAIL counts as a refusal")
+		})
+	}
+}
+
+func TestGivenAnOccupantThatGivesTheIdentityRequestNoFailButAnswersTheVersionWhenStartClearsItThenItIsHeldAndNeverStopped(t *testing.T) {
+	// A bridge whose identity answer was cut answers host:version as an adb server does.
+	for name, identityReply := range map[string]string{
+		"the close alone":   "",
+		"another status":    "WHAT",
+		"a length then EOF": "OKAY0041",
+	} {
+		t.Run(name, func(t *testing.T) {
+			mgr := newTestManager(t)
+			port := mgr.config.ListenPort
+			server := &fakeAdbServer{answer: killExits, killFrames: make(chan string, 8), identityReply: &identityReply}
+			server.listener = occupyPort(t, port, server.serve)
+			spawned := stubNoSpawn(t)
+
+			result, err := mgr.Start()
+
+			require.Error(t, err)
+			assert.Equal(t, HeldPortText(mgr.config.ListenAddr, port), err.Error())
+			assert.Empty(t, server.killFrames, "no host:kill without adb's FAIL to the identity request")
+			assert.Empty(t, result.StoppedAdbServer, "nothing was stopped, so the caller prints no notice")
+			assert.False(t, *spawned)
+		})
+	}
+}
+
+func TestGivenAnOccupantSilentToTheIdentityRequestWhenProbedThenTheProbeEndsWithinItsBound(t *testing.T) {
+	port := freePort(t)
+	occupyPort(t, port, silentOccupant)
+	started := time.Now()
+
+	_, isBridge, refused := ProbeBridge(OccupantAddress("127.0.0.1", port), testStopWithin)
+
+	assert.False(t, isBridge)
+	assert.False(t, refused)
+	assert.Less(t, time.Since(started), testStopWithin+time.Second)
+}
+
+func TestGivenABridgeOnThePortWhenStartClearsItThenNoHostKillIsSentAndTheErrorNamesThePid(t *testing.T) {
+	mgr := newTestManager(t)
+	port := mgr.config.ListenPort
+	server := startFakeBridge(t, port, 4242)
+	spawned := stubNoSpawn(t)
+
+	result, err := mgr.Start()
+
+	require.Error(t, err)
+	assert.Equal(t, BridgeHoldsPortText(mgr.config.ListenAddr, port, 4242), err.Error())
+	assert.False(t, *spawned, "no child may spawn onto a held port")
+	assert.Empty(t, server.killFrames, "a bridge never gets host:kill")
+	assert.Empty(t, result.StoppedAdbServer, "a bridge is not reported as a stopped adb server")
+}
+
+func TestGivenABridgeOnThePortAndALivePidfileWhenStartClearsItThenAConcurrentStartWon(t *testing.T) {
+	mgr := newTestManager(t)
+	server := startFakeBridge(t, mgr.config.ListenPort, os.Getpid())
+	require.NoError(t, mgr.pidFile.Write())
+
+	stoppedAdbServer, err := mgr.clearListenPort()
+
+	assert.ErrorIs(t, err, errStartedMeanwhile, "this directory's own daemon won the race")
+	assert.Empty(t, stoppedAdbServer)
+	assert.Empty(t, server.killFrames)
+}
+
+func TestGivenABridgeOccupantWhenTheErrorIsWordedThenADefaultAddressUserSeesNoListenAddrFlag(t *testing.T) {
+	text := BridgeHoldsPortText(config.DefaultListenAddr, 5037, 4242)
+
+	assert.Equal(t, "another devicefarm-connect bridge (pid 4242) is listening on 127.0.0.1:5037, so a new bridge "+
+		"cannot bind it. That bridge was started from another working directory or by another user, so this shell "+
+		"cannot stop it. Run 'devicefarm-connect bridge stop' in the shell that started it, or check that process 4242 "+
+		"is devicefarm-connect and end it, then run 'devicefarm-connect bridge start --port 5037'. Or start a bridge on "+
+		"another port with 'devicefarm-connect bridge start --port <n>' and point adb at it with 'adb -P <n>'.", text)
+	assert.NotContains(t, text, "--listen-addr")
+	assert.Contains(t, BridgeHoldsPortText("0.0.0.0", 5037, 4242), "--listen-addr 0.0.0.0", "any other address keeps its flag")
+}
+
+// answeringOccupant writes reply to each connection once its first bytes arrive, then closes it.
+func answeringOccupant(reply string) func(net.Conn) {
+	return func(conn net.Conn) {
+		defer conn.Close()
+		if _, err := conn.Read(make([]byte, 64)); err == nil {
+			_, _ = io.WriteString(conn, reply)
+		}
+	}
+}
+
+// startFakeAdbServerOn serves one connection as an adb server does.
+func startFakeAdbServerOn(conn net.Conn) {
+	(&fakeAdbServer{answer: killExits, killFrames: make(chan string, 8)}).serve(conn)
 }

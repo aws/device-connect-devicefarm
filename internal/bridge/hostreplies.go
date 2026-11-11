@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -267,18 +268,23 @@ func allDigits(text string) bool {
 	return text != "" && strings.Trim(text, "0123456789") == ""
 }
 
-// answerServerQuery answers, with no device attached, the lone host requests an adb server
-// answers without one: host:version (ActiveDevice.writeVersionWithNoDevice), the device lists as
-// the empty list, and the forward requests adb answers with no transport
-// (noTransportForwardReply). One reply, then the close. answered false: a device is attached
-// (its copies answer), any other request, or one behind a select.
+// answerServerQuery answers lone host requests from the daemon's own state. The bridge identity
+// (adbwire.BridgeIdentityService) gets the daemon's pid, with or without a device. With no device,
+// it answers what an adb server answers without one: host:version
+// (ActiveDevice.writeVersionWithNoDevice), the device lists as the empty list, and the forward
+// requests adb answers with no transport (noTransportForwardReply). One reply, then the close.
+// answered false: a device is attached (its copies answer) and the request is not the identity,
+// any other request, or one behind a select.
 func answerServerQuery(tcp net.Conn, clientOpening opening, deviceAttached bool, device *ActiveDevice,
 	logger *slog.Logger) (answered bool) {
-	if deviceAttached || clientOpening.selected {
+	if clientOpening.selected || deviceAttached && clientOpening.service != adbwire.BridgeIdentityService {
 		return false
 	}
 	var write func(io.Writer) error
 	switch clientOpening.service {
+	case adbwire.BridgeIdentityService:
+		// The pid and nothing else: no ARN, endpoint, path or user name.
+		write = func(writer io.Writer) error { return adbwire.WriteBridgeIdentity(writer, os.Getpid()) }
 	case hostVersionService:
 		write = device.writeVersionWithNoDevice
 	case "host:devices", "host:devices-l":
