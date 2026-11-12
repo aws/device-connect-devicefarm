@@ -1,7 +1,7 @@
 ---
 name: Feature request
 about: Propose a change to devicefarm-connect
-labels: enhancement
+labels: [enhancement, needs-triage]
 ---
 
 ## Problem
