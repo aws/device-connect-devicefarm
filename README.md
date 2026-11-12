@@ -8,8 +8,8 @@ for developers and testers who use Device Farm devices from the command line.
 
 ## Requirements
 
-- A Mac with macOS 13 or later (Apple silicon or Intel), or Linux on x86-64 or ARM64. This release has no
-  Windows download; see "Platform support".
+- A Mac with macOS 13 or later (Apple silicon or Intel), Linux on x86-64 or ARM64, or Windows 10 build 17063
+  or later on x86-64.
 - The `adb` command from the Android SDK platform tools. The program works with adb 1.0.41 and is
   tested with platform-tools 37.
 - A Device Farm remote access session and its ARN (Amazon Resource Name).
@@ -25,12 +25,14 @@ for developers and testers who use Device Farm devices from the command line.
    | Mac, Apple silicon or Intel | `devicefarm-connect_darwin_universal` |
    | Linux, x86-64 (`x86_64`) | `devicefarm-connect_linux_amd64` |
    | Linux, ARM64 (`aarch64`) | `devicefarm-connect_linux_arm64` |
+   | Windows, x86-64 | `devicefarm-connect_windows_amd64.exe` |
 
 2. Verify the file (see "Verify this download") before you rename it. The checksum list uses the original
    file name.
 
 3. In the download directory, rename the file to `devicefarm-connect` and make it executable. This example
-   uses the Linux x86-64 file.
+   uses the Linux x86-64 file. On Windows, rename the file to `devicefarm-connect.exe` and add its directory
+   to your `PATH`.
 
    ```sh
    mv devicefarm-connect_linux_amd64 devicefarm-connect
@@ -52,11 +54,16 @@ for developers and testers who use Device Farm devices from the command line.
 The macOS file is signed with Amazon's Apple Developer ID and notarized by Apple. On the first run, macOS
 checks the notarization online and then runs the file without a warning.
 
+The Windows file carries an Authenticode signature from Amazon Web Services, Inc. If Windows names a publisher
+before the first run, it must be that name. A new release can show a SmartScreen notice until Windows has seen
+the file often. Verify the file first (see "Verify this download"). Then choose More info, then Run anyway.
+
 ## Verify this download
 
-For each release, there are two ways to verify that the release was built by the AWS Device Farm team. Way 1
-works on every platform and covers every release file. Way 2 works on macOS only and covers the macOS file. On
-a Mac, do both.
+For each release, there are three ways to verify that the release was built by the AWS Device Farm team. Way 1
+works on every platform and covers every release file. Way 2 works on macOS only and covers the macOS file.
+Way 3 works on Windows only and covers the Windows file. On a Mac, do Way 1 and Way 2. On Windows, do Way 3,
+and also Way 1 if you have GnuPG for Windows (Gpg4win) installed.
 
 ### Way 1: check the signed checksum list
 
@@ -122,6 +129,28 @@ online for step 2.
    The output must say `accepted` and `source=Notarized Developer ID`. Those lines prove that Apple notarized
    this exact file under that Developer ID.
 
+### Way 3 (Windows only): check the checksum and the signature in PowerShell
+
+Windows ships neither `gpgv` nor `sha256sum`. The signature check in step 2 proves who signed the file. The
+checksum in step 1 proves that your file matches the release list.
+
+1. Print the checksum of your file. Compare the output with the file's line in `SHA256SUMS`. Letter case
+   does not matter.
+
+   ```powershell
+   Get-FileHash .\devicefarm-connect_windows_amd64.exe -Algorithm SHA256
+   ```
+
+2. Print the signature.
+
+   ```powershell
+   Get-AuthenticodeSignature .\devicefarm-connect_windows_amd64.exe | Format-List Status, StatusMessage, SignerCertificate, TimeStamperCertificate
+   ```
+
+   The output must show `Status : Valid`. The `SignerCertificate` subject must name `Amazon Web Services, Inc.`
+   as the organization (`O`) and `AWS Device Farm` as the organizational unit (`OU`). `TimeStamperCertificate`
+   must not be empty. If one of these checks fails, stop.
+
 ## Release files
 
 | File | What it is |
@@ -129,6 +158,7 @@ online for step 2.
 | `devicefarm-connect_darwin_universal` | The program for macOS. One file for Apple silicon and Intel. |
 | `devicefarm-connect_linux_amd64` | The program for Linux on x86-64. |
 | `devicefarm-connect_linux_arm64` | The program for Linux on ARM64. |
+| `devicefarm-connect_windows_amd64.exe` | The program for Windows on x86-64. |
 | `devicefarm-connect-vX.Y.Z-src.tar.gz` | The source code at the release tag, in one top directory `devicefarm-connect-vX.Y.Z/`. |
 | `SHA256SUMS` | The SHA-256 checksum of each file above. |
 | `SHA256SUMS.sig` | The team's OpenPGP signature of `SHA256SUMS`. |
@@ -411,12 +441,12 @@ Run `devicefarm-connect <command> --help` to see the flags of a command.
 
 ## Platform support
 
-The release has a program for macOS (Apple silicon and Intel), Linux on x86-64 and Linux on ARM64. The
-maintainers run the automated tests on Linux x86-64 only. For the other platforms, the maintainers compile
-the program and run `go vet` over all of the code, tests included. No automated test runs on them.
+The release has a program for macOS (Apple silicon and Intel), Linux on x86-64, Linux on ARM64 and Windows on
+x86-64. The maintainers run the automated tests on Linux x86-64 only. For the other platforms, the
+maintainers compile the program and run `go vet` over all of the code, tests included. No automated test runs
+on them.
 
-The build also produces a Windows x86-64 binary, but this release has no Windows download. A signed Windows
-build follows in a later release. If you build the Windows binary yourself:
+On Windows:
 
 - You need Windows 10 build 17063 or later. The program uses a Unix socket for its control channel, and
   older Windows builds have no Unix sockets.
@@ -532,7 +562,7 @@ community maintains, from the Amazon ECR Public Gallery, and Go modules from the
    | `devicefarm-connect_darwin_amd64` | The Intel half of the macOS file. |
    | `devicefarm-connect_linux_amd64` | The program for Linux on x86-64. |
    | `devicefarm-connect_linux_arm64` | The program for Linux on ARM64. |
-   | `devicefarm-connect_windows_amd64.exe` | The program for Windows on x86-64. This release has no Windows download to compare it with. |
+   | `devicefarm-connect_windows_amd64.exe` | The program for Windows on x86-64. |
 
 2. Compare the build information of a rebuilt binary and a release binary. This step needs Go on your
    computer. Run the command below on each file. Both outputs show the same Go version, the same module
@@ -557,7 +587,9 @@ they run in different build environments.
 The macOS release binary differs from a rebuild in two more ways. The AWS Device Farm team signs the release
 binary with a Developer ID, and Apple notarizes it. A rebuilt macOS binary has no Developer ID signature and
 no notarization. A rebuilt macOS binary still runs on Apple silicon. The Go linker gives the Apple silicon
-half an ad-hoc signature, which is a signature with no developer identity.
+half an ad-hoc signature, which is a signature with no developer identity. The Windows release binary also
+differs from a rebuild. The release binary carries the Authenticode signature added at release. A rebuilt
+Windows binary has none.
 
 ## Contributing
 
