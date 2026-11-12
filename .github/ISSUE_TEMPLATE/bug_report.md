@@ -1,7 +1,7 @@
 ---
 name: Bug report
 about: Something devicefarm-connect does wrong
-labels: bug
+labels: [bug, needs-triage]
 ---
 
 ## What happened

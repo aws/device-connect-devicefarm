@@ -64,6 +64,20 @@ Copy the two license header lines and the blank line after them from the top of 
 the top of every new Go file.
 The maintainers' build rejects a Go file without them, so a maintainer cannot import the file.
 
+### Issue and pull request triage
+
+Every new issue opens with the `needs-triage` label. A maintainer replies to a new issue or pull request
+within one week, excluding observed United States holidays. The maintainer removes the label after the
+maintainer understands the report.
+
+When a maintainer accepts a fix for the next release, the maintainer adds the `waiting-for-release` label. After
+the next release, a maintainer closes every issue that has that label and links the release. For a pull request,
+see "How a pull request lands".
+
+Maintainers do not watch closed issues. If a closed issue still affects you, open a new issue and link the old one.
+
+Never report a security problem in an issue. Follow `SECURITY.md`.
+
 
 ## Code of Conduct
 This project has adopted the [Amazon Open Source Code of Conduct](https://aws.github.io/code-of-conduct).
