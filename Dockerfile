@@ -19,8 +19,8 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download && go mod verify
 
-# Build the program for each release platform, and for Windows. The command
-# uses the release build flags.
+# Build the program for each release platform. The command uses the release
+# build flags.
 # -trimpath leaves this image's directory names out of the binaries.
 # -ldflags "-s -w" leaves the debugging data out of the binaries.
 COPY . .
