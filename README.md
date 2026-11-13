@@ -135,12 +135,12 @@ online for step 2.
 
 ## Usage
 
-`devicefarm-connect` runs as a daemon, a background program that stays up until you stop it. Start it once,
+`devicefarm-connect` runs a bridge, a background program that stays up until you stop it. Start it once,
 attach a device, then use `adb` as usual.
 
 1. Create a remote access session in the Device Farm console or API and copy its ARN.
 
-2. Attach the device. When no daemon runs, `device add` starts one with the default settings, the way `adb`
+2. Attach the device. When no bridge runs, `device add` starts one with the default settings, the way `adb`
    starts its own server. It then prints `* bridge not running; starting it now`, the line
    `devicefarm-connect listening on port 5037 with connected device:` and the device name.
 
@@ -150,14 +150,14 @@ attach a device, then use `adb` as usual.
 
    If adb's own server holds port 5037, the bridge stops it first, as `adb kill-server` does. If a program such
    as Android Studio restarts adb, quit it, run this, then open it again: it then uses the bridge as its adb
-   server. You can also start the daemon yourself on another port. `bridge start` takes `--port`, and its
+   server. You can also start the bridge yourself on another port. `bridge start` takes `--port`, and its
    `--session-arn` is optional. Omit it to start with no device, then attach one with `device add`.
 
    ```sh
    devicefarm-connect bridge start --port 5037 --session-arn arn:aws:devicefarm:us-west-2:123456789012:session:11111111-2222-3333-4444-5555555abcde
    ```
 
-3. Point `adb` at the daemon with `-P` and the same port. The device appears in the list.
+3. Point `adb` at the bridge with `-P` and the same port. The device appears in the list.
 
    ```sh
    adb -P 5037 devices
@@ -180,10 +180,10 @@ attach a device, then use `adb` as usual.
    ```
 
 6. Switch devices. `device list` prints a table with one row per attached device: the device name, the adb
-   serial, the attach age, and the session start and expiry (see "Device list"). The daemon serves one device
+   serial, the attach age, and the session start and expiry (see "Device list"). The bridge serves one device
    at a time, so remove the current device before you add another. `device remove` without `--session-arn`
    detaches the attached device. With `--session-arn`, it detaches the device only when the ARN matches. The
-   daemon keeps running between the commands. The removed device's forward rules are gone.
+   bridge keeps running between the commands. The removed device's forward rules are gone.
 
    ```sh
    devicefarm-connect device list
@@ -191,7 +191,7 @@ attach a device, then use `adb` as usual.
    devicefarm-connect device add --session-arn arn:aws:devicefarm:us-west-2:123456789012:session:66666666-7777-8888-9999-aaaaaaaaaaaa
    ```
 
-7. Check the status, then stop the daemon. Stopping the daemon does not stop your remote access session or
+7. Check the status, then stop the bridge. Stopping the bridge does not stop your remote access session or
    its billing.
 
    ```sh
@@ -202,9 +202,9 @@ attach a device, then use `adb` as usual.
 ### Rules for forward and reverse
 
 - The local end of a forward rule must be `tcp:<port>`. The device end can be `tcp:<port>`,
-  `localabstract:<name>`, `localreserved:<name>`, `localfilesystem:<path>` or `jdwp:<pid>`. The daemon
+  `localabstract:<name>`, `localreserved:<name>`, `localfilesystem:<path>` or `jdwp:<pid>`. The bridge
   rejects any other device end, such as `dev:`, and a bad port number when you create the rule.
-- The daemon does not check that the socket or process exists. If nothing listens there, the daemon still
+- The bridge does not check that the socket or process exists. If nothing listens there, the bridge still
   creates the rule, and each connection to it closes with no data.
 - `tcp:0` as the local end of a forward rule picks a free port and prints it.
 - Both ends of a reverse rule must be `tcp:<port>`. The remote access service rejects other kinds and
@@ -212,7 +212,7 @@ attach a device, then use `adb` as usual.
 - Forward rules belong to the attached device. `device remove`, `bridge stop`, or a failed refresh of the
   session endpoint removes them all.
 - Reverse rules are stored in the remote access session, so `bridge stop` leaves them in place. Each time you
-  attach the device with reverse on, the daemon clears them. Run your `adb reverse` commands again.
+  attach the device with reverse on, the bridge clears them. Run your `adb reverse` commands again.
 - The USB device discovery of the `chrome://inspect` page of Chrome on your computer does not work through
   the program. To inspect Chrome on the device, open Chrome there and forward a local port to its socket.
   Then check that `localhost:9222` is listed under "Discover network targets" on that page, or add it.
@@ -240,10 +240,10 @@ its row. The table follows the terminal width, or `COLUMNS` when stdout is not a
 `serial <serial>`, `attached <age> ago`, `session started <age> ago`, `session expires in <span>`.
 `device list --json` prints one JSON object. `devices` holds one object per device: `sessionArn`,
 `label`, `serial`, `attachedAt`, `sessionStartedAt` and `sessionExpiresAt`. The times are RFC 3339;
-a time the daemon does not know is absent. With no device, `devices` is `[]`, and `lastDetach`
-(`reason`, `at`) appears when the daemon detached the last device itself. Without `--json`, no
+a time the bridge does not know is absent. With no device, `devices` is `[]`, and `lastDetach`
+(`reason`, `at`) appears when the bridge detached the last device itself. Without `--json`, no
 device prints `no device attached; use 'device add' to connect one` on stderr, then `the last
-device detached <age> ago: <reason>` when the daemon detached it itself.
+device detached <age> ago: <reason>` when the bridge detached it itself.
 
 ## Doctor
 
@@ -308,10 +308,10 @@ and exits 0:
 
 What to do
 1. Local machine, listen port: an adb server is listening on 127.0.0.1:35477, so
-   the daemon cannot bind it until that server stops. Run
+   the bridge cannot bind it until that server stops. Run
    'devicefarm-connect bridge start --port 35477': it stops that server first,
    as 'adb kill-server' would. If a program that restarts adb, such as Android
-   Studio, takes the port back, start the daemon on another port with
+   Studio, takes the port back, start the bridge on another port with
    'devicefarm-connect bridge start --port <n>' and point adb at it with
    'adb -P <n>'.
 doctor: 1 of 4 categories passed, 1 warning, 2 not checked
@@ -319,9 +319,9 @@ doctor: 1 of 4 categories passed, 1 warning, 2 not checked
 
 Exit code 0 unless a check is `FAIL`; a `WARN` leaves it 0. The table follows the terminal width,
 or `COLUMNS` when stdout is not a terminal, between 60 and 120 columns. Flags: `--session-arn`
-(optional; defaults to the session of the one device the running daemon holds; with no daemon, no
+(optional; defaults to the session of the one device the running bridge holds; with no bridge, no
 device or several devices, the session, the connection to the device and the adb versions are not
-checked), `--port` and `--listen-addr` (the address the daemon would bind, same defaults as
+checked), `--port` and `--listen-addr` (the address the bridge would bind, same defaults as
 `bridge start`), `--verbose` (one line per check, with its id, instead of the table), `--json` (one
 compact JSON object instead of the table; same exit code) and the global `--debug`. Run the doctor
 from the shell that will run `bridge start`: the bridge inherits that shell's environment. The
@@ -336,9 +336,9 @@ doctor reports a running bridge in the Local machine row and does not change it.
 
 Side effects:
 
-- creates the client's working directory if absent, as every command does, and forgets a daemon
+- creates the client's working directory if absent, as every command does, and forgets a bridge
   that no longer runs, as the `bridge` commands do;
-- binds and frees the listen address when no daemon holds it, and one port on `127.0.0.1` for
+- binds and frees the listen address when no bridge holds it, and one port on `127.0.0.1` for
   `adb forward`;
 - asks whatever holds the listen address for its adb version;
 - makes one `GetRemoteAccessSession` call;
@@ -347,7 +347,7 @@ Side effects:
 - runs `adb version` on each adb it finds on PATH, in `ANDROID_HOME` or `ANDROID_SDK_ROOT`, or in
   Android Studio's default SDK location; none starts an adb server.
 
-`doctor` starts no daemon and installs no forward or reverse rule. Each check has its own timeout;
+`doctor` starts no bridge and installs no forward or reverse rule. Each check has its own timeout;
 a run in which every check times out ends in under two minutes.
 
 `--json` prints one compact object on stdout instead of the table, with the same exit code:
@@ -368,13 +368,13 @@ version of `devicefarm-connect`.
 
 ## Credentials and permissions
 
-The daemon makes the AWS calls, not the command you type, so the shell where you start the daemon (`bridge
-start`, or `device add` when no daemon runs) must have your AWS credentials. The daemon reads them from the standard AWS SDK credential chain: environment variables,
+The bridge makes the AWS calls, not the command you type, so the shell where you start the bridge (`bridge
+start`, or `device add` when no bridge runs) must have your AWS credentials. The bridge reads them from the standard AWS SDK credential chain: environment variables,
 then your AWS config and credentials files.
 
-The daemon needs one permission: `devicefarm:GetRemoteAccessSession` on the session ARN.
+The bridge needs one permission: `devicefarm:GetRemoteAccessSession` on the session ARN.
 
-Device Farm remote access is offered only in `us-west-2` today. The daemon targets that region and rejects a
+Device Farm remote access is offered only in `us-west-2` today. The bridge targets that region and rejects a
 session ARN from any other region.
 
 ## Flags
@@ -386,17 +386,17 @@ Run `devicefarm-connect <command> --help` to see the flags of a command.
 | `--debug` | every command | Debug-level logs. The default is info. |
 | `--version`, `-v` | `devicefarm-connect` alone | Prints the release version. |
 | `--port` | `bridge start`, `doctor` | The local TCP port for adb clients. Default `5037`, adb's own default. |
-| `--log` | `bridge start` | The daemon log file. Default `devicefarm-connect.log` in the runtime directory. |
+| `--log` | `bridge start` | The bridge log file. Default `devicefarm-connect.log` in the runtime directory. |
 | `--allow-adb-reverse` | `bridge start` | Turns on `adb reverse`. Off by default. |
 | `--session-arn` | `bridge start`, `device add`, `device remove`, `doctor` | The remote access session ARN. `device remove` without it detaches the attached device. |
 
 - The runtime directory is `$XDG_RUNTIME_DIR/devicefarm-connect`, or a per-user directory under the system
   temp directory when that variable is not set. The log, pid file and control socket live there.
-- `device add` and `device list` start the daemon with the default settings when none runs. They take no
-  listener flags, so to pick a port or turn reverse on, run `bridge start` first. Against a running daemon,
-  `bridge start` attaches the device you name or prints the daemon's status, and ignores its other flags. To
+- `device add` and `device list` start the bridge with the default settings when none runs. They take no
+  listener flags, so to pick a port or turn reverse on, run `bridge start` first. Against a running bridge,
+  `bridge start` attaches the device you name or prints the bridge's status, and ignores its other flags. To
   change a flag, run `bridge stop` first.
-- `doctor` takes `--port` and `--listen-addr` too: it checks the address the daemon would bind.
+- `doctor` takes `--port` and `--listen-addr` too: it checks the address the bridge would bind.
 - Without `--allow-adb-reverse`, `adb reverse` prints:
 
   ```
@@ -416,7 +416,7 @@ build follows in a later release. If you build the Windows binary yourself:
 
 - You need Windows 10 build 17063 or later. The program uses a Unix socket for its control channel, and
   older Windows builds have no Unix sockets.
-- `adb.exe` connects to `127.0.0.1` only. A daemon that listens on `::1` is not reachable from it.
+- `adb.exe` connects to `127.0.0.1` only. A bridge that listens on `::1` is not reachable from it.
 - `adb reverse` reaches only servers that listen on `127.0.0.1`. A server that listens on `::1` alone is not
   reachable.
 
@@ -427,7 +427,7 @@ build follows in a later release. If you build the Windows binary yourself:
 - Forward rules per device are capped. One more prints `error: too many forward rules (limit <n>)`, where
   `<n>` is the cap. `adb forward --remove` frees a slot.
 - Reverse rules per device are capped. One more prints `error: too many reverse rules (limit <n>)`. The
-  remote access service stores the rules and the daemon counts them.
+  remote access service stores the rules and the bridge counts them.
 - Open adb connections per device are capped. Local, forwarded and reverse connections share one cap, set by
   the remote access service less a reserve, so a busy device can crowd itself out. One more local connection
   prints `error: too many adb connections (limit <n>)`. One more forwarded connection closes with no data. One
@@ -437,27 +437,27 @@ build follows in a later release. If you build the Windows binary yourself:
   connection, it still lists the device as `device` while commands fail.
 - A device tracker (`adb track-devices`, Android Studio's device chooser) stays open with or without a
   device. It gets the list again at every `device add`, `device remove` and session end, and nothing in
-  between. It ends when its client closes or writes to it, when the daemon stops, when a newly attached
+  between. It ends when its client closes or writes to it, when the bridge stops, when a newly attached
   device's list cannot be copied, or when the client does not read a push in time.
 
 ## Security notes
 
 - **Any program on your computer can use the attached device.** The listener has no authentication, like a
   normal adb server. Any process that reaches the port has the same power as your own `adb`.
-- **Keep the listener on loopback.** The daemon listens on `127.0.0.1` by default.
+- **Keep the listener on loopback.** The bridge listens on `127.0.0.1` by default.
   `bridge start --listen-addr <address>` can move it to any address or hostname, and nothing stops you.
   `--help` does not list the flag. Any machine that can reach that address can drive the attached
-  device and use the daemon's remote access session, with no password or token. With
+  device and use the bridge's remote access session, with no password or token. With
   `--allow-adb-reverse`, that machine can also add reverse rules and reach ports that are open only to
   your computer. Move the listener off loopback only on a network you control. Never put it on an
   address the internet can reach. Scanners such as Shodan find open ports fast.
 - **`adb reverse` lets the device open connections to your computer.** For each connection the device
-  announces, the daemon connects to `127.0.0.1:<port>`, then to `[::1]:<port>` if that is refused. It allows
+  announces, the bridge connects to `127.0.0.1:<port>`, then to `[::1]:<port>` if that is refused. It allows
   only a loopback port that a reverse rule of the attached device names, never its own adb port or a port a
   forward rule uses. With reverse off, `adb reverse` is refused and no notifier opens, so nothing the device
   starts reaches your computer.
-- **Credential scope.** The daemon needs only `devicefarm:GetRemoteAccessSession`. It uses the credentials
-  it inherited at start and stores none. When they expire, the next refresh fails and the daemon detaches the
+- **Credential scope.** The bridge needs only `devicefarm:GetRemoteAccessSession`. It uses the credentials
+  it inherited at start and stores none. When they expire, the next refresh fails and the bridge detaches the
   device. Run `bridge stop`, then `bridge start` from a shell with fresh credentials.
 - **`bridge stop` does not stop billing.** `bridge stop` and `device remove` act on your computer only. The
   remote access session keeps running, and keeps costing, until you stop it in Device Farm.

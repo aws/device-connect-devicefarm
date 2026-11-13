@@ -29,12 +29,12 @@ const (
 
 // errStartedMeanwhile: a concurrent start's daemon took the port before the stop. Start's pidfile
 // re-read turns it into success.
-var errStartedMeanwhile = errors.New("another command started the daemon on this port meanwhile")
+var errStartedMeanwhile = errors.New("another command started the bridge on this port meanwhile")
 
 const (
 	bridgeStartCommand = config.BinaryName + " bridge start"
 	// otherPortClause follows "start" in every text that moves the daemon off a held port.
-	otherPortClause = "the daemon on another port with '" + bridgeStartCommand + " --port <n>' and point adb at it with 'adb -P <n>'"
+	otherPortClause = "the bridge on another port with '" + bridgeStartCommand + " --port <n>' and point adb at it with 'adb -P <n>'"
 )
 
 // portOccupant is what a bind of the listen address found.
@@ -144,8 +144,8 @@ func failCause(conn net.Conn) string {
 
 // HeldPortText is the fix when another program holds the listen port.
 func HeldPortText(listenAddr string, port int) string {
-	return fmt.Sprintf("another program is listening on %s, so the daemon cannot bind it. Start %s, or stop that program "+
-		"and run '%s'. The daemon listens on exactly the port you pass.", net.JoinHostPort(listenAddr, strconv.Itoa(port)),
+	return fmt.Sprintf("another program is listening on %s, so the bridge cannot bind it. Start %s, or stop that program "+
+		"and run '%s'. The bridge listens on exactly the port you pass.", net.JoinHostPort(listenAddr, strconv.Itoa(port)),
 		otherPortClause, StartCommand(listenAddr, port))
 }
 
@@ -178,7 +178,7 @@ func AdbServerKeepsPortFix(listenAddr string, port int, lead KeptPortLead) strin
 		if lead == LeadQuotesStart {
 			return "start " + otherPortClause + "."
 		}
-		return fmt.Sprintf("Start %s. That adb server keeps port %d and the daemon serves adb on the port you pass.", otherPortClause, port)
+		return fmt.Sprintf("Start %s. That adb server keeps port %d and the bridge serves adb on the port you pass.", otherPortClause, port)
 	}
 	command := StartCommand(listenAddr, port)
 	uses := fmt.Sprintf("it then uses the bridge as its adb server on port %d.", port)
@@ -282,11 +282,11 @@ func lostBindError(listenAddr string, port int) error {
 	occupant, _, bindErr := probeListenPort(listenAddr, port)
 	switch occupant {
 	case portAdbServer:
-		return fmt.Errorf("an adb server took %s before the daemon could bind it; a program that restarts adb, such as Android "+
+		return fmt.Errorf("an adb server took %s before the bridge could bind it; a program that restarts adb, such as Android "+
 			"Studio, does this. %s", address, AdbServerKeepsPortFix(listenAddr, port, LeadNamesProgram))
 	case portFree:
-		return fmt.Errorf("another program held %s while the daemon started and has released it. Run '%s'. "+
-			"The daemon binds the port on that start.", address, StartCommand(listenAddr, port))
+		return fmt.Errorf("another program held %s while the bridge started and has released it. Run '%s'. "+
+			"The bridge binds the port on that start.", address, StartCommand(listenAddr, port))
 	}
 	return portError(occupant, bindErr, listenAddr, port)
 }
@@ -305,6 +305,6 @@ func portError(occupant portOccupant, bindErr error, listenAddr string, port int
 	if listenAddr != config.DefaultListenAddr {
 		doctorCommand += " --listen-addr " + listenAddr
 	}
-	return fmt.Errorf("the daemon cannot bind %s: %v. Run '%s' for the fix, or start %s. The daemon listens on exactly "+
+	return fmt.Errorf("the bridge cannot bind %s: %v. Run '%s' for the fix, or start %s. The bridge listens on exactly "+
 		"the port you pass.", address, bindErr, doctorCommand, otherPortClause)
 }

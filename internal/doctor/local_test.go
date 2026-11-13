@@ -465,11 +465,11 @@ func TestGivenTheListenPortWhenCheckedThenTheRowNamesItsOccupant(t *testing.T) {
 		{name: "the running daemon on this port", setup: func(t *testing.T, inputs *Inputs, state *runState) {
 			occupyPort(t, inputs.Config.ListenPort, silentOccupant) // a bind attempt would fail
 			state.daemonStatus, state.daemonPID = control.Response{OK: true, Port: inputs.Config.ListenPort}, 4242
-		}, wantStatus: Pass, wantSummary: "is held by the running daemon (pid 4242)"},
+		}, wantStatus: Pass, wantSummary: "is held by the running bridge (pid 4242)"},
 		{name: "the running daemon on another port", setup: func(_ *testing.T, inputs *Inputs, state *runState) {
 			state.daemonStatus = control.Response{OK: true, Port: inputs.Config.ListenPort + 1, ARN: "arn:1", ReverseEnabled: true}
 			state.daemonPID = 4242
-		}, wantStatus: Warn, wantSummary: "the running daemon (pid 4242) listens on port", wantHint: func(_ string, port int) string {
+		}, wantStatus: Warn, wantSummary: "the running bridge (pid 4242) listens on port", wantHint: func(_ string, port int) string {
 			return otherPortDaemonHint(control.Response{OK: true, Port: port + 1, ARN: "arn:1", ReverseEnabled: true}, port)
 		}, summaryNamesNoAddress: true},
 	}
@@ -508,7 +508,7 @@ func TestGivenAListenAddressWithControlCharactersWhenCheckedThenTheSummaryStaysO
 }
 
 func TestGivenAnAdbServerOnTheDefaultPortWhenItsHintIsBuiltThenTheFixQuitsTheProgramThatRestartsAdb(t *testing.T) {
-	assert.Equal(t, "an adb server is listening on 127.0.0.1:5037, so the daemon cannot bind it until that server stops. Run "+
+	assert.Equal(t, "an adb server is listening on 127.0.0.1:5037, so the bridge cannot bind it until that server stops. Run "+
 		"'devicefarm-connect bridge start --port 5037': it stops that server first, as 'adb kill-server' would. If a program that "+
 		"restarts adb, such as Android Studio, takes the port back, quit that program, run 'devicefarm-connect bridge start --port 5037' "+
 		"again, then open it: it then uses the bridge as its adb server on port 5037.",

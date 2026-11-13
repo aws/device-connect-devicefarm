@@ -61,13 +61,13 @@ const (
 		"https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-authentication.html"
 	proxyIgnoredNote = "'HTTPS_PROXY' is set, but the connection to the device does not use it, so no adb traffic gets " +
 		"through when this machine reaches the internet only through that proxy."
-	reverseOnSummary   = "the running daemon has adb reverse on for this session"
+	reverseOnSummary   = "the running bridge has adb reverse on for this session"
 	reversePassSummary = "adb reverse is available on this session"
 	// reverseHeldSummary replaces bridge.ErrNotifierSlotTaken's text, which names the mechanism.
 	reverseHeldSummary = "another client, or an earlier run of this client, still uses adb reverse on this session"
 	// adbHostVersionTail ends the broken-adb WARN hints.
 	adbHostVersionTail = " The remote adb server is 1.0.%[3]d, and a local adb on another version cannot connect through " +
-		"the daemon."
+		"the bridge."
 	// Broken-adb WARN format args: quoted `<adb> version` command, quoted doctor rerun, remote adb server's version.
 	adbFailedHint = "the local %[1]s failed or did not finish, so that adb's version is unknown. Run %[1]s by hand and fix what it " +
 		"reports, then rerun %[2]s." + adbHostVersionTail
@@ -75,7 +75,7 @@ const (
 		"and check that it is the platform-tools adb, then rerun %[2]s." + adbHostVersionTail
 	// versionProbeFailLead puts user words before the probe error, the cause AWS Support needs.
 	versionProbeFailLead = "the remote adb server did not answer its version request: "
-	versionProbeHint     = "there is an error communicating with the remote adb server, so an adb connection through the daemon " +
+	versionProbeHint     = "there is an error communicating with the remote adb server, so an adb connection through the bridge " +
 		"would fail the same way. Try again later, or contact AWS Support for assistance."
 	// noAdbSummary takes the remote adb server's version.
 	noAdbSummary = "no adb found on PATH or in an Android SDK, so its version was not checked against the remote adb server (1.0.%d)"
@@ -102,13 +102,13 @@ const (
 
 func invalidArnHint(inputs Inputs) string {
 	return fmt.Sprintf("'%s' is not a Device Farm remote access session ARN in us-west-2. Pass '--session-arn' the ARN that the "+
-		"Device Farm console or '%s' printed. The daemon reaches the device through that ARN and refuses any other.",
+		"Device Farm console or '%s' printed. The bridge reaches the device through that ARN and refuses any other.",
 		safeValue(inputs.SessionARN), createSessionCommand)
 }
 
 func accessDeniedHint(inputs Inputs) string {
 	return fmt.Sprintf("these credentials may not read session '%s'. Allow 'devicefarm:GetRemoteAccessSession' on it in the IAM "+
-		"policy of this profile or role, or set 'AWS_PROFILE' to a profile that has it. The daemon makes the same call every "+
+		"policy of this profile or role, or set 'AWS_PROFILE' to a profile that has it. The bridge makes the same call every "+
 		"few minutes while the device is attached, so the permission must stay for that whole time.",
 		safeValue(inputs.SessionARN))
 }
@@ -120,27 +120,27 @@ func sessionGoneHint(inputs Inputs) string {
 }
 
 func unsupportedDeviceHint(inputs Inputs) string {
-	return fmt.Sprintf("session '%s' runs on an Android release older than this client supports, so the daemon cannot attach it. "+
+	return fmt.Sprintf("session '%s' runs on an Android release older than this client supports, so the bridge cannot attach it. "+
 		"Start a new remote access session on a device with a newer Android release (the summary names the oldest one "+
-		"supported) %s. The daemon refuses the older device at attach time too.", safeValue(inputs.SessionARN), passArnTail)
+		"supported) %s. The bridge refuses the older device at attach time too.", safeValue(inputs.SessionARN), passArnTail)
 }
 
 // nonAndroidDeviceHint: the device is not Android. platform is UnsupportedDeviceError.Platform.
 func nonAndroidDeviceHint(inputs Inputs, platform string) string {
-	return fmt.Sprintf("session '%s' runs on an %s device. This client connects adb to Android devices only, so the daemon "+
+	return fmt.Sprintf("session '%s' runs on an %s device. This client connects adb to Android devices only, so the bridge "+
 		"cannot attach it. Start a new remote access session on an Android device in the Device Farm console or with '%s', %s. "+
-		"The daemon refuses the %s device at attach time too.", safeValue(inputs.SessionARN), platform, createSessionCommand,
+		"The bridge refuses the %s device at attach time too.", safeValue(inputs.SessionARN), platform, createSessionCommand,
 		passArnTail, platform)
 }
 
 func sessionEndedHint(inputs Inputs) string {
 	return fmt.Sprintf("session '%s' has ended, so nothing can attach to it. Start a new remote access session in the Device Farm "+
-		"console or with '%s', %s. A daemon attached to a session that ends drops the device within a few minutes.",
+		"console or with '%s', %s. A bridge attached to a session that ends drops the device within a few minutes.",
 		safeValue(inputs.SessionARN), createSessionCommand, passArnTail)
 }
 
 func notRunningHint(inputs Inputs) string {
-	return fmt.Sprintf("this session has no interactive endpoint yet (it is still starting, or not RUNNING), so the daemon "+
+	return fmt.Sprintf("this session has no interactive endpoint yet (it is still starting, or not RUNNING), so the bridge "+
 		"cannot attach it. Wait until 'aws devicefarm get-remote-access-session --arn %s --region us-west-2' reports status "+
 		"RUNNING with an endpoint, then rerun %s.", safeValue(inputs.SessionARN), doctorRerun(inputs))
 }
@@ -149,14 +149,14 @@ func requestRejectedHint(inputs Inputs) string {
 	return fmt.Sprintf("Device Farm rejected the request for session '%s' (the summary names the code), so the request itself "+
 		"is at fault: expired or wrong credentials, a bad signature or a clock that is off, not the network. Run "+
 		"'aws sts get-caller-identity' with the same profile or keys and fix what it reports, or the system clock on a "+
-		"signature error, then rerun %s. The daemon signs its calls the same way and would detach the device on the same answer.",
+		"signature error, then rerun %s. The bridge signs its calls the same way and would detach the device on the same answer.",
 		safeValue(inputs.SessionARN), doctorRerun(inputs))
 }
 
 func sessionNetworkHint(inputs Inputs) string {
 	return fmt.Sprintf("the call to Device Farm for session '%s' failed. Check the network path from this machine to "+
 		"'devicefarm.us-west-2.amazonaws.com'; 'HTTPS_PROXY' applies to this call, so set or clear it to match your network. "+
-		"The daemon makes the same call when it attaches and every few minutes after.", safeValue(inputs.SessionARN))
+		"The bridge makes the same call when it attaches and every few minutes after.", safeValue(inputs.SessionARN))
 }
 
 // sessionArnSkipSummary is the session row's SKIP text with no ARN and no device.
@@ -164,7 +164,7 @@ const sessionArnSkipSummary = "pass --session-arn to check the session, the devi
 
 // severalSessionsSkipSummary is the session row's SKIP text with no ARN and several devices.
 // It takes the device count.
-const severalSessionsSkipSummary = "the daemon holds %d devices; pass --session-arn to pick the session to check"
+const severalSessionsSkipSummary = "the bridge holds %d devices; pass --session-arn to pick the session to check"
 
 // sessionToCheck is the session the session and relay rows check: the trimmed --session-arn
 // value, else the session of the one device the running daemon holds (fromDaemon true), else
@@ -244,7 +244,7 @@ func checkSessionRunning(ctx context.Context, inputs Inputs, state *runState) Re
 	}
 	state.endpoint = info.Endpoint
 	if fromDaemon {
-		return Result{Status: Pass, Summary: fmt.Sprintf("RUNNING: %s (the session the daemon holds: %s)", info.Label, safeValue(sessionARN))}
+		return Result{Status: Pass, Summary: fmt.Sprintf("RUNNING: %s (the session the bridge holds: %s)", info.Label, safeValue(sessionARN))}
 	}
 	return Result{Status: Pass, Summary: "RUNNING: " + info.Label}
 }
@@ -336,7 +336,7 @@ func withProbeBudget(ctx context.Context) (context.Context, context.CancelFunc) 
 // relayHint is the one hint for a failed relay probe; the summary names the failure. With a
 // proxy set, it adds that the websocket connection ignores it.
 func relayHint(inputs Inputs) string {
-	hint := fmt.Sprintf("Device Farm or the device did not complete the adb connection, so an adb connection through the daemon "+
+	hint := fmt.Sprintf("Device Farm or the device did not complete the adb connection, so an adb connection through the bridge "+
 		"would fail the same way. Rerun %s once; a second failure means the network path to Device Farm or the device itself "+
 		"is at fault, so check the session in the Device Farm console.", doctorRerun(inputs))
 	if os.Getenv("HTTPS_PROXY") != "" || os.Getenv("https_proxy") != "" {
@@ -347,13 +347,13 @@ func relayHint(inputs Inputs) string {
 
 func reattachHint(inputs Inputs) string {
 	return fmt.Sprintf("Device Farm did not resume the adb session on a new connection, so a live adb connection would drop "+
-		"when the daemon reconnects. Rerun %s once. A second failure means Device Farm does not keep adb sessions across "+
+		"when the bridge reconnects. Rerun %s once. A second failure means Device Farm does not keep adb sessions across "+
 		"reconnects.", doctorRerun(inputs))
 }
 
 func slotHeldHint(inputs Inputs) string {
 	return fmt.Sprintf("another client still uses adb reverse on this session, so Device Farm would refuse 'adb reverse' through "+
-		"the daemon. Stop that client with '%s' on the machine where it runs, or wait for Device Farm to release it, then rerun "+
+		"the bridge. Stop that client with '%s' on the machine where it runs, or wait for Device Farm to release it, then rerun "+
 		"%s. Device Farm lets one client at a time use adb reverse on a device.", bridgeStopCommand, doctorRerun(inputs))
 }
 
@@ -419,7 +419,7 @@ func matchSummary(adbs []localAdb, hostVersion int) string {
 func hiddenAdbHint(hiddenAdb string, inputs Inputs) string {
 	return fmt.Sprintf("an adb exists at '%s', reached only through the current directory or a relative PATH entry, so it was not run "+
 		"and its version is unknown. Add that directory to PATH by its absolute path if you meant that adb, then rerun %s. A local adb "+
-		"on another version cannot connect through the daemon.", safeValue(hiddenAdb), doctorRerun(inputs))
+		"on another version cannot connect through the bridge.", safeValue(hiddenAdb), doctorRerun(inputs))
 }
 
 // platformToolsExample: a leading-comma clause naming a platform-tools release whose adb speaks
@@ -472,7 +472,7 @@ func skewHint(mismatched []localAdb, named bool, hostVersion int, inputs Inputs)
 	}
 	labels = append(labels, fmt.Sprintf("the remote adb server is 1.0.%d", hostVersion))
 	command := failingCommand(mismatched, named)
-	cause := fmt.Sprintf("%s, so every %s fails: that adb tries to start its own adb server on the daemon's port and cannot",
+	cause := fmt.Sprintf("%s, so every %s fails: that adb tries to start its own adb server on the bridge's port and cannot",
 		joinAnd(labels), command)
 	fix := fmt.Sprintf("Install platform-tools whose adb is 1.0.%d%s, or put such an adb first on PATH", hostVersion,
 		platformToolsExample(hostVersion))
@@ -512,7 +512,7 @@ func noAdbHint(hiddenAdb string, hostVersion int, inputs Inputs) string {
 	}
 	return fmt.Sprintf("adb was not found on PATH or in an Android SDK (%s), so the doctor could not check that its version "+
 		"matches the remote adb server (1.0.%d)%s. %s Android platform-tools whose adb is 1.0.%d%s, then add its directory to "+
-		"PATH and rerun %s. A local adb on another version cannot connect through the daemon.", sdkLocations,
+		"PATH and rerun %s. A local adb on another version cannot connect through the bridge.", sdkLocations,
 		hostVersion, hidden, action, hostVersion, platformToolsExample(hostVersion), doctorRerun(inputs))
 }
 
