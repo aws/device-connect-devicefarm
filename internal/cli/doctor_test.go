@@ -138,7 +138,7 @@ func TestGivenARuntimeDirVariableNamingARegularFileWhenDoctorRunsThenTheLocalRow
 	assert.Equal(t, "FAIL", statuses["Local machine"])
 	assert.Contains(t, stdout.String(), "| Local machine | FAIL   | working directory: cannot use the working")
 	assert.Contains(t, stdout.String(), "also passed: adb forward")
-	assert.Contains(t, stdout.String(), "| bridge daemon not checked: working directory")
+	assert.Contains(t, stdout.String(), "| bridge not checked: working directory")
 	assert.Contains(t, stdout.String(), "| listen port not checked: working directory failed")
 	assert.Contains(t, stdout.String(), "\nWhat to do\n1. Local machine, working directory: the client cannot use this working")
 	assert.Contains(t, stdout.String(), "'"+daemon.RuntimeDirEnvVar+"'", "the hint names this OS's variable")
