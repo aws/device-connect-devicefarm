@@ -189,7 +189,7 @@ const (
 	fixtureSessionArn         = "arn:aws:devicefarm:us-west-2:123456789012:session:11111111-2222-3333-4444-555555555555"
 	fixtureNoSessionSkip      = "pass --session-arn to check the session, the device connection and adb versions"
 	fixturePortHeldHint       = "an adb server is listening on 127.0.0.1:35477, so the daemon cannot bind it until that server stops. Run 'devicefarm-connect bridge start --port 35477': it stops that server first, as 'adb kill-server' would. If a program that restarts adb, such as Android Studio, takes the port back, start the daemon on another port with 'devicefarm-connect bridge start --port <n>' and point adb at it with 'adb -P <n>'."
-	fixtureReverseOffHint     = "the daemon runs with adb reverse off, so every 'adb reverse' fails. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 40775 --allow-adb-reverse --session-arn " + fixtureSessionArn + "' to start it again with reverse on. '--allow-adb-reverse' lets the device open connections to this machine, so use it only with a device you trust; a public physical device can run software you do not control."
+	fixtureReverseOffHint     = "the bridge runs with adb reverse off, so every 'adb reverse' fails. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 40775 --allow-adb-reverse --session-arn " + fixtureSessionArn + "' to start it again with reverse on. '--allow-adb-reverse' lets the device open connections to this machine, so use it only with a device you trust; a public physical device can run software you do not control."
 	fixtureVersionSkewHint    = "the local adb is 1.0.39 and the remote adb server is 1.0.41, so every adb command fails: that adb tries to start its own adb server on the daemon's port and cannot. Install platform-tools whose adb is 1.0.41, such as platform-tools 37, or put such an adb first on PATH, then rerun 'devicefarm-connect doctor --session-arn " + fixtureSessionArn + " --port 37537'. Until then no adb command reaches the device. The remote adb server is not affected."
 	fixtureCredentialsSummary = `this shell has no usable AWS credentials: failed to refresh cached credentials, no EC2 IMDS role found, operation error ec2imds: GetMetadata, access disabled to EC2 IMDS via client option, or "AWS_EC2_METADATA_DISABLED" environment variable`
 	fixtureCredentialsHint    = "the AWS config did not load or its credential chain resolved nothing, so every Device Farm call fails. Set 'AWS_PROFILE' to a profile with Device Farm access, run 'aws sso login --profile <name>' for a profile that uses SSO, or export 'AWS_ACCESS_KEY_ID' and 'AWS_SECRET_ACCESS_KEY'. For more information, see https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-authentication.html"
@@ -204,7 +204,7 @@ func tableChecks(results map[string]Result) []Check {
 		needs     []string
 	}{
 		{"local.runtime-dir", "working directory", CategoryLocal, nil},
-		{"local.daemon", "bridge daemon", CategoryLocal, []string{"local.runtime-dir"}},
+		{"local.daemon", "bridge", CategoryLocal, []string{"local.runtime-dir"}},
 		{"local.listen-port", "listen port", CategoryLocal, []string{"local.daemon"}},
 		{"local.forward-table", "adb forward", CategoryLocal, nil},
 		{"aws.credentials", "AWS credentials", CategoryAWS, nil},
@@ -243,8 +243,7 @@ func TestGivenCannedResultsWhenWrittenAsATableAt80ColumnsThenTheOutputMatchesByt
 		}, want: `+---------------+--------+-----------------------------------------------------+
 | Category      | Status | Details                                             |
 +---------------+--------+-----------------------------------------------------+
-| Local machine | PASS   | working directory, bridge daemon, listen port, adb  |
-|               |        |   forward                                           |
+| Local machine | PASS   | working directory, bridge, listen port, adb forward |
 +---------------+--------+-----------------------------------------------------+
 | AWS           | PASS   | AWS credentials                                     |
 |               |        | remote access session not checked: pass             |
@@ -260,8 +259,7 @@ doctor: 2 of 4 categories passed, 2 not checked
 		{name: "every check passes", results: nil, want: `+---------------+--------+-----------------------------------------------------+
 | Category      | Status | Details                                             |
 +---------------+--------+-----------------------------------------------------+
-| Local machine | PASS   | working directory, bridge daemon, listen port, adb  |
-|               |        |   forward                                           |
+| Local machine | PASS   | working directory, bridge, listen port, adb forward |
 +---------------+--------+-----------------------------------------------------+
 | AWS           | PASS   | AWS credentials, remote access session              |
 +---------------+--------+-----------------------------------------------------+
@@ -281,8 +279,7 @@ doctor: 4 of 4 categories passed
 +---------------+--------+-----------------------------------------------------+
 | Local machine | WARN   | listen port: an adb server (version 41) is          |
 |               |        |   listening on 127.0.0.1:35477                      |
-|               |        | also passed: working directory, bridge daemon, adb  |
-|               |        |   forward                                           |
+|               |        | also passed: working directory, bridge, adb forward |
 +---------------+--------+-----------------------------------------------------+
 | AWS           | PASS   | AWS credentials                                     |
 |               |        | remote access session not checked: pass             |
@@ -312,8 +309,8 @@ doctor: 1 of 4 categories passed, 1 warning, 2 not checked
 		}, want: `+---------------+--------+-----------------------------------------------------+
 | Category      | Status | Details                                             |
 +---------------+--------+-----------------------------------------------------+
-| Local machine | WARN   | bridge daemon: running (pid 17557) on port 40775;   |
-|               |        |   device Google Pixel 9 (OS 16), session            |
+| Local machine | WARN   | bridge: running (pid 17557) on port 40775; device   |
+|               |        |   Google Pixel 9 (OS 16), session                   |
 |               |        |   arn:aws:devicefarm:us-west-2:123456789012:session |
 |               |        |   :11111111-2222-3333-4444-555555555555; reverse    |
 |               |        |   off                                               |
@@ -331,7 +328,7 @@ doctor: 1 of 4 categories passed, 1 warning, 2 not checked
 +---------------+--------+-----------------------------------------------------+
 
 What to do
-1. Local machine, bridge daemon: the daemon runs with adb reverse off, so every
+1. Local machine, bridge: the bridge runs with adb reverse off, so every
    'adb reverse' fails. Run
    'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 40775 --allow-adb-reverse --session-arn arn:aws:devicefarm:us-west-2:123456789012:session:11111111-2222-3333-4444-555555555555'
    to start it again with reverse on. '--allow-adb-reverse' lets the device open
@@ -352,8 +349,7 @@ doctor: 2 of 4 categories passed, 1 warning, 1 failed
 		}, want: `+---------------+--------+-----------------------------------------------------+
 | Category      | Status | Details                                             |
 +---------------+--------+-----------------------------------------------------+
-| Local machine | PASS   | working directory, bridge daemon, listen port, adb  |
-|               |        |   forward                                           |
+| Local machine | PASS   | working directory, bridge, listen port, adb forward |
 +---------------+--------+-----------------------------------------------------+
 | AWS           | FAIL   | AWS credentials: this shell has no usable AWS       |
 |               |        |   credentials: failed to refresh cached             |
@@ -499,10 +495,10 @@ func TestGivenACheckInAnUnknownCategoryWhenWrittenAsATableThenItRendersAsAnExtra
 	out := renderTable(t, checks, 80)
 
 	lines := strings.Split(out, "\n")
-	assert.Equal(t, "| Dependencies  | PASS   | adb versions                                        |", lines[11])
-	assert.Equal(t, "| extra.long-ca | PASS   | extra check                                         |", lines[13])
-	assert.Equal(t, "| tegory-id     |        |                                                     |", lines[14])
-	assert.Equal(t, "doctor: 5 of 5 categories passed", lines[16])
+	assert.Equal(t, "| Dependencies  | PASS   | adb versions                                        |", lines[10])
+	assert.Equal(t, "| extra.long-ca | PASS   | extra check                                         |", lines[12])
+	assert.Equal(t, "| tegory-id     |        |                                                     |", lines[13])
+	assert.Equal(t, "doctor: 5 of 5 categories passed", lines[15])
 }
 
 // Fails the build when a check in the table names a category outside the table order.
@@ -518,8 +514,8 @@ func TestGivenAWidthOutsideTheBoundsWhenWrittenAsATableThenTheWidthIsClamped(t *
 
 	assert.Len(t, strings.Split(narrow, "\n")[0], report.MinWidth)
 	assert.Len(t, strings.Split(wide, "\n")[0], report.MaxWidth)
-	assert.Contains(t, narrow, "| Local machine | PASS   | working directory, bridge       |\n|               |        |   daemon, listen port, adb      |\n")
-	assert.Contains(t, wide, "| Local machine | PASS   | working directory, bridge daemon, listen port, adb forward                                  |\n")
+	assert.Contains(t, narrow, "| Local machine | PASS   | working directory, bridge,      |\n|               |        |   listen port, adb forward      |\n")
+	assert.Contains(t, wide, "| Local machine | PASS   | working directory, bridge, listen port, adb forward                                         |\n")
 }
 
 func TestGivenTwoWarningsWhenWrittenAsATableThenTheCountLineInflectsWarnings(t *testing.T) {
@@ -528,7 +524,7 @@ func TestGivenTwoWarningsWhenWrittenAsATableThenTheCountLineInflectsWarnings(t *
 		"aws.credentials": {Status: Warn, Summary: "expires soon", Hint: "log in again"},
 	}), 80)
 
-	assert.True(t, strings.HasSuffix(out, "\nWhat to do\n1. Local machine, bridge daemon: restart it\n2. AWS, AWS credentials: log in again\n"+
+	assert.True(t, strings.HasSuffix(out, "\nWhat to do\n1. Local machine, bridge: restart it\n2. AWS, AWS credentials: log in again\n"+
 		"doctor: 2 of 4 categories passed, 2 warnings\n"), out)
 }
 

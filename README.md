@@ -257,20 +257,19 @@ devicefarm-connect doctor --session-arn arn:aws:devicefarm:us-west-2:12345678901
 
 `doctor` runs readiness checks for `bridge start`, `device add`, an adb connection, a reconnect to
 the device, `adb forward` and `adb reverse`, and prints one table row per category on stdout:
-Local machine (the working directory, the daemon and the ports the bridge needs), AWS (this
+Local machine (the working directory, the bridge and the ports it needs), AWS (this
 shell's credentials and the remote access session), Network (the adb connection to the device
 through Device Farm, its reconnect and adb reverse) and Dependencies (the adb installed here
 against the device's adb server). A row is `FAIL` when a check in it failed, `WARN` when one
 works with a caveat, `SKIP` when none ran, else `PASS`; the Details column names each check that
-did not pass and why. On a machine with no daemon, `devicefarm-connect doctor --port 60001` (a
-port nothing holds) prints:
+did not pass and why. On a machine with no bridge running, `devicefarm-connect doctor --port 60001`
+(a port nothing holds) prints:
 
 ```
 +---------------+--------+-----------------------------------------------------+
 | Category      | Status | Details                                             |
 +---------------+--------+-----------------------------------------------------+
-| Local machine | PASS   | working directory, bridge daemon, listen port, adb  |
-|               |        |   forward                                           |
+| Local machine | PASS   | working directory, bridge, listen port, adb forward |
 +---------------+--------+-----------------------------------------------------+
 | AWS           | PASS   | AWS credentials                                     |
 |               |        | remote access session not checked: pass             |
@@ -295,8 +294,7 @@ and exits 0:
 +---------------+--------+-----------------------------------------------------+
 | Local machine | WARN   | listen port: an adb server (version 41) is          |
 |               |        |   listening on 127.0.0.1:35477                      |
-|               |        | also passed: working directory, bridge daemon, adb  |
-|               |        |   forward                                           |
+|               |        | also passed: working directory, bridge, adb forward |
 +---------------+--------+-----------------------------------------------------+
 | AWS           | PASS   | AWS credentials                                     |
 |               |        | remote access session not checked: pass             |
@@ -326,11 +324,15 @@ device or several devices, the session, the connection to the device and the adb
 checked), `--port` and `--listen-addr` (the address the daemon would bind, same defaults as
 `bridge start`), `--verbose` (one line per check, with its id, instead of the table), `--json` (one
 compact JSON object instead of the table; same exit code) and the global `--debug`. Run the doctor
-from the shell that will run `bridge start`: the daemon inherits that shell's environment. A
-running daemon is reported in the Local machine row, not changed; with reverse off that row is
-`WARN` and its fix restarts the daemon with `--allow-adb-reverse`. That flag lets the device open
-connections to this machine, so use it only with a device you trust; a public physical device can
-run software you do not control.
+from the shell that will run `bridge start`: the bridge inherits that shell's environment. The
+doctor reports a running bridge in the Local machine row and does not change it. The row's
+`bridge` check is `WARN` when:
+
+- the bridge detached its device. The fix quotes the bridge's reason.
+- the `--session-arn` session is not attached. The fix is the `device add` command for it.
+- reverse is off. The fix restarts the bridge with `--allow-adb-reverse`. That flag lets the
+  device open connections to this machine, so use it only with a device you trust; a public
+  physical device can run software you do not control.
 
 Side effects:
 
