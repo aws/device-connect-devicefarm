@@ -6,16 +6,13 @@ package session
 import (
 	"context"
 	"errors"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/credentials/processcreds"
 )
 
-// CredentialSummary: where the chain resolved from and when it lapses. Never the key.
+// CredentialSummary: the credential chain's source. Never the key.
 type CredentialSummary struct {
-	Source    string
-	CanExpire bool
-	Expires   time.Time
+	Source string
 }
 
 // errCredentialProcessOutput replaces every credential_process failure, cause included: the
@@ -43,5 +40,5 @@ func ResolveCredentials(ctx context.Context) (CredentialSummary, error) {
 	if err != nil {
 		return CredentialSummary{}, scrubCredentialProcess(err)
 	}
-	return CredentialSummary{Source: credentials.Source, CanExpire: credentials.CanExpire, Expires: credentials.Expires}, nil
+	return CredentialSummary{Source: credentials.Source}, nil
 }

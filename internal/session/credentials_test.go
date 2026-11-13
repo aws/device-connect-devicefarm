@@ -25,14 +25,13 @@ func noEnvCredentials(t *testing.T) {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
 }
 
-func TestGivenEnvironmentCredentialsWhenResolvedThenTheSummaryNamesTheSourceAndNoExpiry(t *testing.T) {
+func TestGivenEnvironmentCredentialsWhenResolvedThenTheSummaryNamesTheSource(t *testing.T) {
 	testsupport.HermeticAWSEnv(t)
 
 	summary, err := ResolveCredentials(context.Background())
 
 	require.NoError(t, err)
 	assert.Equal(t, "EnvConfigCredentials", summary.Source)
-	assert.False(t, summary.CanExpire)
 }
 
 func TestGivenAnEmptyCredentialChainWhenResolvedThenItFails(t *testing.T) {
