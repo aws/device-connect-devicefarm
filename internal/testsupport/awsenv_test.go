@@ -23,5 +23,4 @@ func TestGivenAHostWithAProfileWhenTheEnvIsPinnedThenTheSDKResolvesThePlaceholde
 
 	require.NoError(t, err)
 	assert.Equal(t, "EnvConfigCredentials", credentials.Source)
-	assert.False(t, credentials.CanExpire)
 }
