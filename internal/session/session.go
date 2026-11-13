@@ -12,8 +12,8 @@
 // AWS-backed implementation), the Err sentinels a GetSession failure carries,
 // with SessionEndedError for the status word, RequestRejectedError for the
 // service's error code and UnsupportedDeviceError for the refused device, and
-// ResolveCredentials with its CredentialSummary (the
-// credential chain's source and expiry, for the doctor). Everything else - the
+// ResolveCredentials with its CredentialSummary (the credential chain's source,
+// for the doctor). Everything else - the
 // SDK-shaped getter, the ARN helper, the config loading - is internal to this
 // package, so no aws-sdk-go-v2 type crosses the package boundary.
 package session
