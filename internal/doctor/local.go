@@ -56,9 +56,9 @@ const (
 	// reverseCaveat follows every mention of --allow-adb-reverse.
 	reverseCaveat = "'--allow-adb-reverse' lets the device open connections to this machine, so use it only with a " +
 		"device you trust; a public physical device can run software you do not control."
-	runtimeDirHint = "the client cannot use this working directory, so '" + bridgeStartCommand + "' cannot launch the daemon. " +
+	runtimeDirHint = "the client cannot use this working directory, so '" + bridgeStartCommand + "' cannot launch the bridge. " +
 		"Set '" + daemon.RuntimeDirEnvVar + "' to a directory with a short path that only this user can write, then rerun '" + doctorCommand +
-		"'. Every " + config.BinaryName + " command reads that variable, so 'bridge start' and the daemon use the new directory too."
+		"'. Every " + config.BinaryName + " command reads that variable, so 'bridge start' and the bridge it launches use the new directory too."
 	deadDaemonHint = "a bridge is registered but did not report its status, so '" + bridgeStartCommand + "' starts nothing. Run '" +
 		restartDaemonHint + "'. The stop ends that bridge and the start launches a new one."
 )
@@ -123,18 +123,18 @@ const (
 // fault, so a user who never passed --listen-addr is not told it exists.
 func listenConfigHint(listenAddr string) string {
 	if listenAddr == config.DefaultListenAddr {
-		return "'--port' does not name a port the daemon can bind. Pass '--port' a number from 1 to 65535, as in '" + bridgeStartCommand +
-			" --port 5037'. The daemon listens on exactly that port, so point adb at the same port."
+		return "'--port' does not name a port the bridge can bind. Pass '--port' a number from 1 to 65535, as in '" + bridgeStartCommand +
+			" --port 5037'. The bridge listens on exactly that port, so point adb at the same port."
 	}
-	return "the listen flags do not name an address the daemon can bind. Pass '--port' a number from 1 to 65535 and " +
-		"'--listen-addr' a non-empty address with no port or brackets, as in '" + bridgeStartCommand + " --port 5037 --listen-addr 127.0.0.1'. The daemon " +
+	return "the listen flags do not name an address the bridge can bind. Pass '--port' a number from 1 to 65535 and " +
+		"'--listen-addr' a non-empty address with no port or brackets, as in '" + bridgeStartCommand + " --port 5037 --listen-addr 127.0.0.1'. The bridge " +
 		"binds exactly that address, so point adb at the same port."
 }
 
 // adbServerHint: bridge start stops the adb server on the probed address before it starts the daemon;
 // a program that takes the port back gets AdbServerKeepsPortFix.
 func adbServerHint(listenAddr string, port int) string {
-	return fmt.Sprintf("an adb server is listening on %s, so the daemon cannot bind it until that server stops. Run '%s': it stops that "+
+	return fmt.Sprintf("an adb server is listening on %s, so the bridge cannot bind it until that server stops. Run '%s': it stops that "+
 		"server first, as 'adb kill-server' would. If a program that restarts adb, such as Android Studio, takes the port back, %s",
 		net.JoinHostPort(listenAddr, strconv.Itoa(port)), daemon.StartCommand(listenAddr, port),
 		daemon.AdbServerKeepsPortFix(listenAddr, port, daemon.LeadQuotesStart))
@@ -143,7 +143,7 @@ func adbServerHint(listenAddr string, port int) string {
 // lowPortHint: the bind was refused for want of permission.
 func lowPortHint(port int) string {
 	return fmt.Sprintf("this user may not bind port %d; ports below 1024 need administrator rights on most systems. "+
-		"Run '%s --port <n>' with a port above 1023 and %s. The daemon then listens on that port instead of %d.",
+		"Run '%s --port <n>' with a port above 1023 and %s. The bridge then listens on that port instead of %d.",
 		port, bridgeStartCommand, adbPointHint, port)
 }
 
@@ -152,14 +152,14 @@ func lowPortHint(port int) string {
 func reservedPortHint(port int) string {
 	return fmt.Sprintf("Windows refuses to bind port %d: the port sits in a range that Hyper-V, WSL or Docker reserved, or another "+
 		"program holds it exclusively. See the reserved ranges with 'netsh int ipv4 show excludedportrange protocol=tcp', then run "+
-		"'%s --port <n>' with a port outside them and %s. The daemon then listens on that port instead of %d.",
+		"'%s --port <n>' with a port outside them and %s. The bridge then listens on that port instead of %d.",
 		port, bridgeStartCommand, adbPointHint, port)
 }
 
 // listenAddrHint: the listen address is not one of this machine's.
 func listenAddrHint(address string, port int) string {
 	return fmt.Sprintf("'%s' is not an address of this machine, so nothing can bind it. Pass '--listen-addr' an address this "+
-		"machine owns, as in '%s --listen-addr 127.0.0.1 --port %d'. The daemon binds exactly that address, so adb must "+
+		"machine owns, as in '%s --listen-addr 127.0.0.1 --port %d'. The bridge binds exactly that address, so adb must "+
 		"reach it there.", safeValue(address), bridgeStartCommand, port)
 }
 
@@ -193,8 +193,8 @@ func heldPortPair(listenAddr string, port int) (summary, hint string) {
 // otherPortDaemonHint moves the running daemon to the probed port, its flags and device kept, or
 // points adb at the port it holds.
 func otherPortDaemonHint(reply control.Response, port int) string {
-	return caveatIf(fmt.Sprintf("the running daemon listens on port %d, not %d, and '%s' starts nothing while that daemon runs. "+
-		"Run '%s' to move it to port %d, or point adb at the running daemon with 'adb -P %d'.",
+	return caveatIf(fmt.Sprintf("the running bridge listens on port %d, not %d, and '%s' starts nothing while it runs. "+
+		"Run '%s' to move it to port %d, or point adb at it with 'adb -P %d'.",
 		reply.Port, port, bridgeStartCommand, restartWith(reply, port, reply.ReverseEnabled), port, reply.Port), reply.ReverseEnabled)
 }
 
@@ -366,10 +366,10 @@ func checkListenPortFree(inputs Inputs, state *runState) Result {
 	address := net.JoinHostPort(cfg.ListenAddr, strconv.Itoa(cfg.ListenPort))
 	if daemonReply, daemonPID := state.daemon(); daemonReply.OK {
 		if daemonReply.Port == cfg.ListenPort {
-			return Result{Status: Pass, Summary: fmt.Sprintf("%s is held by the running daemon (pid %d)", address, daemonPID)}
+			return Result{Status: Pass, Summary: fmt.Sprintf("%s is held by the running bridge (pid %d)", address, daemonPID)}
 		}
 		// bridge start no-ops on the locked pidfile, so a free port proves nothing here.
-		return Result{Status: Warn, Summary: fmt.Sprintf("the running daemon (pid %d) listens on port %d, not %d",
+		return Result{Status: Warn, Summary: fmt.Sprintf("the running bridge (pid %d) listens on port %d, not %d",
 			daemonPID, daemonReply.Port, cfg.ListenPort), Hint: otherPortDaemonHint(daemonReply, cfg.ListenPort)}
 	}
 	listener, err := net.Listen("tcp", address)

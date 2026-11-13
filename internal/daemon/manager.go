@@ -121,7 +121,7 @@ func (m *DaemonManager) Start() error {
 	// openNoFollow refuses a symlink where the OS can.
 	logOut, err := os.OpenFile(m.paths.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND|openNoFollow, 0o600)
 	if err != nil {
-		return fmt.Errorf("open daemon logfile %q: %w", m.paths.LogFile, err)
+		return fmt.Errorf("open bridge logfile %q: %w", m.paths.LogFile, err)
 	}
 	// The child inherits the underlying fd, so closing the parent's handle after
 	// the spawn does not affect the child's logging.
@@ -135,7 +135,7 @@ func (m *DaemonManager) Start() error {
 	args := append([]string{DaemonSubcommand}, m.config.AsDaemonArgs()...)
 	child, exited, err := spawnDaemon(self, args, logOut)
 	if err != nil {
-		return fmt.Errorf("spawn daemon: %w", err)
+		return fmt.Errorf("spawn bridge: %w", err)
 	}
 
 	if err := m.waitUntilRunning(startupTimeout, exited); err != nil {
@@ -174,12 +174,12 @@ func (m *DaemonManager) startupError(waitErr error, offset int64) error {
 	case strings.HasPrefix(childError, listenErrorPrefix(m.config.ListenAddr, port)):
 		return lostBindError(m.config.ListenAddr, port)
 	case childError != "":
-		return fmt.Errorf("the daemon exited while starting: %s. Fix what it reports, then run '%s'. Its log is \"%s\".",
+		return fmt.Errorf("the bridge exited while starting: %s. Fix what it reports, then run '%s'. Its log is \"%s\".",
 			childError, start, logPath)
 	case errors.Is(waitErr, errChildExited):
-		return fmt.Errorf("the daemon exited while starting and logged no error. Check \"%s\", then run '%s'.", logPath, start)
+		return fmt.Errorf("the bridge exited while starting and logged no error. Check \"%s\", then run '%s'.", logPath, start)
 	}
-	return fmt.Errorf("the daemon did not report ready within %s and logged no error, so it was stopped. Check \"%s\", "+
+	return fmt.Errorf("the bridge did not report ready within %s and logged no error, so it was stopped. Check \"%s\", "+
 		"then run '%s'.", startupTimeout, logPath, start)
 }
 
@@ -235,7 +235,7 @@ func (m *DaemonManager) Stop() error {
 		// Windows fails here for a dead pid; Unix never does. The lock decides:
 		// released means exited, held means out of reach.
 		if m.stillRunning(pid) {
-			lookupFailed := fmt.Errorf("find daemon process %d: %w", pid, err)
+			lookupFailed := fmt.Errorf("find bridge process %d: %w", pid, err)
 			if errors.Is(err, os.ErrPermission) {
 				return failure.WithFix(lookupFailed, "stop it from an elevated shell")
 			}
@@ -285,7 +285,7 @@ func (m *DaemonManager) Stop() error {
 		if !m.waitUntilStopped(pid, killTimeout) {
 			// Keep the pidfile: the process lives and holds the listen port, so
 			// status must not report "not running".
-			return fmt.Errorf("daemon %d survived kill after %s; pidfile left in place", pid, killTimeout)
+			return fmt.Errorf("bridge (pid %d) survived kill after %s; pidfile left in place", pid, killTimeout)
 		}
 	}
 	m.logger.Info("daemon stopped", "pid", pid)
@@ -624,11 +624,11 @@ func detachReason(sessionARN string, err error) (reason string, detach bool) {
 	}
 	for _, class := range classifiedFailures {
 		if errors.Is(err, class) {
-			return fmt.Sprintf("the daemon can no longer read remote access session %s: %s; restart the bridge from a shell with working AWS credentials",
+			return fmt.Sprintf("the bridge can no longer read remote access session %s: %s; restart the bridge from a shell with working AWS credentials",
 				sessionARN, classCause(class, err)), true
 		}
 	}
-	return fmt.Sprintf("the daemon could not look up remote access session %s: %v; %s %s' to attach it again",
+	return fmt.Sprintf("the bridge could not look up remote access session %s: %v; %s %s' to attach it again",
 		sessionARN, err, reattachCommand, sessionARN), false
 }
 

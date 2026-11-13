@@ -202,7 +202,7 @@ func TestGivenADialThatFailsWhenTheLookupAnswersThenTheClientReadsTheDetachReaso
 		wantPresent bool
 	}{
 		{name: "detach", verdict: SessionVerdict{Detach: true, Reason: detachedReason}, wantReason: detachedReason},
-		{name: "kept", wantReason: "the daemon could not reach the device: dial tcp 127.0.0.1:1:", wantPresent: true},
+		{name: "kept", wantReason: "the bridge could not reach the device: dial tcp 127.0.0.1:1:", wantPresent: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -336,7 +336,7 @@ func TestGivenAParkedSocketWhoseLateDialFailsWhenClassifiedThenItIsARefusedOpeni
 		io.ErrClosedPipe, lateDial))
 
 	assert.True(t, isRefusedOpening(err))
-	assert.Equal(t, "the daemon could not reach the device: dial tcp 127.0.0.1:1: connect: connection refused", refusalText(err))
+	assert.Equal(t, "the bridge could not reach the device: dial tcp 127.0.0.1:1: connect: connection refused", refusalText(err))
 	assert.False(t, isRefusedOpening(io.ErrClosedPipe), "a failure of the exchange asks nothing")
 }
 
@@ -471,6 +471,6 @@ func TestGivenRefusalErrorsWhenWordedForAdbThenTheServersReasonOrTheDialErrorFol
 	assert.Equal(t, "the device connection was refused: device is busy",
 		refusalText(fmt.Errorf("open the session: %w", &sessionRefusal{reason: "device is busy"})),
 		"the server's reason alone, not the wraps around it")
-	assert.Equal(t, "the daemon could not reach the device: dial tcp: connection refused",
+	assert.Equal(t, "the bridge could not reach the device: dial tcp: connection refused",
 		refusalText(&dialFailure{cause: errors.New("dial tcp: connection refused")}), "a bare cause stands as is")
 }

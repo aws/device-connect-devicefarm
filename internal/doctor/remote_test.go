@@ -119,7 +119,7 @@ func TestGivenNoSessionArnAndOneAttachedDeviceWhenTheSessionCheckRunsThenItResol
 	result := runRemote(t, Inputs{Config: config.Default(), Resolver: resolver}, state, checkSession)
 
 	assert.Equal(t, []string{testSessionARN}, resolver.arns, "the attached session is the one resolved")
-	assert.Equal(t, Result{Status: Pass, Summary: "RUNNING: Pixel 9 (OS 16) (the session the daemon holds: " + testSessionARN + ")"}, result)
+	assert.Equal(t, Result{Status: Pass, Summary: "RUNNING: Pixel 9 (OS 16) (the session the bridge holds: " + testSessionARN + ")"}, result)
 	assert.Equal(t, testsupport.PresignedUnreachableEndpoint, state.endpoint, "the endpoint stays in the state for the relay rows")
 }
 
@@ -132,7 +132,7 @@ func TestGivenNoSessionArnAndSeveralAttachedDevicesWhenTheSessionCheckRunsThenIt
 
 	result := runRemote(t, Inputs{Resolver: resolver}, state, checkSession)
 
-	assert.Equal(t, Result{Status: Skip, Summary: "the daemon holds 2 devices; pass --session-arn to pick the session to check"}, result)
+	assert.Equal(t, Result{Status: Skip, Summary: "the bridge holds 2 devices; pass --session-arn to pick the session to check"}, result)
 	assert.Empty(t, resolver.arns, "several devices, no call")
 }
 
@@ -561,7 +561,7 @@ const (
 	adbOutput41 = "Android Debug Bridge version 1.0.41\nVersion 35.0.2-12147458\n"
 	// Hint fragments the tests share.
 	skewConsequence  = ". Until then no adb command reaches the device. The remote adb server is not affected."
-	noAdbConsequence = ". A local adb on another version cannot connect through the daemon."
+	noAdbConsequence = ". A local adb on another version cannot connect through the bridge."
 	noAdbCause       = "adb was not found on PATH or in an Android SDK ('ANDROID_HOME', 'ANDROID_SDK_ROOT' or Android Studio's " +
 		"default SDK location), so the doctor could not check that its version matches the remote adb server (1.0.41)"
 	sdkManagerFix = "Update Android SDK Platform-Tools in Android Studio's SDK Manager to a release whose adb is 1.0.41, such as " +
@@ -598,12 +598,12 @@ func TestGivenALocalAdbOrNoneWhenTheVersionIsCheckedThenTheRowComparesItWithTheR
 		{name: "an older local adb", adbOutput: adbOutput39, hostReply: "OKAY00040029",
 			wantStatus: Fail, wantText: "local adb 1.0.39 differs from the remote adb server (1.0.41); every adb command fails",
 			wantHint: "the local adb is 1.0.39 and the remote adb server is 1.0.41, so every adb command fails: that adb tries to start " +
-				"its own adb server on the daemon's port and cannot. " +
+				"its own adb server on the bridge's port and cannot. " +
 				"Install platform-tools whose adb is 1.0.41, such as platform-tools 37, or put such an adb first on PATH, then rerun " + rerun + skewConsequence},
 		{name: "a newer local adb than a host with no known platform-tools", adbOutput: adbOutput41, hostReply: "OKAY00040027",
 			wantStatus: Fail, wantText: "local adb 1.0.41 differs from the remote adb server (1.0.39); every adb command fails",
 			wantHint: "the local adb is 1.0.41 and the remote adb server is 1.0.39, so every adb command fails: that adb tries to start " +
-				"its own adb server on the daemon's port and cannot. " +
+				"its own adb server on the bridge's port and cannot. " +
 				"Install platform-tools whose adb is 1.0.39, or put such an adb first on PATH, then rerun " + rerun + skewConsequence},
 		{name: "no adb anywhere", noAdb: true, hostReply: "OKAY00040029", wantStatus: Warn,
 			wantText: "no adb found on PATH or in an Android SDK, so its version was not checked against the remote adb server (1.0.41)",
@@ -657,20 +657,20 @@ func TestGivenSdkAdbsBesideThePathAdbWhenTheVersionIsCheckedThenEveryFoundAdbCou
 			want: Result{Status: Fail,
 				Summary: "local adb 1.0.39 at '%[2]s' differs from the remote adb server (1.0.41); every command from that adb fails",
 				Hint: "Android Studio's adb at '%[2]s' is 1.0.39 and the remote adb server is 1.0.41, so every command from that adb fails: that " +
-					"adb tries to start its own adb server on the daemon's port and cannot. " + sdkManagerFix + ", then rerun %[3]s" + thatAdbConsequence}},
+					"adb tries to start its own adb server on the bridge's port and cannot. " + sdkManagerFix + ", then rerun %[3]s" + thatAdbConsequence}},
 		{name: "no PATH adb and the ANDROID_SDK_ROOT adb matches", setup: sdkOnly("ANDROID_SDK_ROOT", adbOutput41),
 			want: Result{Status: Pass, Summary: "local adb 1.0.41 matches the remote adb server"}},
 		{name: "no PATH adb and the SDK adb differs", setup: sdkOnly("ANDROID_HOME", adbOutput39),
 			want: Result{Status: Fail,
 				Summary: "local adb 1.0.39 at '%[2]s' differs from the remote adb server (1.0.41); every command from that adb fails",
 				Hint: "Android Studio's adb at '%[2]s' is 1.0.39 and the remote adb server is 1.0.41, so every command from that adb fails: that " +
-					"adb tries to start its own adb server on the daemon's port and cannot. " + sdkManagerFix + ", then rerun %[3]s" + thatAdbConsequence}},
+					"adb tries to start its own adb server on the bridge's port and cannot. " + sdkManagerFix + ", then rerun %[3]s" + thatAdbConsequence}},
 		{name: "the PATH adb and the SDK adb both differ", setup: pathAndSdk(adbOutput39, adbOutput40),
 			want: Result{Status: Fail,
 				Summary: "local adb 1.0.39 at '%[1]s' and local adb 1.0.40 at '%[2]s' differ from the remote adb server (1.0.41); every command " +
 					"from any of them fails",
 				Hint: "the local adb at '%[1]s' is 1.0.39, Android Studio's adb at '%[2]s' is 1.0.40 and the remote adb server is 1.0.41, so " +
-					"every command from any of them fails: that adb tries to start its own adb server on the daemon's port and cannot. " +
+					"every command from any of them fails: that adb tries to start its own adb server on the bridge's port and cannot. " +
 					sdkManagerFix + ", and put such an adb first on PATH, then rerun " +
 					"%[3]s. Until then no command from any of them reaches the device. The remote adb server is not affected."}},
 		{name: "one binary reached through PATH and ANDROID_HOME counts once",
@@ -684,7 +684,7 @@ func TestGivenSdkAdbsBesideThePathAdbWhenTheVersionIsCheckedThenEveryFoundAdbCou
 			want: Result{Status: Fail,
 				Summary: "local adb 1.0.39 differs from the remote adb server (1.0.41); every adb command fails",
 				Hint: "the local adb is 1.0.39 and the remote adb server is 1.0.41, so every adb command fails: that adb tries to start its " +
-					"own adb server on the daemon's port and cannot" + studioClause +
+					"own adb server on the bridge's port and cannot" + studioClause +
 					". " + sdkManagerFix + ", then rerun %[3]s" + skewConsequence}},
 		{name: "a PATH symlink to the SDK adb counts once",
 			setup: func(t *testing.T) (string, string) {
@@ -701,7 +701,7 @@ func TestGivenSdkAdbsBesideThePathAdbWhenTheVersionIsCheckedThenEveryFoundAdbCou
 			want: Result{Status: Fail,
 				Summary: "local adb 1.0.39 differs from the remote adb server (1.0.41); every adb command fails",
 				Hint: "the local adb is 1.0.39 and the remote adb server is 1.0.41, so every adb command fails: that adb tries to start its " +
-					"own adb server on the daemon's port and cannot" + studioClause +
+					"own adb server on the bridge's port and cannot" + studioClause +
 					". " + sdkManagerFix + ", then rerun %[3]s" + skewConsequence}},
 		{name: "a broken SDK adb beside a matching PATH adb",
 			setup: func(t *testing.T) (string, string) {
@@ -923,7 +923,7 @@ func TestGivenAMismatchedAdbWhenTheHintIsBuiltThenItSaysEveryCommandFailsAndTheR
 		wantParts  []string
 	}{
 		{name: "a lone PATH adb", mismatched: []localAdb{{path: "/usr/bin/adb", onPath: true, version: 39}},
-			wantParts: []string{"so every adb command fails: that adb tries to start its own adb server on the daemon's port and cannot",
+			wantParts: []string{"so every adb command fails: that adb tries to start its own adb server on the bridge's port and cannot",
 				"Until then no adb command reaches the device. The remote adb server is not affected."}},
 		{name: "a named adb", mismatched: []localAdb{{path: "/opt/tools/adb", onPath: true, version: 39}}, named: true,
 			wantParts: []string{"so every command from that adb fails", "Until then no command from that adb reaches the device."}},

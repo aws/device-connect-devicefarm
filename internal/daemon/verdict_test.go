@@ -37,23 +37,23 @@ func TestGivenEachLookupFailureWhenWordedThenTheReasonNamesTheStateAndOnlyADeadS
 		{name: "ended without a status word", err: fmt.Errorf("lookup: %w", session.ErrSessionEnded),
 			wantReason: "remote access session " + verdictARN + " has ended; " + recoveryCommand, wantDetach: true},
 		{name: "access denied", err: fmt.Errorf("GetRemoteAccessSession: %w: api error", session.ErrAccessDenied),
-			wantReason: "the daemon can no longer read remote access session " + verdictARN +
+			wantReason: "the bridge can no longer read remote access session " + verdictARN +
 				": access denied; restart the bridge from a shell with working AWS credentials", wantDetach: true},
 		{name: "invalid ARN", err: fmt.Errorf("%w: parse", session.ErrInvalidARN),
-			wantReason: "the daemon can no longer read remote access session " + verdictARN +
+			wantReason: "the bridge can no longer read remote access session " + verdictARN +
 				": invalid session ARN; restart the bridge from a shell with working AWS credentials", wantDetach: true},
 		{name: "unsupported device", err: fmt.Errorf("%w", session.ErrUnsupportedDevice),
-			wantReason: "the daemon can no longer read remote access session " + verdictARN +
+			wantReason: "the bridge can no longer read remote access session " + verdictARN +
 				": unsupported device; restart the bridge from a shell with working AWS credentials", wantDetach: true},
 		{name: "no endpoint yet", err: fmt.Errorf("remote access session %q %w (status PREPARING)", verdictARN, session.ErrNoEndpointYet),
-			wantReason: "the daemon can no longer read remote access session " + verdictARN +
+			wantReason: "the bridge can no longer read remote access session " + verdictARN +
 				": has no interactive endpoint yet; restart the bridge from a shell with working AWS credentials", wantDetach: true},
 		{name: "rejected credentials", err: &session.RequestRejectedError{Code: "ExpiredTokenException", Cause: errors.New("api error")},
-			wantReason: "the daemon can no longer read remote access session " + verdictARN +
+			wantReason: "the bridge can no longer read remote access session " + verdictARN +
 				": request rejected (ExpiredTokenException); restart the bridge from a shell with working AWS credentials",
 			wantDetach: true},
 		{name: "throttled", err: errors.New("api error ThrottlingException: slow down"),
-			wantReason: "the daemon could not look up remote access session " + verdictARN +
+			wantReason: "the bridge could not look up remote access session " + verdictARN +
 				": api error ThrottlingException: slow down; run 'devicefarm-connect device add --session-arn " + verdictARN +
 				"' to attach it again"},
 	}
