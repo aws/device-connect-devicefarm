@@ -357,15 +357,15 @@ func TestGivenChildSpawnsButNeverReportsReadyWhenStartedThenErrorsAndKillsOrphan
 // stopRefusedText is what Start returns when the adb server on 127.0.0.1:port did not stop.
 func stopRefusedText(port int, cause string) string {
 	return fmt.Sprintf("an adb server on 127.0.0.1:%d was asked to stop, as 'adb kill-server' asks, and did not (%s). Start the "+
-		"daemon on another port with 'devicefarm-connect bridge start --port <n>' and point adb at it with 'adb -P <n>'. That adb "+
-		"server keeps port %d and the daemon serves adb on the port you pass.", port, cause, port)
+		"bridge on another port with 'devicefarm-connect bridge start --port <n>' and point adb at it with 'adb -P <n>'. That adb "+
+		"server keeps port %d and the bridge serves adb on the port you pass.", port, cause, port)
 }
 
 // heldPortText is what Start returns when another program holds 127.0.0.1:port.
 func heldPortText(port int) string {
-	return fmt.Sprintf("another program is listening on 127.0.0.1:%d, so the daemon cannot bind it. Start the daemon on another "+
+	return fmt.Sprintf("another program is listening on 127.0.0.1:%d, so the bridge cannot bind it. Start the bridge on another "+
 		"port with 'devicefarm-connect bridge start --port <n>' and point adb at it with 'adb -P <n>', or stop that program and run "+
-		"'devicefarm-connect bridge start --port %d'. The daemon listens on exactly the port you pass.", port, port)
+		"'devicefarm-connect bridge start --port %d'. The bridge listens on exactly the port you pass.", port, port)
 }
 
 // closingOccupant closes at once, so a probe does not wait out its timeout.
@@ -472,8 +472,8 @@ func TestGivenAnUnbindablePortWhenStartedThenNoSpawnAndTheTextQuotesTheDoctor(t 
 			err := mgr.Start()
 
 			require.Error(t, err)
-			assert.Equal(t, fmt.Sprintf("the daemon cannot bind %s: %v. Run '%s' for the fix, or start the daemon on another port "+
-				"with 'devicefarm-connect bridge start --port <n>' and point adb at it with 'adb -P <n>'. The daemon listens on "+
+			assert.Equal(t, fmt.Sprintf("the bridge cannot bind %s: %v. Run '%s' for the fix, or start the bridge on another port "+
+				"with 'devicefarm-connect bridge start --port <n>' and point adb at it with 'adb -P <n>'. The bridge listens on "+
 				"exactly the port you pass.", address, bindErr, strings.ReplaceAll(tc.wantDoctor, "<port>", strconv.Itoa(cfg.ListenPort))),
 				err.Error())
 			assert.False(t, *spawned)
@@ -552,9 +552,9 @@ func TestGivenAChildThatExitsWithABindErrorWhenStartedThenThePortIsProbedAgainAn
 		{name: "an adb server took the port", occupy: func(t *testing.T, port int) *fakeAdbServer {
 			return startFakeAdbServer(t, port, killExits)
 		}, wantText: func(port int) string {
-			return fmt.Sprintf("an adb server took 127.0.0.1:%d before the daemon could bind it; a program that restarts adb, such "+
-				"as Android Studio, does this. Start the daemon on another port with 'devicefarm-connect bridge start --port <n>' "+
-				"and point adb at it with 'adb -P <n>'. That adb server keeps port %d and the daemon serves adb on the port you pass.",
+			return fmt.Sprintf("an adb server took 127.0.0.1:%d before the bridge could bind it; a program that restarts adb, such "+
+				"as Android Studio, does this. Start the bridge on another port with 'devicefarm-connect bridge start --port <n>' "+
+				"and point adb at it with 'adb -P <n>'. That adb server keeps port %d and the bridge serves adb on the port you pass.",
 				port, port)
 		}},
 		{name: "another program took the port", occupy: func(t *testing.T, port int) *fakeAdbServer {
@@ -562,8 +562,8 @@ func TestGivenAChildThatExitsWithABindErrorWhenStartedThenThePortIsProbedAgainAn
 			return nil
 		}, wantText: heldPortText},
 		{name: "the port is free again", occupy: func(*testing.T, int) *fakeAdbServer { return nil }, wantText: func(port int) string {
-			return fmt.Sprintf("another program held 127.0.0.1:%d while the daemon started and has released it. Run "+
-				"'devicefarm-connect bridge start --port %d'. The daemon binds the port on that start.", port, port)
+			return fmt.Sprintf("another program held 127.0.0.1:%d while the bridge started and has released it. Run "+
+				"'devicefarm-connect bridge start --port %d'. The bridge binds the port on that start.", port, port)
 		}},
 	}
 	for _, tc := range tests {
@@ -600,7 +600,7 @@ func TestGivenAChildThatExitsWithAnotherErrorWhenStartedThenThatErrorIsTheTextAt
 
 	require.Error(t, err)
 	assert.Less(t, time.Since(started), startupTimeout, "a child that exits ends the wait at once")
-	assert.Equal(t, fmt.Sprintf("the daemon exited while starting: %s. Fix what it reports, then run 'devicefarm-connect bridge "+
+	assert.Equal(t, fmt.Sprintf("the bridge exited while starting: %s. Fix what it reports, then run 'devicefarm-connect bridge "+
 		"start --port %d'. Its log is \"%s\".", childError, mgr.config.ListenPort, mgr.paths.LogFile), err.Error())
 }
 
@@ -613,7 +613,7 @@ func TestGivenAChildWhoseControlSocketFailsWhenStartedThenItsErrorIsNotTakenForA
 	err := mgr.Start()
 
 	require.Error(t, err)
-	assert.Equal(t, fmt.Sprintf("the daemon exited while starting: %s. Fix what it reports, then run 'devicefarm-connect bridge "+
+	assert.Equal(t, fmt.Sprintf("the bridge exited while starting: %s. Fix what it reports, then run 'devicefarm-connect bridge "+
 		"start --port %d'. Its log is \"%s\".", controlError, mgr.config.ListenPort, mgr.paths.LogFile), err.Error())
 }
 
@@ -628,7 +628,7 @@ func TestGivenAChildThatLogsNoErrorWhenItExitsOrTimesOutThenTheLogPathIsNamed(t 
 		err := mgr.Start()
 
 		require.Error(t, err)
-		assert.Equal(t, fmt.Sprintf("the daemon exited while starting and logged no error. Check \"%s\", then run "+
+		assert.Equal(t, fmt.Sprintf("the bridge exited while starting and logged no error. Check \"%s\", then run "+
 			"'devicefarm-connect bridge start --port %d'.", mgr.paths.LogFile, mgr.config.ListenPort), err.Error())
 	})
 	t.Run("the child never reports ready", func(t *testing.T) {
@@ -642,7 +642,7 @@ func TestGivenAChildThatLogsNoErrorWhenItExitsOrTimesOutThenTheLogPathIsNamed(t 
 		err := mgr.Start()
 
 		require.Error(t, err)
-		assert.Equal(t, fmt.Sprintf("the daemon did not report ready within 100ms and logged no error, so it was stopped. Check "+
+		assert.Equal(t, fmt.Sprintf("the bridge did not report ready within 100ms and logged no error, so it was stopped. Check "+
 			"\"%s\", then run 'devicefarm-connect bridge start --port %d'.", mgr.paths.LogFile, mgr.config.ListenPort), err.Error())
 	})
 }

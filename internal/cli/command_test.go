@@ -181,13 +181,13 @@ func TestGivenNoBridgeWhenAddDeviceInvokedThenStartsTheBridgeAndAttaches(t *test
 
 func TestGivenBridgeStartFailsWhenAddDeviceInvokedThenErrorsWithTheStartFailure(t *testing.T) {
 	shortRuntimeDir(t)
-	startFailure := errors.New("spawn daemon: exec format error")
+	startFailure := errors.New("spawn bridge: exec format error")
 	stubBridgeStart(t, func(*daemon.DaemonManager) error { return startFailure })
 
 	out, err := execRoot(t, "device", "add", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
 
 	require.ErrorIs(t, err, startFailure)
-	assert.ErrorContains(t, err, "could not start the bridge daemon")
+	assert.ErrorContains(t, err, "could not start the bridge")
 	assert.NotContains(t, out.String(), "listening on port")
 }
 
@@ -286,7 +286,7 @@ func TestGivenDaemonClosesWithoutReplyWhenRemoveDeviceInvokedThenSurfacesTranspo
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, control.ErrDaemonNotRunning)
 	assert.ErrorIs(t, err, io.EOF)
-	assert.ErrorContains(t, err, "the bridge daemon did not answer: read control response")
+	assert.ErrorContains(t, err, "the bridge did not answer: read control response")
 }
 
 // fakeDaemonWithPixel is a daemon with one attached device. Ago offsets only grow; the expiry
@@ -416,7 +416,7 @@ func TestGivenRunningDaemonWithDevicesWhenStatusInvokedThenReportsTheCountNotThe
 			out, err := execRoot(t, "bridge", "status")
 
 			require.NoError(t, err)
-			assert.Equal(t, fmt.Sprintf("devicefarm-connect daemon is running (pid %d), %s; run 'device list' for details\n",
+			assert.Equal(t, fmt.Sprintf("devicefarm-connect bridge is running (pid %d), %s; run 'device list' for details\n",
 				os.Getpid(), tc.want), out.String())
 		})
 	}
@@ -431,7 +431,7 @@ func TestGivenRunningDaemonWithoutDeviceWhenStatusInvokedThenReportsNoDevice(t *
 
 	require.NoError(t, err)
 	// Literal on purpose: a changed BinaryName must fail here.
-	assert.Contains(t, out.String(), "devicefarm-connect daemon is running (pid ")
+	assert.Contains(t, out.String(), "devicefarm-connect bridge is running (pid ")
 	assert.Contains(t, out.String(), "no device attached")
 }
 
@@ -442,7 +442,7 @@ func TestGivenPidfileButNoControlSocketWhenStatusInvokedThenReportsNotRunning(t 
 	out, err := execRoot(t, "bridge", "status")
 
 	require.NoError(t, err)
-	assert.Equal(t, config.BinaryName+" daemon is not running\n", out.String())
+	assert.Equal(t, config.BinaryName+" bridge is not running\n", out.String())
 }
 
 func TestGivenNoSessionARNWhenStartBridgeInvokedThenStartsWithoutAttaching(t *testing.T) {
@@ -491,15 +491,15 @@ func TestGivenNoBridgeWhenStartBridgeInvokedThenStartsItAndPrintsTheListeningLin
 }
 
 func TestGivenBridgeStartFailsWhenStartBridgeInvokedWithARNThenErrorsWithTheStartFailureOnly(t *testing.T) {
-	// The start error must not be dressed up as "daemon started but attaching failed".
+	// The start error must not be dressed up as "bridge started but attaching failed".
 	shortRuntimeDir(t)
-	startFailure := errors.New("spawn daemon: exec format error")
+	startFailure := errors.New("spawn bridge: exec format error")
 	stubBridgeStart(t, func(*daemon.DaemonManager) error { return startFailure })
 
 	_, err := execRoot(t, "bridge", "start", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
 
 	require.ErrorIs(t, err, startFailure)
-	assert.NotContains(t, err.Error(), "daemon started")
+	assert.NotContains(t, err.Error(), "bridge started")
 }
 
 func TestGivenPidfileButNoControlSocketWhenStartBridgeInvokedThenReturnsNotListening(t *testing.T) {
@@ -519,7 +519,7 @@ func TestGivenPidfileButNoControlSocketWhenStartBridgeInvokedWithARNThenReturnsN
 	_, err := execRoot(t, "bridge", "start", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
 
 	require.ErrorIs(t, err, errNotListening)
-	assert.NotContains(t, err.Error(), "daemon started")
+	assert.NotContains(t, err.Error(), "bridge started")
 }
 
 func TestGivenSessionARNWhenStartBridgeInvokedThenStartsAndAttachesDevice(t *testing.T) {
@@ -546,7 +546,7 @@ func TestGivenSessionARNButDaemonCannotResolveWhenStartBridgeInvokedThenErrorsBu
 	_, err := execRoot(t, "bridge", "start", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "daemon started")
+	assert.Contains(t, err.Error(), "bridge started")
 	assert.Contains(t, err.Error(), "retry 'device add'")
 	assert.Contains(t, err.Error(), "session not RUNNING")
 }

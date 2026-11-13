@@ -136,7 +136,7 @@ func TestGivenDaemonRefusesAddWhenBridgeStartExecutedWithARNThenPrintsProblemCau
 
 	assert.Equal(t, 1, code)
 	assert.Equal(t,
-		config.BinaryName+": error: the bridge daemon started but could not attach the device\n"+
+		config.BinaryName+": error: the bridge started but could not attach the device\n"+
 			"  cause: resolve session: session not RUNNING\n"+
 			"  fix:   fix the issue and retry 'device add'\n",
 		out)
@@ -153,7 +153,7 @@ func TestGivenBridgeStartFailsWhenDeviceAddExecutedThenPrintsTheStartNoteProblem
 	assert.Equal(t, 1, code)
 	assert.Equal(t,
 		"* bridge not running; starting it now\n"+
-			config.BinaryName+": error: could not start the bridge daemon\n"+
+			config.BinaryName+": error: could not start the bridge\n"+
 			"  cause: timed out after 5s waiting for pidfile \"/tmp/d.pid\"\n"+
 			"  fix:   read the daemon log: /tmp/d.log\n",
 		out)
@@ -165,7 +165,7 @@ func TestGivenNoDaemonWhenDeviceRemoveExecutedThenSaysNotListening(t *testing.T)
 	code, out := runExecute(t, "device", "remove")
 
 	assert.Equal(t, 1, code)
-	assert.Equal(t, config.BinaryName+": error: the bridge daemon is not listening\n", out)
+	assert.Equal(t, config.BinaryName+": error: the bridge is not listening\n", out)
 }
 
 func TestGivenDaemonBodyFailsWhenExecutedThenLogsTheFailureAndPrintsNoBlock(t *testing.T) {
@@ -214,5 +214,5 @@ func TestGivenCommandSucceedsWhenExecutedThenReturnsZero(t *testing.T) {
 	code, out := runExecute(t, "bridge", "status")
 
 	require.Equal(t, 0, code)
-	assert.Equal(t, config.BinaryName+" daemon is not running\n", out)
+	assert.Equal(t, config.BinaryName+" bridge is not running\n", out)
 }

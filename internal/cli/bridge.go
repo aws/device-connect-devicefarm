@@ -23,7 +23,7 @@ import (
 func newBridgeCommand(state *rootState) *cobra.Command {
 	bridge := &cobra.Command{
 		Use:   "bridge",
-		Short: "Manage the background bridge daemon",
+		Short: "Manage the background bridge",
 		Args:  cobra.NoArgs,
 		// A RunE makes the parent runnable, so cobra validates Args (NoArgs) rather
 		// than short-circuiting to help for a non-runnable command: `bridge` alone
@@ -56,7 +56,7 @@ func newBridgeCommand(state *rootState) *cobra.Command {
 func newBridgeStartCommand(state *rootState) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "start",
-		Short: fmt.Sprintf("Start the bridge daemon, optionally attaching a %s remote access device", productName),
+		Short: fmt.Sprintf("Start the bridge, optionally attaching a %s remote access device", productName),
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := state.cfg.Validate(); err != nil {
@@ -68,7 +68,7 @@ func newBridgeStartCommand(state *rootState) *cobra.Command {
 
 			if state.sessionARN != "" {
 				return attachDevice(cmd, state, failure.Explained{
-					Problem: "the bridge daemon started but could not attach the device",
+					Problem: "the bridge started but could not attach the device",
 					Fix:     "fix the issue and retry 'device add'",
 				})
 			}
@@ -89,7 +89,7 @@ func newBridgeStartCommand(state *rootState) *cobra.Command {
 	// `doctor` takes the address flags to check what the daemon would bind.
 	bindListenerFlags(cmd, &state.cfg)
 	bindReverseFlag(cmd, &state.cfg)
-	cmd.Flags().StringVar(&state.cfg.LogPath, "log", state.cfg.LogPath, "daemon logfile path (defaults to the per-user runtime directory)")
+	cmd.Flags().StringVar(&state.cfg.LogPath, "log", state.cfg.LogPath, "bridge logfile path (defaults to the per-user runtime directory)")
 	addSessionArnFlag(cmd, state, sessionArnDescription+" (optional; attaches the device on start)")
 	return cmd
 }
@@ -99,7 +99,7 @@ func newBridgeStartCommand(state *rootState) *cobra.Command {
 func newBridgeStopCommand(state *rootState) *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop",
-		Short: "Stop the running bridge daemon",
+		Short: "Stop the running bridge",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if _, running := state.newManager().Status(); !running {
@@ -107,7 +107,7 @@ func newBridgeStopCommand(state *rootState) *cobra.Command {
 				return nil
 			}
 			if err := state.newManager().Stop(); err != nil {
-				return &failure.Explained{Problem: "could not stop the bridge daemon", Cause: err}
+				return &failure.Explained{Problem: "could not stop the bridge", Cause: err}
 			}
 			cmd.Println(config.BinaryName + " stopped")
 			return nil
@@ -121,12 +121,12 @@ func newBridgeStopCommand(state *rootState) *cobra.Command {
 func newBridgeStatusCommand(state *rootState) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Report whether the bridge daemon is running and how many devices are attached",
+		Short: "Report whether the bridge is running and how many devices are attached",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			pid, running := state.newManager().Status()
 			if !running {
-				cmd.Println(config.BinaryName + " daemon is not running")
+				cmd.Println(config.BinaryName + " bridge is not running")
 				return nil
 			}
 
@@ -135,19 +135,19 @@ func newBridgeStatusCommand(state *rootState) *cobra.Command {
 			resp, err := state.send(control.Request{Op: control.OpStatus})
 			if err != nil {
 				if errors.Is(err, errNotListening) {
-					cmd.Println(config.BinaryName + " daemon is not running")
+					cmd.Println(config.BinaryName + " bridge is not running")
 					return nil
 				}
 				return err
 			}
 			if len(resp.Devices) == 0 {
-				line := fmt.Sprintf("%s daemon is running (pid %d), no device attached", config.BinaryName, pid)
+				line := fmt.Sprintf("%s bridge is running (pid %d), no device attached", config.BinaryName, pid)
 				if note := lastDetachNote(resp, time.Now()); note != "" {
 					line += "; " + note
 				}
 				cmd.Println(line)
 			} else {
-				cmd.Printf("%s daemon is running (pid %d), %s attached; run 'device list' for details\n",
+				cmd.Printf("%s bridge is running (pid %d), %s attached; run 'device list' for details\n",
 					config.BinaryName, pid, countNoun(len(resp.Devices), "device"))
 			}
 			return nil

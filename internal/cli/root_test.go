@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -143,7 +144,7 @@ func TestGivenHelpSubcommandWhenInvokedForACommandThenPrintsThatCommandsHelp(t *
 	out, err := runRoot(t, "help", "bridge", "start")
 
 	require.NoError(t, err)
-	assert.Contains(t, out.String(), "Start the bridge daemon")
+	assert.Contains(t, out.String(), "Start the bridge, optionally")
 	assert.Contains(t, out.String(), "--session-arn")
 	assert.Contains(t, out.String(), "-h, --help", "help must list the same flags as --help")
 }
@@ -177,6 +178,29 @@ func TestGivenDaemonSubcommandWhenInspectedThenIsHidden(t *testing.T) {
 		}
 	}
 	t.Fatal("daemon subcommand not found")
+}
+
+// Help says bridge, not daemon. The walk skips hidden commands, such as daemon.
+func TestGivenVisibleCommandsWhenHelpPrintedThenNoneSaysDaemon(t *testing.T) {
+	var visiblePaths [][]string
+	var walk func(cmd *cobra.Command, path []string)
+	walk = func(cmd *cobra.Command, path []string) {
+		visiblePaths = append(visiblePaths, path)
+		for _, child := range cmd.Commands() {
+			if !child.Hidden {
+				walk(child, append(slices.Clone(path), child.Name()))
+			}
+		}
+	}
+	walk(newRootCommand(), nil)
+	require.Contains(t, visiblePaths, []string{"bridge", "start"}, "the walk must reach the leaf commands")
+
+	for _, path := range visiblePaths {
+		out, err := runRoot(t, append(path, "--help")...)
+
+		require.NoError(t, err, "help of %q", path)
+		assert.NotContains(t, strings.ToLower(out.String()), "daemon", "help of %q", path)
+	}
 }
 
 func TestGivenNoRunningDaemonWhenStatusInvokedThenReportsNotRunning(t *testing.T) {

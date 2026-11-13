@@ -80,15 +80,15 @@ func newRootCommandWithState(state *rootState) *cobra.Command {
 		Version: version.String(), // root only; cobra answers it before PersistentPreRunE
 		Short:   fmt.Sprintf("Bridge a local adb client to an %s %s remote access device", awsName, productName),
 		Long: fmt.Sprintf("%s connects a local adb client to a device in an\n"+
-			"%s %s remote access session. A background bridge daemon listens on a\n"+
+			"%s %s remote access session. A background bridge listens on a\n"+
 			"local TCP port in place of the adb server and carries each adb connection\n"+
 			"over the session's websocket to the device.\n"+
 			"\n"+
-			"  device add      Attach a device. Starts the daemon when none runs.\n"+
-			"  device list     Show the attached device. Starts the daemon when none runs.\n"+
+			"  device add      Attach a device. Starts the bridge when none runs.\n"+
+			"  device list     Show the attached device. Starts the bridge when none runs.\n"+
 			"  device remove   Detach the attached device.\n"+
-			"  bridge start    Start the daemon with custom options, such as --port.\n"+
-			"  bridge stop     Stop the daemon.\n"+
+			"  bridge start    Start the bridge with custom options, such as --port.\n"+
+			"  bridge stop     Stop the bridge.\n"+
 			"  doctor          Check this machine, the AWS credentials and a session.",
 			config.BinaryName, awsName, productName),
 		SilenceUsage:  true,

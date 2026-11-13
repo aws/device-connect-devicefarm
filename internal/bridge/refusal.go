@@ -131,9 +131,9 @@ func refusalText(err error) string {
 	var failure *dialFailure
 	if errors.As(err, &failure) {
 		if cause := errors.Unwrap(failure.cause); cause != nil {
-			return "the daemon could not reach the device: " + cause.Error()
+			return "the bridge could not reach the device: " + cause.Error()
 		}
 		err = failure.cause
 	}
-	return "the daemon could not reach the device: " + err.Error()
+	return "the bridge could not reach the device: " + err.Error()
 }

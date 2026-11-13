@@ -191,7 +191,7 @@ func newDeviceRemoveCommand(state *rootState) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "remove",
 		Short: short,
-		Long:  short + ".\n\nThis command needs a running bridge daemon.",
+		Long:  short + ".\n\nThis command needs a running bridge.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			resp, err := state.send(control.Request{Op: control.OpRemove, ARN: state.sessionARN})

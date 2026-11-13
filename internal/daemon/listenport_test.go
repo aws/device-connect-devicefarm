@@ -281,13 +281,13 @@ func TestGivenANonDefaultListenAddressWhenAStartCommandIsQuotedThenItCarriesTheA
 	assert.Equal(t, "devicefarm-connect bridge start --port 5037", StartCommand("127.0.0.1", 5037),
 		"a user on the default address never sees --listen-addr")
 	assert.Equal(t, "devicefarm-connect bridge start --port 5555 --listen-addr 127.0.0.2", StartCommand("127.0.0.2", 5555))
-	assert.Contains(t, HeldPortText("127.0.0.2", 5555), "127.0.0.2:5555, so the daemon cannot bind it")
+	assert.Contains(t, HeldPortText("127.0.0.2", 5555), "127.0.0.2:5555, so the bridge cannot bind it")
 	assert.Contains(t, HeldPortText("127.0.0.2", 5555), "run 'devicefarm-connect bridge start --port 5555 --listen-addr 127.0.0.2'")
 }
 
 func TestGivenAnAdbServerThatKeepsThePortWhenTheFixIsWordedThenTheDefaultPortQuitsTheProgramAndAnotherPortMovesTheDaemon(t *testing.T) {
-	const otherPortFix = "Start the daemon on another port with 'devicefarm-connect bridge start --port <n>' and point adb at it with " +
-		"'adb -P <n>'. That adb server keeps port 5555 and the daemon serves adb on the port you pass."
+	const otherPortFix = "Start the bridge on another port with 'devicefarm-connect bridge start --port <n>' and point adb at it with " +
+		"'adb -P <n>'. That adb server keeps port 5555 and the bridge serves adb on the port you pass."
 	tests := []struct {
 		name       string
 		listenAddr string
@@ -310,7 +310,7 @@ func TestGivenAnAdbServerThatKeepsThePortWhenTheFixIsWordedThenTheDefaultPortQui
 		{name: "another port, nothing named", listenAddr: config.DefaultListenAddr, port: 5555, lead: LeadNamesNothing, want: otherPortFix},
 		{name: "another port, the program named", listenAddr: config.DefaultListenAddr, port: 5555, lead: LeadNamesProgram, want: otherPortFix},
 		{name: "another port, the start command quoted", listenAddr: config.DefaultListenAddr, port: 5555, lead: LeadQuotesStart,
-			want: "start the daemon on another port with 'devicefarm-connect bridge start --port <n>' and point adb at it with 'adb -P <n>'."},
+			want: "start the bridge on another port with 'devicefarm-connect bridge start --port <n>' and point adb at it with 'adb -P <n>'."},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -30,11 +30,11 @@ const notListeningMessage = config.BinaryName + " not listening"
 
 // errNotListening: no daemon answers the control socket, because none runs or
 // one holds its pidfile over a dead socket.
-var errNotListening = &failure.Explained{Problem: "the bridge daemon is not listening"}
+var errNotListening = &failure.Explained{Problem: "the bridge is not listening"}
 
 // bridgeAutoStartNote is the help paragraph of every command that starts the bridge
 // daemon itself.
-const bridgeAutoStartNote = "If the bridge daemon is not running, this command starts it with default\n" +
+const bridgeAutoStartNote = "If the bridge is not running, this command starts it with default\n" +
 	"settings, as 'adb' starts its own server. To pick a port or other options,\n" +
 	"run 'bridge start' first."
 
@@ -102,7 +102,7 @@ func startBridgeIfNotRunning(cmd *cobra.Command, state *rootState) error {
 	}
 	cmd.PrintErrln("* bridge not running; starting it now")
 	if err := startBridge(manager); err != nil {
-		return &failure.Explained{Problem: "could not start the bridge daemon", Cause: err}
+		return &failure.Explained{Problem: "could not start the bridge", Cause: err}
 	}
 	return nil
 }
@@ -116,7 +116,7 @@ func (s *rootState) send(req control.Request) (control.Response, error) {
 			slog.Debug("control dial failed", "error", err)
 			return control.Response{}, errNotListening
 		}
-		return control.Response{}, &failure.Explained{Problem: "the bridge daemon did not answer", Cause: err}
+		return control.Response{}, &failure.Explained{Problem: "the bridge did not answer", Cause: err}
 	}
 	return resp, nil
 }
