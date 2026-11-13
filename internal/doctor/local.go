@@ -59,8 +59,8 @@ const (
 	runtimeDirHint = "the client cannot use this working directory, so '" + bridgeStartCommand + "' cannot launch the daemon. " +
 		"Set '" + daemon.RuntimeDirEnvVar + "' to a directory with a short path that only this user can write, then rerun '" + doctorCommand +
 		"'. Every " + config.BinaryName + " command reads that variable, so 'bridge start' and the daemon use the new directory too."
-	deadDaemonHint = "a daemon is registered but did not report its status, so '" + bridgeStartCommand + "' starts nothing. Run '" +
-		restartDaemonHint + "'. The stop ends that daemon and the start launches a new one."
+	deadDaemonHint = "a bridge is registered but did not report its status, so '" + bridgeStartCommand + "' starts nothing. Run '" +
+		restartDaemonHint + "'. The stop ends that bridge and the start launches a new one."
 )
 
 // daemonFlags renders the listener flags a restart keeps.
@@ -108,7 +108,7 @@ func safeValue(value string) string {
 
 // reverseOffHint restarts the daemon with reverse on, its port and device kept, then states the caveat.
 func reverseOffHint(reply control.Response) string {
-	return caveatIf(fmt.Sprintf("the daemon runs with adb reverse off, so every 'adb reverse' fails. Run '%s' to start it again "+
+	return caveatIf(fmt.Sprintf("the bridge runs with adb reverse off, so every 'adb reverse' fails. Run '%s' to start it again "+
 		"with reverse on.", restartWith(reply, reply.Port, true)), true)
 }
 
@@ -232,7 +232,7 @@ func localChecks(inputs Inputs, state *runState) []Check {
 	return []Check{
 		{ID: checkRuntimeDir, Title: "working directory", Category: CategoryLocal, Timeout: localTimeout,
 			Run: func(context.Context) Result { return checkRuntimeDirectory(state) }},
-		{ID: checkDaemon, Title: "bridge daemon", Category: CategoryLocal, Needs: []string{checkRuntimeDir}, Timeout: daemonTimeout,
+		{ID: checkDaemon, Title: "bridge", Category: CategoryLocal, Needs: []string{checkRuntimeDir}, Timeout: daemonTimeout,
 			Run: func(context.Context) Result { return checkRunningDaemon(inputs, state) }},
 		{ID: checkListenPort, Title: "listen port", Category: CategoryLocal, Needs: []string{checkDaemon}, Timeout: listenPortTimeout,
 			Run: func(context.Context) Result { return checkListenPortFree(inputs, state) }},
@@ -289,25 +289,68 @@ func checkRunningDaemon(inputs Inputs, state *runState) Result {
 	reply, err := control.NewDaemonClient(state.paths.ControlSocket).Send(control.Request{Op: control.OpStatus})
 	switch {
 	case errors.Is(err, control.ErrDaemonNotRunning):
-		return Result{Status: Fail, Summary: fmt.Sprintf("a daemon (pid %d) is registered but does not answer: %s", pid, causeWithoutSocketPath(err)),
+		return Result{Status: Fail, Summary: fmt.Sprintf("a bridge (pid %d) is registered but does not answer: %s", pid, causeWithoutSocketPath(err)),
 			Hint: deadDaemonHint}
 	case err != nil:
-		return Result{Status: Fail, Summary: fmt.Sprintf("a daemon (pid %d) is registered but did not report its status: %s", pid, causeWithoutSocketPath(err)),
+		return Result{Status: Fail, Summary: fmt.Sprintf("a bridge (pid %d) is registered but did not report its status: %s", pid, causeWithoutSocketPath(err)),
 			Hint: deadDaemonHint}
 	case !reply.OK:
-		return Result{Status: Fail, Summary: fmt.Sprintf("a daemon (pid %d) is registered but refused to report its status: %s", pid, reply.Error),
+		return Result{Status: Fail, Summary: fmt.Sprintf("a bridge (pid %d) is registered but refused to report its status: %s", pid, reply.Error),
 			Hint: deadDaemonHint}
 	}
 	state.setDaemon(reply, pid)
+	return bridgeRowResult(strings.TrimSpace(inputs.SessionARN), reply, pid)
+}
+
+// bridgeRowResult builds the row for a bridge that answered status. WARN on the first match: a
+// detached device (unless the reason is about another session than the asked one), the asked
+// session not attached, reverse off. Never FAIL: the bridge runs.
+func bridgeRowResult(askedARN string, reply control.Response, pid int) Result {
 	device := "no device"
 	if reply.DeviceLabel != "" {
-		device = fmt.Sprintf("device %s, session %s", reply.DeviceLabel, reply.ARN)
+		device = fmt.Sprintf("device %s, session %s", safeValue(reply.DeviceLabel), safeValue(reply.ARN))
 	}
-	summary := fmt.Sprintf("running (pid %d) on port %d; %s", pid, reply.Port, device)
+	reverse := "reverse on"
 	if !reply.ReverseEnabled {
-		return Result{Status: Warn, Summary: summary + "; reverse off", Hint: reverseOffHint(reply)}
+		reverse = "reverse off"
 	}
-	return Result{Status: Pass, Summary: summary + "; reverse on"}
+	summary := fmt.Sprintf("running (pid %d) on port %d; %s; %s", pid, reply.Port, device, reverse)
+	// The reply carries a detach reason only while no device is attached.
+	if reply.LastDetachReason != "" {
+		summary += "; the bridge detached the last device"
+	}
+	askedMissing := askedARN != "" && askedARN != reply.ARN
+	if askedMissing {
+		summary += fmt.Sprintf("; session %s is not attached", safeValue(askedARN))
+	}
+	// Every detach reason names its session.
+	detachAnswersAsk := askedARN == "" || strings.Contains(reply.LastDetachReason, askedARN)
+	switch {
+	case reply.LastDetachReason != "" && detachAnswersAsk:
+		return Result{Status: Warn, Summary: summary, Hint: detachedHint(reply.LastDetachReason)}
+	case askedMissing:
+		return Result{Status: Warn, Summary: summary, Hint: notAttachedHint(reply, askedARN)}
+	case !reply.ReverseEnabled:
+		return Result{Status: Warn, Summary: summary, Hint: reverseOffHint(reply)}
+	}
+	return Result{Status: Pass, Summary: summary}
+}
+
+// detachedHint quotes the bridge's reason, which names the fix.
+func detachedHint(reason string) string {
+	return fmt.Sprintf("the bridge detached the device, so adb finds no device: %s.", safeValue(reason))
+}
+
+// notAttachedHint names the add command for the asked session. The bridge holds one device, so
+// the hint puts 'device remove' first when a device is attached.
+func notAttachedHint(reply control.Response, askedARN string) string {
+	arn := safeValue(askedARN)
+	add := fmt.Sprintf("'%s device add --session-arn %s'", config.BinaryName, arn)
+	if reply.DeviceLabel == "" {
+		return fmt.Sprintf("session %s is not attached to the bridge, so adb cannot reach its device. Run %s.", arn, add)
+	}
+	return fmt.Sprintf("session %s is not attached to the bridge, so adb cannot reach its device. Run '%s device remove', "+
+		"then %s. The remove detaches %s.", arn, config.BinaryName, add, safeValue(reply.DeviceLabel))
 }
 
 // checkListenPortFree binds the listen address once and frees it; a running daemon on the port

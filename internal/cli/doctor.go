@@ -27,7 +27,7 @@ func newDoctorCommand(state *rootState) *cobra.Command {
 reconnect to the device, 'adb forward' and 'adb reverse', and print one table
 row per category:
 
-  Local machine  the working directory, the daemon, the ports the bridge needs
+  Local machine  the working directory, the bridge, the ports it needs
   AWS            this shell's AWS credentials and the remote access session
   Network        the adb connection to the device, its reconnect and adb reverse
   Dependencies   the adb on this machine against the device's adb server

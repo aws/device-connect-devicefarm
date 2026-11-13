@@ -255,6 +255,118 @@ func TestGivenARunningDaemonWhenCheckedThenTheRowReportsItsStatusAndReverseState
 	}
 }
 
+const (
+	otherSessionARN = "arn:aws:devicefarm:us-west-2:123456789012:session:abc/def/11111"
+	// endedReason is the bridge's detach reason for an ended session.
+	endedReason = "remote access session " + testSessionARN + " has ended (COMPLETED); " +
+		"start a new session and run 'devicefarm-connect device add --session-arn <new ARN>'"
+)
+
+// attachedReply is a status reply holding one device on sessionARN.
+func attachedReply(sessionARN string, reverse bool) control.Response {
+	return control.Response{OK: true, Port: 5037, DeviceLabel: "Pixel 9 (OS 16)", ARN: sessionARN, ReverseEnabled: reverse}
+}
+
+func TestGivenADetachReasonWhenTheBridgeIsCheckedThenTheRowWarnsAndTheHintQuotesTheReason(t *testing.T) {
+	tests := []struct {
+		name     string
+		reverse  bool
+		askedARN string
+		wantTail string
+	}{
+		{name: "reverse on", reverse: true, wantTail: "no device; reverse on; the bridge detached the last device"},
+		{name: "reverse off", wantTail: "no device; reverse off; the bridge detached the last device"},
+		{name: "an asked session", reverse: true, askedARN: testSessionARN,
+			wantTail: "no device; reverse on; the bridge detached the last device; session " + testSessionARN + " is not attached"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &runState{paths: fakeDaemon(t, control.Response{OK: true, Port: 5037, ReverseEnabled: tc.reverse,
+				LastDetachReason: endedReason})}
+			inputs := localInputs(t)
+			inputs.SessionARN = tc.askedARN
+
+			result := runLocal(t, inputs, state, checkDaemon)
+
+			assert.Equal(t, Result{Status: Warn, Summary: fmt.Sprintf("running (pid %d) on port 5037; %s", os.Getpid(), tc.wantTail),
+				Hint: "the bridge detached the device, so adb finds no device: " + endedReason + "."}, result,
+				"the detach outranks the asked session and reverse off")
+		})
+	}
+}
+
+func TestGivenAnAskedSessionTheBridgeDoesNotHoldWhenCheckedThenTheRowWarnsWithTheAddCommand(t *testing.T) {
+	notAttached := "session " + testSessionARN + " is not attached to the bridge, so adb cannot reach its device. "
+	add := "'devicefarm-connect device add --session-arn " + testSessionARN + "'"
+	tests := []struct {
+		name     string
+		reply    control.Response
+		wantTail string
+		wantHint string
+	}{
+		{name: "no device", reply: control.Response{OK: true, Port: 5037, ReverseEnabled: true},
+			wantTail: "no device; reverse on", wantHint: notAttached + "Run " + add + "."},
+		{name: "no device and reverse off", reply: control.Response{OK: true, Port: 5037},
+			wantTail: "no device; reverse off", wantHint: notAttached + "Run " + add + "."},
+		{name: "another device attached", reply: attachedReply(otherSessionARN, true),
+			wantTail: "device Pixel 9 (OS 16), session " + otherSessionARN + "; reverse on",
+			wantHint: notAttached + "Run 'devicefarm-connect device remove', then " + add + ". The remove detaches Pixel 9 (OS 16)."},
+		{name: "a detach reason about another session",
+			reply: control.Response{OK: true, Port: 5037, ReverseEnabled: true,
+				LastDetachReason: strings.ReplaceAll(endedReason, testSessionARN, otherSessionARN)},
+			wantTail: "no device; reverse on; the bridge detached the last device", wantHint: notAttached + "Run " + add + "."},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := bridgeRowResult(testSessionARN, tc.reply, 4242)
+
+			assert.Equal(t, Result{Status: Warn, Hint: tc.wantHint,
+				Summary: "running (pid 4242) on port 5037; " + tc.wantTail + "; session " + testSessionARN + " is not attached"}, result,
+				"the asked session outranks reverse off")
+		})
+	}
+}
+
+func TestGivenTheAskedSessionAttachedWhenCheckedThenTheRowKeepsItsReverseVerdict(t *testing.T) {
+	tests := []struct {
+		name       string
+		askedARN   string
+		reverse    bool
+		wantStatus Status
+		wantHint   string
+	}{
+		{name: "reverse on", askedARN: testSessionARN, reverse: true, wantStatus: Pass},
+		{name: "reverse off", askedARN: testSessionARN, wantStatus: Warn, wantHint: reverseOffHint(attachedReply(testSessionARN, false))},
+		{name: "spaces around the asked session", askedARN: " " + testSessionARN + " ", reverse: true, wantStatus: Pass},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &runState{paths: fakeDaemon(t, attachedReply(testSessionARN, tc.reverse))}
+			inputs := localInputs(t)
+			inputs.SessionARN = tc.askedARN
+
+			result := runLocal(t, inputs, state, checkDaemon)
+
+			assert.Equal(t, tc.wantStatus, result.Status, result.Summary)
+			assert.NotContains(t, result.Summary, "is not attached")
+			assert.Equal(t, tc.wantHint, result.Hint)
+		})
+	}
+}
+
+func TestGivenAReasonOrAnAskedSessionWithAControlCharacterWhenRenderedThenTheRowStaysOnOneLine(t *testing.T) {
+	forged := "gone\n[PASS] forged\x1b[0m"
+	detached := bridgeRowResult(forged, control.Response{OK: true, Port: 5037, LastDetachReason: forged}, 4242)
+	notAttached := bridgeRowResult(forged, control.Response{OK: true, Port: 5037, DeviceLabel: forged, ARN: otherSessionARN}, 4242)
+
+	for name, text := range map[string]string{"detach summary": detached.Summary, "detach hint": detached.Hint,
+		"add summary": notAttached.Summary, "add hint": notAttached.Hint} {
+		assert.NotContains(t, text, "\n", name)
+		assert.NotContains(t, text, "\x1b", name)
+		assert.Contains(t, text, `gone\n[PASS] forged\x1b[0m`, name)
+	}
+}
+
 func TestGivenAControlErrorWhenTheSocketPathIsDroppedThenTheCauseStays(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), config.BinaryName+".sock")
 	timeout := fmt.Errorf("read control response: %w", &net.OpError{Op: "read", Net: "unix",
@@ -275,7 +387,7 @@ func TestGivenALockedPidfileWhoseDaemonDoesNotAnswerOrRefusesStatusWhenCheckedTh
 		wantSummary string
 	}{
 		{name: "no control socket", paths: fakeRuntimePaths,
-			wantSummary: fmt.Sprintf("a daemon (pid %d) is registered but does not answer: connect: ", os.Getpid())},
+			wantSummary: fmt.Sprintf("a bridge (pid %d) is registered but does not answer: connect: ", os.Getpid())},
 		{name: "status refused", paths: func(t *testing.T) daemon.Paths {
 			return fakeDaemon(t, control.Response{OK: false, Error: "boom"})
 		}, wantSummary: "is registered but refused to report its status: boom"},
