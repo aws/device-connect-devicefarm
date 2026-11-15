@@ -132,7 +132,7 @@ func TestGivenARuntimeDirVariableNamingARegularFileWhenDoctorRunsThenTheLocalRow
 
 	_, err := runDoctor(t, stdout)
 
-	require.EqualError(t, err, "doctor: 1 checks failed")
+	require.EqualError(t, err, "doctor: 1 check failed")
 	titles, statuses, countLine := parseTable(t, stdout.String())
 	assert.Equal(t, categoryTitles, titles, "a failed check stops nothing but its dependents")
 	assert.Equal(t, "FAIL", statuses["Local machine"])
@@ -165,8 +165,35 @@ func TestGivenAFailedCheckWhenDoctorIsExecutedThenStderrNamesTheFailureWithoutAU
 	exitCode := execute(root, state)
 
 	assert.Equal(t, 1, exitCode)
-	assert.Equal(t, config.BinaryName+": error: doctor: 1 checks failed\n", stderr.String())
+	assert.Equal(t, config.BinaryName+": error: doctor: 1 check failed\n", stderr.String())
 	assert.Contains(t, stdout.String(), "doctor: 1 of 4 categories passed, 1 failed, 2 not checked")
+}
+
+func TestGivenTwoFailedChecksWhenDoctorRunsThenTheErrorCountsThemInThePlural(t *testing.T) {
+	// Two checks with no dependency fail: runtime dir is a file, no credentials resolve.
+	notADir := filepath.Join(t.TempDir(), "not-a-dir")
+	require.NoError(t, os.WriteFile(notADir, nil, 0o600))
+	isolateRuntimeDir(t, notADir)
+	testsupport.HermeticAWSEnv(t)
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+	root := newRootCommand()
+	stdout := &bytes.Buffer{}
+	root.SetOut(stdout)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"doctor", "--verbose"})
+
+	err := root.Execute()
+
+	assert.EqualError(t, err, "doctor: 2 checks failed")
+	ids, tags, _ := parseText(t, stdout.String())
+	var failedIDs []string
+	for _, id := range ids {
+		if tags[id] == "[FAIL]" {
+			failedIDs = append(failedIDs, id)
+		}
+	}
+	assert.Equal(t, []string{"local.runtime-dir", "aws.credentials"}, failedIDs)
 }
 
 func TestGivenVerboseWhenDoctorRunsThenOneLinePerCheckWithItsIdAndTheCountLineGoToStdout(t *testing.T) {
@@ -259,7 +286,7 @@ func TestGivenJSONRequestedWhenDoctorRunsThenStdoutIsExactlyOneObjectWithTheSame
 		wantFails  int
 	}{
 		{name: "exit 0", runtimeDir: func(t *testing.T) { shortRuntimeDir(t) }},
-		{name: "exit 1", runtimeDir: func(t *testing.T) { isolateRuntimeDir(t, notADir) }, wantErr: "doctor: 1 checks failed", wantFails: 1},
+		{name: "exit 1", runtimeDir: func(t *testing.T) { isolateRuntimeDir(t, notADir) }, wantErr: "doctor: 1 check failed", wantFails: 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

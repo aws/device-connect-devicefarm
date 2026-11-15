@@ -208,8 +208,13 @@ func WriteText(writer io.Writer, report Report) error {
 		text.WriteByte('\n')
 	}
 	summary := report.Summary()
-	fmt.Fprintf(&text, wording.DoctorCountChecksFormat+"\n",
-		summary.Pass, summary.Warn, summary.Fail, summary.Skip)
+	if summary.Warn == 1 {
+		fmt.Fprintf(&text, wording.DoctorCountChecksOneWarningFormat+"\n",
+			summary.Pass, summary.Fail, summary.Skip)
+	} else {
+		fmt.Fprintf(&text, wording.DoctorCountChecksFormat+"\n",
+			summary.Pass, summary.Warn, summary.Fail, summary.Skip)
+	}
 	_, err := io.WriteString(writer, text.String())
 	return err
 }

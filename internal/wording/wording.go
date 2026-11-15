@@ -199,6 +199,7 @@ const (
 	ProblemSessionARNBlank          = "--session-arn is blank"
 	ProblemSessionARNBlankRemove    = ProblemSessionARNBlank + "; omit it to detach the attached device"
 	ProblemListAndJSON              = "--list and --json cannot be used together"
+	ProblemDoctorOneCheckFailed     = "doctor: 1 check failed"
 	ProblemDoctorChecksFailedFormat = "doctor: %d checks failed"
 	FixRunHelpFormat                = "run '%s --help' for usage"
 	CauseRuntimeDirOwnerFormat      = "runtime dir %q is owned by UID %d, not %d"
@@ -376,7 +377,8 @@ const (
 	DoctorCountNotCheckedFormat       = "%d not checked"
 
 	// Ends the --verbose output. Counts checks, not categories.
-	DoctorCountChecksFormat = "doctor: %d passed, %d warnings, %d failed, %d skipped"
+	DoctorCountChecksOneWarningFormat = "doctor: %d passed, 1 warning, %d failed, %d skipped"
+	DoctorCountChecksFormat           = "doctor: %d passed, %d warnings, %d failed, %d skipped"
 )
 
 // Doctor category titles.
@@ -408,10 +410,11 @@ const (
 const (
 	DoctorTitleWorkingDirectory = "working directory"
 
-	DoctorDetailDirectoryWritableFormat    = "working directory %s is writable"
-	DoctorDetailDirectoryUnusableLead      = ProblemWorkingDirectory + ": "
-	DoctorDetailDirectoryTooLongFormat     = "working directory %s is %d bytes too long for this system"
-	DoctorDetailDirectoryNotWritableFormat = "cannot write a file in the working directory %s: %v"
+	DoctorDetailDirectoryWritableFormat       = "working directory %s is writable"
+	DoctorDetailDirectoryUnusableLead         = ProblemWorkingDirectory + ": "
+	DoctorDetailDirectoryOneByteTooLongFormat = "working directory %s is 1 byte too long for this system"
+	DoctorDetailDirectoryTooLongFormat        = "working directory %s is %d bytes too long for this system"
+	DoctorDetailDirectoryNotWritableFormat    = "cannot write a file in the working directory %s: %v"
 
 	// Verb: the environment variable that sets the directory's parent.
 	DoctorHintDirectoryUnusableFormat = "the client cannot use this working directory, so '" + BridgeStartCommand + "' cannot launch the bridge. " +
