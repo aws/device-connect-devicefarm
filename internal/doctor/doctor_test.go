@@ -174,7 +174,7 @@ func TestGivenMixedResultsWhenWrittenAsTextThenOneLinePerRowPlusTheCountLine(t *
 		"[WARN] local.daemon: running (PID 42) on port 6000, not 5037; fix: the running bridge listens on port 6000, not 5037. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 5037'.\n"+
 		"[FAIL] local.listen-port: cannot bind 127.0.0.1:5037 because another program is listening on it; fix: stop that program, then run 'devicefarm-connect bridge start --port 5037'\n"+
 		"[SKIP] relay.session: needs local.listen-port\n"+
-		"doctor: 1 passed, 1 warnings, 1 failed, 1 skipped\n", out.String())
+		"doctor: 1 passed, 1 warning, 1 failed, 1 skipped\n", out.String())
 }
 
 func TestGivenAnEmptyTableWhenRunThenTheReportIsEmptyAndTheCountLineIsAllZero(t *testing.T) {
@@ -185,6 +185,18 @@ func TestGivenAnEmptyTableWhenRunThenTheReportIsEmptyAndTheCountLineIsAllZero(t 
 
 	assert.Empty(t, report.Rows)
 	assert.Equal(t, "doctor: 0 passed, 0 warnings, 0 failed, 0 skipped\n", out.String())
+}
+
+func TestGivenTwoWarningsWhenWrittenAsTextThenTheCountLineInflectsWarnings(t *testing.T) {
+	var out bytes.Buffer
+
+	report := Run(context.Background(), tableChecks(map[string]Result{
+		"local.daemon":    {Status: Warn, Summary: "reverse off", Hint: "restart it"},
+		"aws.credentials": {Status: Warn, Summary: "expires soon", Hint: "log in again"},
+	}))
+	require.NoError(t, WriteText(&out, report))
+
+	assert.True(t, strings.HasSuffix(out.String(), "\ndoctor: 8 passed, 2 warnings, 0 failed, 0 skipped\n"), out.String())
 }
 
 const (
