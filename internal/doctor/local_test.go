@@ -254,6 +254,31 @@ func TestGivenAnUnusableRuntimeDirWhenCheckedThenItFailsNamingTheEnvVar(t *testi
 	}
 }
 
+func TestGivenASocketPathOverTheLimitWhenCheckedThenTheSummaryCountsTheBytesOver(t *testing.T) {
+	tests := []struct {
+		name      string
+		bytesOver int
+		wantTail  string
+	}{
+		{name: "one byte over", bytesOver: 1, wantTail: " is 1 byte too long for this system"},
+		{name: "two bytes over", bytesOver: 2, wantTail: " is 2 bytes too long for this system"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Padding directory level puts the socket path bytesOver past the limit.
+			shortPaths := shortRuntimeDir(t)
+			padding := strings.Repeat("x", maxControlSocketPath+tc.bytesOver-len(shortPaths.ControlSocket)-len("/"))
+			runtimeBase := filepath.Join(filepath.Dir(shortPaths.RuntimeDir), padding)
+			t.Setenv("XDG_RUNTIME_DIR", runtimeBase)
+
+			result := runLocal(t, localInputs(t), &runState{}, checkRuntimeDir)
+
+			assert.Equal(t, Fail, result.Status)
+			assert.Equal(t, "working directory "+filepath.Join(runtimeBase, config.BinaryName)+tc.wantTail, result.Summary)
+		})
+	}
+}
+
 func TestGivenNoDaemonWhenCheckedThenItPassesAsNotRunning(t *testing.T) {
 	state := &runState{paths: shortRuntimeDir(t)}
 

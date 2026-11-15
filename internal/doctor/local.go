@@ -225,7 +225,10 @@ func checkRuntimeDirectory(state *runState) Result {
 	if err != nil {
 		return fail(wording.DoctorDetailDirectoryUnusableLead + err.Error())
 	}
-	if over := len(paths.ControlSocket) - maxControlSocketPath; over > 0 {
+	switch over := len(paths.ControlSocket) - maxControlSocketPath; {
+	case over == 1:
+		return fail(fmt.Sprintf(wording.DoctorDetailDirectoryOneByteTooLongFormat, paths.RuntimeDir))
+	case over > 1:
 		return fail(fmt.Sprintf(wording.DoctorDetailDirectoryTooLongFormat, paths.RuntimeDir, over))
 	}
 	probe, err := os.CreateTemp(paths.RuntimeDir, ".doctor-")

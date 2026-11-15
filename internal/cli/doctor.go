@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os/signal"
 	"syscall"
@@ -48,7 +49,10 @@ func newDoctorCommand(state *rootState) *cobra.Command {
 			if writeErr != nil {
 				return writeErr
 			}
-			if failed := results.Failed(); failed > 0 {
+			switch failed := results.Failed(); {
+			case failed == 1:
+				return errors.New(wording.ProblemDoctorOneCheckFailed)
+			case failed > 1:
 				return fmt.Errorf(wording.ProblemDoctorChecksFailedFormat, failed)
 			}
 			return nil
