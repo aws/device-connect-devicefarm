@@ -95,8 +95,8 @@ func TestGivenCommandLineMistakesWhenExecutedThenEachNamesTheCommandsHelp(t *tes
 			problem: "--port must be from 1 to 65535, got 0", helpOf: "bridge start"},
 		{name: "flag on the hidden help command names the root", args: []string{"help", "--bogus"},
 			problem: "unknown flag: --bogus", helpOf: ""},
-		{name: "--list and --json together, refused before the bridge starts", args: []string{"device", "list", "--list", "--json"},
-			problem: "--list and --json cannot be used together", helpOf: "device list"},
+		{name: "unknown flag on a leaf", args: []string{"device", "list", "--list"},
+			problem: "unknown flag: --list", helpOf: "device list"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
