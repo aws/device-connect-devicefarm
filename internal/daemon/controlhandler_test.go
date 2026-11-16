@@ -535,7 +535,7 @@ func (s *controlHandlerSuite) TestRemoveWithMismatchedARNRejectedAndKept() {
 	resp := s.handler(control.Request{Op: control.OpRemove, ARN: testSessionArnOther})
 
 	s.Equal(control.Response{Error: "the attached device does not match the requested session", Fixes: []string{
-		"Run 'devicefarm-connect device list --list' to see the ARN of the attached session. To detach that device, run " +
+		"Run 'devicefarm-connect device list --json' to see the ARN of the attached session. To detach that device, run " +
 			"'devicefarm-connect device remove'."}}, resp, "a mismatched ARN must not remove the attached device")
 	_, present := s.device.Current()
 	s.True(present)

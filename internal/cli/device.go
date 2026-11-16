@@ -6,7 +6,6 @@ package cli
 import (
 	"cmp"
 	"errors"
-	"fmt"
 	"io"
 	"time"
 
@@ -61,19 +60,16 @@ func newDeviceAddCommand(state *rootState) *cobra.Command {
 }
 
 // newDeviceListCommand prints the attached devices on stdout: one table row per device, with
-// --list one deviceListLine per device, with --json one object. One device attaches at a time;
-// the per-device shapes hold when more are allowed.
+// --json one object. One device attaches at a time; the per-device shapes hold when more are
+// allowed.
 func newDeviceListCommand(state *rootState) *cobra.Command {
-	listView, jsonView := false, false
+	jsonView := false
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: wording.HelpDeviceList,
 		Long:  wording.HelpDeviceListLong,
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if listView && jsonView {
-				return usageError(cmd, errors.New(wording.ProblemListAndJSON))
-			}
 			resp, err := sendToBridge(cmd, state, control.Request{Op: control.OpList})
 			if err != nil {
 				return err
@@ -91,20 +87,12 @@ func newDeviceListCommand(state *rootState) *cobra.Command {
 					cmd.Println(note)
 				}
 				return nil
-			case listView:
-				for _, attached := range resp.Devices {
-					if _, err := fmt.Fprintln(stdout, deviceListLine(attached, now)); err != nil {
-						return err
-					}
-				}
-				return nil
 			default:
 				_, err := io.WriteString(stdout, deviceTable(resp.Devices, now).Render(report.TerminalWidth(stdout)))
 				return err
 			}
 		},
 	}
-	cmd.Flags().BoolVar(&listView, "list", false, wording.FlagListUsage)
 	cmd.Flags().BoolVar(&jsonView, "json", false, wording.FlagDeviceListJSONUsage)
 	return cmd
 }
@@ -125,29 +113,6 @@ func deviceTable(devices []control.AttachedDevice, now time.Time) report.Table {
 		})
 	}
 	return table
-}
-
-// deviceListLine renders one attached device as unlabeled tab-separated values,
-// ARN first. An empty serial or a zero time reads "unknown"; a passed expiry
-// reads "expired".
-func deviceListLine(attached control.AttachedDevice, now time.Time) string {
-	return fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s",
-		attached.SessionARN, attached.Label, cmp.Or(attached.Serial, wording.OutputUnknownSerial),
-		agoOrUnknown(attached.AttachedAt, now),
-		agoOrUnknown(attached.SessionStartedAt, now),
-		expiryValue(attached.SessionExpiresAt, now))
-}
-
-// expiryValue is sessionExpiry as a bare value: "unknown", "expired" or "in <span>".
-func expiryValue(expiresAt, now time.Time) string {
-	switch {
-	case expiresAt.IsZero():
-		return wording.OutputUnknownTime
-	case !now.Before(expiresAt):
-		return wording.OutputExpired
-	default:
-		return wording.OutputExpiryInLead + humanSpan(expiresAt.Sub(now))
-	}
 }
 
 // jsonDeviceList is the --json shape: the daemon's devices, always an array, and the last detach
