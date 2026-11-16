@@ -34,45 +34,11 @@ func TestGivenSpansWhenRenderedThenTheMinutesFollowTheHours(t *testing.T) {
 	}
 }
 
-func TestGivenAnAttachedDeviceWhenTheLineIsRenderedThenEachFieldIsAValueWithNoLabel(t *testing.T) {
-	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
-	attached := control.AttachedDevice{SessionARN: "arn:1", Label: "Pixel 9 (OS 16)", Serial: "R3CN30ABCDE",
-		AttachedAt: now.Add(-90 * time.Second), SessionStartedAt: now.Add(-time.Hour - 10*time.Minute),
-		SessionExpiresAt: now.Add(80 * time.Minute)}
-
-	assert.Equal(t, "arn:1\tPixel 9 (OS 16)\tR3CN30ABCDE\t1 minute ago\t"+
-		"1 hour 10 minutes ago\tin 1 hour 20 minutes", deviceListLine(attached, now))
-}
-
-func TestGivenMissingOrPassedValuesWhenTheLineIsRenderedThenTheColumnsSaySo(t *testing.T) {
-	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
-	tests := []struct {
-		name     string
-		attached control.AttachedDevice
-		want     string
-	}{
-		{name: "no session times", attached: control.AttachedDevice{AttachedAt: now},
-			want: "0 seconds ago\tunknown\tunknown"},
-		{name: "expiry passed", attached: control.AttachedDevice{AttachedAt: now,
-			SessionStartedAt: now.Add(-151 * time.Minute), SessionExpiresAt: now.Add(-time.Minute)},
-			want: "0 seconds ago\t2 hours 31 minutes ago\texpired"},
-		{name: "expiry now", attached: control.AttachedDevice{AttachedAt: now, SessionExpiresAt: now},
-			want: "0 seconds ago\tunknown\texpired"},
-		{name: "no times at all", attached: control.AttachedDevice{},
-			want: "unknown\tunknown\tunknown"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, "\t\tunknown\t"+tc.want, deviceListLine(tc.attached, now))
-		})
-	}
-}
-
 func TestGivenAttachedDevicesWhenTabledThenTheSessionCellHoldsTheStartAndTheExpiryAndMissingValuesSaySo(t *testing.T) {
 	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
 	devices := []control.AttachedDevice{
 		{SessionARN: "arn:1", Label: "Pixel 9 (OS 16)", Serial: "R3CN30ABCDE", AttachedAt: now.Add(-90 * time.Second),
-			SessionStartedAt: now.Add(-time.Hour - 10*time.Minute), SessionExpiresAt: now.Add(-time.Minute)},
+			SessionStartedAt: now.Add(-time.Hour - 10*time.Minute), SessionExpiresAt: now},
 		{Label: "Galaxy S9 (OS 9)"},
 	}
 

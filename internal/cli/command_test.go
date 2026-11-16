@@ -354,19 +354,9 @@ func TestGivenRunningDaemonWithDeviceWhenListDevicesInvokedThenPrintsATableWitho
 `, out.String())
 }
 
-func TestGivenRunningDaemonWithDeviceWhenListDevicesInvokedWithListThenPrintsOneLinePerDevice(t *testing.T) {
-	fakeDaemonWithPixel(t)
-
-	out, err := execRoot(t, "device", "list", "--list")
-
-	require.NoError(t, err)
-	assert.Equal(t, "arn:aws:devicefarm:us-west-2:1:session:a/b/0\tGoogle Pixel 9 (OS 16)\tR3CN30ABCDE\t"+
-		"12 minutes ago\t25 minutes ago\tin 2 hours 5 minutes\n", out.String())
-}
-
 func TestGivenAStdoutThatRefusesWritesWhenListDevicesInvokedThenEveryViewReturnsTheWriteError(t *testing.T) {
 	// A list nobody received must not exit 0.
-	for _, flags := range [][]string{nil, {"--list"}, {"--json"}} {
+	for _, flags := range [][]string{nil, {"--json"}} {
 		t.Run(fmt.Sprint(flags), func(t *testing.T) {
 			fakeDaemonWithPixel(t)
 			root := newRootCommand()

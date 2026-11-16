@@ -56,8 +56,7 @@ const (
 	HelpDeviceList     = "List the Device Farm remote access devices attached to the bridge"
 	HelpDeviceListLong = HelpDeviceList + ".\n\nOne table row per device: the device name, the adb serial, how long it has been\n" +
 		"attached, when its session started, and how long until the session expires. The\n" +
-		"table fits the terminal width, or COLUMNS when stdout is not a terminal. --list\n" +
-		"prints one tab-separated line per device instead, the session ARN first; --json\n" +
+		"table fits the terminal width, or COLUMNS when stdout is not a terminal. --json\n" +
 		"prints one JSON object.\n\n" + HelpBridgeAutoStartNote
 	HelpDeviceRemove     = "Detach the attached Device Farm remote access device from the bridge"
 	HelpDeviceRemoveLong = HelpDeviceRemove + ".\n\nThis command needs a running bridge."
@@ -120,7 +119,6 @@ const (
 	FlagSessionARNDoctorUsage = FlagSessionARNUsage + " (optional; defaults to the one attached session; also checks the session, the connection to the device, and the adb versions)"
 
 	FlagBridgeStatusJSONUsage = "print one JSON object instead of the report line"
-	FlagListUsage             = "print one tab-separated line per device, the session ARN first, instead of the table"
 	FlagDeviceListJSONUsage   = "print one JSON object instead of the table"
 	FlagVerboseUsage          = "print one line per check, with its ID, instead of the table"
 	FlagDoctorJSONUsage       = "print one JSON object instead of the table; same exit code"
@@ -162,7 +160,7 @@ const (
 	OutputUnitHour   = "hour"
 )
 
-// Device list: table columns, cell words, and the words of the unlabeled --list values.
+// Device list: table columns and cell words.
 const (
 	OutputColumnDevice   = "Device"
 	OutputColumnSerial   = "Serial"
@@ -177,8 +175,6 @@ const (
 	OutputExpiresInLead = "expires in "
 	OutputExpired       = "expired"
 	OutputExpiryUnknown = "expiry unknown"
-	// The --list expiry value: "in 2 hours 5 minutes"
-	OutputExpiryInLead = "in "
 )
 
 // The failure block, in print order.
@@ -203,7 +199,6 @@ const (
 	ProblemSessionARNRequired       = "--session-arn is required"
 	ProblemSessionARNBlank          = "--session-arn is blank"
 	ProblemSessionARNBlankRemove    = ProblemSessionARNBlank + "; omit it to detach the attached device"
-	ProblemListAndJSON              = "--list and --json cannot be used together"
 	ProblemDoctorOneCheckFailed     = "doctor: 1 check failed"
 	ProblemDoctorChecksFailedFormat = "doctor: %d checks failed"
 	FixRunHelpFormat                = "run '%s --help' for usage"
@@ -293,7 +288,7 @@ const (
 		StartWithYourOptionsClause + ". If the error remains, install the latest " + BinaryName + ", then run '" + DoctorCommand +
 		"'. If the doctor does not find the cause, contact AWS Support."
 	FixSeeDeviceList  = "Run '" + BinaryName + " device list' to see what the bridge holds and why the last device detached."
-	FixSeeAttachedARN = "Run '" + BinaryName + " device list --list' to see the ARN of the attached session. " +
+	FixSeeAttachedARN = "Run '" + BinaryName + " device list --json' to see the ARN of the attached session. " +
 		"To detach that device, run '" + BinaryName + " device remove'."
 )
 
