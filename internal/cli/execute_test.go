@@ -115,7 +115,7 @@ func TestGivenCommandLineMistakesWhenExecutedThenEachNamesTheCommandsHelp(t *tes
 
 func TestGivenDaemonRefusesAddWithNoFixWhenDeviceAddExecutedThenPrintsProblemAndCauseOnly(t *testing.T) {
 	fakeDaemon(t, func(control.Request) control.Response {
-		return control.Response{OK: false, Error: "resolve session: session not found"}
+		return control.Response{OK: false, Error: "session not found"}
 	})
 
 	code, out := runExecute(t, "device", "add", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
@@ -123,7 +123,7 @@ func TestGivenDaemonRefusesAddWithNoFixWhenDeviceAddExecutedThenPrintsProblemAnd
 	assert.Equal(t, 1, code)
 	assert.Equal(t,
 		config.BinaryName+": error: could not attach the device\n"+
-			"  cause: resolve session: session not found\n",
+			"  cause: session not found\n",
 		out)
 }
 
@@ -146,7 +146,7 @@ func TestGivenDaemonRefusesAddWithFixesWhenDeviceAddExecutedThenEachFixIsAFixLin
 
 func TestGivenDaemonRefusesAddWhenBridgeStartExecutedWithARNThenPrintsProblemCauseAndFix(t *testing.T) {
 	fakeDaemon(t, func(control.Request) control.Response {
-		return control.Response{OK: false, Error: "resolve session: session not RUNNING"}
+		return control.Response{OK: false, Error: "session not RUNNING"}
 	})
 	fakeBridgeStop(t, daemon.StopResult{PID: 4242, WasRunning: true}, nil)
 	countingBridgeStart(t)
@@ -158,7 +158,7 @@ func TestGivenDaemonRefusesAddWhenBridgeStartExecutedWithARNThenPrintsProblemCau
 		"* a bridge was running (PID 4242) and was stopped; its attached devices, forward rules, and reverse rules were dropped\n"+
 			"* bridge started (PID 4343); log file: /tmp/d.log\n"+
 			config.BinaryName+": error: the bridge started but could not attach the device\n"+
-			"  cause: resolve session: session not RUNNING\n"+
+			"  cause: session not RUNNING\n"+
 			"  fix:   fix the issue, then run this command again; 'bridge start' restarts the bridge, so it reads this shell's AWS settings\n",
 		out)
 }
@@ -241,14 +241,14 @@ func TestGivenCommandSucceedsWhenExecutedThenReturnsZero(t *testing.T) {
 
 func TestGivenDaemonRefusesAddWithAFixWhenBridgeStartExecutedWithARNThenOnlyTheDaemonsFixPrints(t *testing.T) {
 	fakeRestart(t, func(control.Request) control.Response {
-		return control.Response{OK: false, Error: "resolve session: session has ended",
+		return control.Response{OK: false, Error: "session has ended",
 			Fixes: []string{"start a new remote access session"}}
 	}, daemon.StopResult{})
 
 	code, out := runExecute(t, "bridge", "start", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
 
 	assert.Equal(t, 1, code)
-	assert.Contains(t, out, "  cause: resolve session: session has ended\n  fix:   start a new remote access session\n")
+	assert.Contains(t, out, "  cause: session has ended\n  fix:   start a new remote access session\n")
 	assert.NotContains(t, out, "fix the issue, then run this command again", "the daemon's fix replaces the generic one")
 }
 

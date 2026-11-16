@@ -66,13 +66,13 @@ func TestGivenUnreachableEndpointWhenDialedThenErrors(t *testing.T) {
 func TestGivenMalformedURLWhenDialedThenErrors(t *testing.T) {
 	// Pre-dial checks fail closed: url.Parse, then the scheme check, which a bare path fails.
 	tests := []struct {
-		name     string
-		endpoint string
-		wantIs   error
+		name          string
+		endpoint      string
+		refusedScheme bool
 	}{
 		{name: "unparseable", endpoint: "://not-a-url"},
-		{name: "relative path, no scheme", endpoint: "not-a-url", wantIs: errSchemeNotWSS},
-		{name: "plaintext scheme", endpoint: "ws://127.0.0.1:1/adb", wantIs: errSchemeNotWSS},
+		{name: "relative path, no scheme", endpoint: "not-a-url", refusedScheme: true},
+		{name: "plaintext scheme", endpoint: "ws://127.0.0.1:1/adb", refusedScheme: true},
 	}
 
 	for _, tc := range tests {
@@ -82,8 +82,8 @@ func TestGivenMalformedURLWhenDialedThenErrors(t *testing.T) {
 			_, err := dialer.Dial(context.Background(), tc.endpoint, RouteAdb)
 
 			require.Error(t, err)
-			if tc.wantIs != nil {
-				assert.ErrorIs(t, err, tc.wantIs)
+			if tc.refusedScheme {
+				assert.ErrorAs(t, err, new(*schemeError))
 			}
 		})
 	}
@@ -251,7 +251,7 @@ func TestGivenANonWSSSchemeWhenDialedThenItIsRefusedBeforeAnyDial(t *testing.T) 
 
 			_, err := dialer.Dial(context.Background(), fmt.Sprintf("%s//%s/adb", testCase.scheme, counterAddress), RouteAdb)
 
-			require.ErrorIs(t, err, errSchemeNotWSS)
+			require.ErrorAs(t, err, new(*schemeError))
 			assert.Zero(t, accepted(), "a refused scheme must cost no connection")
 		})
 	}
@@ -265,7 +265,7 @@ func TestGivenARefusedSchemeWhenTheErrorIsFormattedThenTheURLIsAbsent(t *testing
 	_, err := dialer.Dial(context.Background(), fmt.Sprintf("ws://%s/adb?%s", host, signature), RouteAdb)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), `refused scheme "ws"`)
+	assert.Equal(t, `only wss endpoints are supported for connections to devices: "ws"`, err.Error())
 	assert.NotContains(t, err.Error(), host)
 	assert.NotContains(t, err.Error(), signature)
 	assert.NotContains(t, err.Error(), "path=")

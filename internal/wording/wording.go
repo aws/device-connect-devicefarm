@@ -213,13 +213,36 @@ const (
 	RefusalDifferentDeviceFormat = "a different device is already attached (%s)"
 	RefusalNoDevice              = "no device is attached"
 	RefusalDeviceMismatch        = "the attached device does not match the requested session"
-	RefusalResolveSessionFormat  = "resolve session: %w"
-	RefusalFetchSerialFormat     = "fetch the device serial: %w"
-	RefusalNoDeviceSerial        = "the remote adb server lists no device"
-	RefusalEndpointNotWSS        = "only wss endpoints are dialed"
-	// The server answered the websocket upgrade with an HTTP error. Also an adb FAIL and a doctor detail.
-	RefusalUpgradeRefused = "the server refused the websocket upgrade: the session may have ended, " +
-		"its endpoint URL may have expired, or the session ARN may name another account"
+)
+
+// What failed on the connection to a device: the cause of a refused add. adb prints the close
+// texts after "error: ". A reason is the service's own text.
+const (
+	// The service refused the session before any reply. Verb: its reason.
+	RefusalSessionRefusedFormat = "Device Farm refused the connection to the device: %s"
+	// A close with a reason. Verbs: the reason, the close code.
+	RefusalServiceRefusedFormat = RefusalSessionRefusedFormat + " (close code %d)"
+	// A close with the catch-all code (1011), then a close with no reason.
+	RefusalServiceClosedFormat         = "Device Farm closed the connection to the device: %s (close code %d)"
+	RefusalServiceClosedNoReasonFormat = "Device Farm closed the connection to the device (close code %d)"
+	RefusalConnectionDropped           = "the connection to Device Farm ended before the device answered"
+	// Verb: how long the bridge waits for one reply.
+	RefusalReplyTimeoutFormat = "the device did not answer within %s"
+	RefusalAttachDeadline     = "the attach ran out of time before the device answered"
+	// Verbs: the host, the system's error text.
+	RefusalUnreachableFormat = "cannot connect to Device Farm at %s: %s"
+	// The service answered the connection request with an HTTP error. Verb: the host.
+	RefusalUpgradeRefusedAtHostFormat = "Device Farm at %s rejected the connection request"
+	// The same refusal with no host of its own; adb and the doctor print it. The status is not
+	// known, so the text names the possible causes.
+	RefusalUpgradeRefused = "Device Farm rejected the connection request: the session may have ended, " +
+		"its address may have expired, or the session ARN may belong to another account"
+	RefusalNoDeviceSerial = "the remote adb server lists no device"
+	// Verb: the scheme of the session's address.
+	RefusalEndpointNotWSSFormat = "only wss endpoints are supported for connections to devices: %q"
+	// A control frame on another wire version. Verbs: its version byte, this program's.
+	RefusalOtherProtocolFormat = "first websocket message is not a control frame this client understands: " +
+		"wire protocol 0x%02x, this client speaks 0x%02x"
 )
 
 // Fixes the bridge sends with a refused add; the command prints each as a fix line.
@@ -358,8 +381,6 @@ const (
 	// The server's reason or the dial's cause follows.
 	AdbFailRefusedLead     = "the device connection was refused: "
 	AdbFailUnreachableLead = "the bridge could not reach the device: "
-	// The server closed a new connection with a code before its first reply. Verbs: close code, close reason.
-	AdbFailClosedOpeningFormat = "the server closed the connection: code %d, reason \"%s\""
 )
 
 // Doctor report: table headings, the list heading and the count lines.

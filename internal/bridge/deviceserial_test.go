@@ -139,7 +139,7 @@ func TestGivenAReplyThatIsNoDeviceListWhenTheSerialIsFetchedThenTheErrorNamesThe
 			wantText: "the devices reply runs past its byte cap"},
 		// Fixture vector v1-magic-new-frame: a byte-protocol server's first frame.
 		{name: "a control frame on another wire version", frames: [][]byte{decodeHex(t, frameVector(t, "v1-magic-new-frame").Hex)},
-			wantErr: errNotControlFrame, wantText: "wire version 0x00"},
+			wantErr: errNotControlFrame, wantText: "wire protocol 0x00"},
 	}
 
 	for _, testCase := range testCases {

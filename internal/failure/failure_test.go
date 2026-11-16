@@ -134,19 +134,19 @@ func TestGivenExplainedWhenUnwrappedThenErrorsIsReachesTheCause(t *testing.T) {
 }
 
 func TestGivenAChainWithFixesWhenSplitThenTheTextLeavesThemOutAndWithFixRebuildsTheFixLines(t *testing.T) {
-	err := fmt.Errorf("resolve session: %w",
+	err := fmt.Errorf("GetRemoteAccessSession: %w",
 		WithFix(WithFix(errors.New("no usable AWS credentials"), "get working credentials"), "run 'bridge start'"))
 
 	cause, fixes := Split(err)
 
-	assert.Equal(t, "resolve session: no usable AWS credentials", cause)
+	assert.Equal(t, "GetRemoteAccessSession: no usable AWS credentials", cause)
 	assert.Equal(t, []string{"get working credentials", "run 'bridge start'"}, fixes)
 	rebuilt := errors.New(cause)
 	for _, fix := range fixes {
 		rebuilt = WithFix(rebuilt, fix)
 	}
 	assert.Equal(t, "prog: error: could not attach the device\n"+
-		"  cause: resolve session: no usable AWS credentials\n"+
+		"  cause: GetRemoteAccessSession: no usable AWS credentials\n"+
 		"  fix:   get working credentials\n"+
 		"  fix:   run 'bridge start'\n",
 		render(&Explained{Problem: "could not attach the device", Cause: rebuilt}))
