@@ -384,12 +384,12 @@ func TestGivenRunningDaemonWithoutDeviceWhenListDevicesInvokedThenSaysNoDevice(t
 
 func TestGivenDaemonRefusesListWhenListDevicesInvokedThenErrorsWithDaemonReason(t *testing.T) {
 	fakeDaemon(t, func(control.Request) control.Response {
-		return control.Response{OK: false, Error: "unknown control op \"list\""}
+		return control.Response{OK: false, Error: "unknown control operation \"list\""}
 	})
 
 	_, err := execRoot(t, "device", "list")
 
-	require.ErrorContains(t, err, "could not list the devices: unknown control op \"list\"")
+	require.ErrorContains(t, err, "could not list the devices: unknown control operation \"list\"")
 }
 
 func TestGivenNoBridgeWhenListDevicesInvokedWithJSONThenStdoutHoldsOnlyTheObject(t *testing.T) {
@@ -611,7 +611,7 @@ func TestGivenRunningDaemonWhenStartBridgeInvokedThenStopsItSaysSoThenStarts(t *
 
 	require.NoError(t, err)
 	stopped := strings.Index(out.String(),
-		"* a bridge was running (PID 4242) and was stopped; its attached devices, forward rules, and reverse rules were dropped")
+		"* a bridge was running (PID 4242) and was stopped; its attached devices and forward rules were dropped, and its reverse rules no longer reach this machine")
 	started := strings.Index(out.String(), "* bridge started (PID 4343); log file: /tmp/d.log")
 	listening := strings.Index(out.String(), "listening on port 5037")
 	require.GreaterOrEqual(t, stopped, 0, out.String())
@@ -632,7 +632,7 @@ func TestGivenRunningDaemonThatHadToBeKilledWhenStartBridgeInvokedThenTheLineSay
 
 	require.NoError(t, err)
 	assert.Contains(t, out.String(),
-		"* a bridge was running (PID 4242), did not stop cleanly, and was killed; its attached devices, forward rules, and reverse rules were dropped")
+		"* a bridge was running (PID 4242), did not stop cleanly, and was killed; its attached devices and forward rules were dropped, and its reverse rules no longer reach this machine")
 }
 
 func TestGivenRunningDaemonThatSurvivesTheStopWhenStartBridgeInvokedThenErrorsAndStartsNothing(t *testing.T) {
@@ -780,7 +780,7 @@ func TestGivenSessionARNWhenStartBridgeInvokedThenStartsAndAttachesDevice(t *tes
 
 func TestGivenSessionARNButDaemonCannotResolveWhenStartBridgeInvokedThenErrorsButReportsDaemonUp(t *testing.T) {
 	// The daemon resolves the ARN, so a session that does not resolve fails after the
-	// start. The error says the daemon is up, so the user runs bridge start again.
+	// start. The error says the bridge started.
 	fakeRestart(t, func(control.Request) control.Response {
 		return control.Response{OK: false, Error: "session not RUNNING"}
 	}, daemon.StopResult{PID: 4242, WasRunning: true})
@@ -789,7 +789,6 @@ func TestGivenSessionARNButDaemonCannotResolveWhenStartBridgeInvokedThenErrorsBu
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "bridge started")
-	assert.Contains(t, err.Error(), "run this command again")
 	assert.Contains(t, err.Error(), "session not RUNNING")
 }
 

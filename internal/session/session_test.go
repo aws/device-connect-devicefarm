@@ -143,11 +143,6 @@ func TestGivenASessionThatIsNotRunningWhenResolvedThenTheErrorCarriesItsClass(t 
 		wantText string
 	}{
 		{name: "nil session", want: ErrSessionNotFound, wantText: `remote access session "` + testSessionARN + `" not found`},
-		{name: "preparing", session: withoutEndpoint(types.ExecutionStatusPreparing), want: ErrNoEndpointYet,
-			wantText: "has no interactive endpoint yet (status PREPARING)"},
-		{name: "running with an empty endpoint", want: ErrNoEndpointYet, wantText: "(status RUNNING)",
-			session: &types.RemoteAccessSession{Status: types.ExecutionStatusRunning,
-				Endpoints: &types.RemoteAccessEndpoints{InteractiveEndpoint: aws.String("")}}},
 		{name: "completed", want: ErrSessionEnded, wantText: "has ended (status COMPLETED)",
 			session: &types.RemoteAccessSession{Status: types.ExecutionStatusCompleted,
 				Endpoints: &types.RemoteAccessEndpoints{InteractiveEndpoint: aws.String("wss://host.example/ws")}}},
@@ -165,6 +160,37 @@ func TestGivenASessionThatIsNotRunningWhenResolvedThenTheErrorCarriesItsClass(t 
 			assert.ErrorIs(t, err, tc.want)
 			assert.NotErrorIs(t, err, ErrUnsupportedDevice, "an ended session is ended whatever its device")
 			assert.ErrorContains(t, err, tc.wantText)
+		})
+	}
+}
+
+func TestGivenASessionWithNoEndpointWhenResolvedThenTheErrorForksOnWhetherItIsRunning(t *testing.T) {
+	const running = types.ExecutionStatusRunning
+	sessions := []types.RemoteAccessSession{{Status: running,
+		Endpoints: &types.RemoteAccessEndpoints{InteractiveEndpoint: aws.String("")}}}
+	// Every status the service knows, with no endpoints. An ended session is another class.
+	for _, status := range running.Values() {
+		if status != types.ExecutionStatusCompleted && status != types.ExecutionStatusStopping {
+			sessions = append(sessions, types.RemoteAccessSession{Status: status})
+		}
+	}
+	require.Greater(t, len(sessions), 3, "the SDK lists statuses before RUNNING")
+	for _, remoteAccessSession := range sessions {
+		status := remoteAccessSession.Status
+		t.Run(string(status), func(t *testing.T) {
+			wantText := `remote access session "` + testSessionARN + `" is not running yet (status ` + string(status) + `)`
+			if status == running {
+				wantText = `remote access session "` + testSessionARN + `" is running, but Device Farm returned no interactive endpoint for it`
+			}
+			out := &devicefarm.GetRemoteAccessSessionOutput{RemoteAccessSession: &remoteAccessSession}
+
+			_, err := newClient(&fakeGetter{out: out}).GetSession(context.Background(), testSessionARN)
+
+			require.EqualError(t, err, wantText)
+			assert.ErrorIs(t, err, ErrNoEndpointYet, "the doctor and the detach reasons match the sentinel")
+			var noEndpoint *NoEndpointError
+			require.ErrorAs(t, err, &noEndpoint)
+			assert.Equal(t, status == running, noEndpoint.Running())
 		})
 	}
 }

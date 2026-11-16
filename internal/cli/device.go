@@ -53,7 +53,7 @@ func newDeviceAddCommand(state *rootState) *cobra.Command {
 		Long:  wording.HelpDeviceAddLong,
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return attachDevice(cmd, state, failure.Explained{Problem: wording.ProblemAttachFailed})
+			return attachDevice(cmd, state, wording.ProblemAttachFailed)
 		},
 	}
 	addSessionArnFlag(cmd, state, wording.FlagSessionARNUsage)

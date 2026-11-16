@@ -56,10 +56,10 @@ const maxRetryAttempts = 2
 // regions this fails loudly instead of misbehaving.
 const clientRegion = "us-west-2"
 
-// minimumAndroidMajor is the oldest Android release this client serves. The adb
+// MinimumAndroidMajor is the oldest Android release this client serves. The adb
 // relay behind a remote access session does not work below it, so GetSession
 // refuses an older Android device.
-const minimumAndroidMajor = 9
+const MinimumAndroidMajor = 9
 
 // MaxSessionLength is the service's session limit, per the Device Farm developer guide, "Using a
 // remote access session"
@@ -78,12 +78,12 @@ var (
 	// ErrSessionNotFound: no session has this ARN in this account and region.
 	ErrSessionNotFound = errors.New(wording.SessionNotFound)
 	// ErrUnsupportedDevice: the session's device is one this client does not serve (a non-Android
-	// platform, or an Android release below minimumAndroidMajor). UnsupportedDeviceError matches it
+	// platform, or an Android release below MinimumAndroidMajor). UnsupportedDeviceError matches it
 	// and keeps its own text.
 	ErrUnsupportedDevice = errors.New(wording.SessionUnsupportedDevice)
 	// ErrSessionEnded: the session is COMPLETED or STOPPING. SessionEndedError carries which.
 	ErrSessionEnded = errors.New(wording.SessionEnded)
-	// ErrNoEndpointYet: the session is not RUNNING, so it has no endpoint to dial.
+	// ErrNoEndpointYet: the session has no endpoint to dial. NoEndpointError carries its status.
 	ErrNoEndpointYet = errors.New(wording.SessionNoEndpointYet)
 	// ErrRequestRejected: the service answered with a 4xx that is not a throttle: the request
 	// itself is bad (credentials, signature, token, ARN shape). RequestRejectedError carries the
@@ -149,6 +149,27 @@ func (ended *SessionEndedError) Error() string {
 }
 
 func (*SessionEndedError) Is(target error) bool { return target == ErrSessionEnded }
+
+// NoEndpointError is the ErrNoEndpointYet failure with the session's status.
+type NoEndpointError struct {
+	SessionARN string
+	Status     string
+}
+
+// Running reports whether the service says the session is RUNNING. No endpoint is then the
+// service's fault, and a wait does not help.
+func (noEndpoint *NoEndpointError) Running() bool {
+	return noEndpoint.Status == string(types.ExecutionStatusRunning)
+}
+
+func (noEndpoint *NoEndpointError) Error() string {
+	if noEndpoint.Running() {
+		return fmt.Sprintf(wording.SessionNoEndpointFormat, noEndpoint.SessionARN)
+	}
+	return fmt.Sprintf(wording.SessionNotRunningFormat, noEndpoint.SessionARN, noEndpoint.Status)
+}
+
+func (*NoEndpointError) Is(target error) bool { return target == ErrNoEndpointYet }
 
 // RemoteAccessInfo is the outcome of resolving a session ARN: the websocket URL
 // to dial (the interactive endpoint verbatim, path-less; each dial site names its
@@ -278,7 +299,7 @@ func classifyAPIError(err error) error {
 // so a malformed ARN, a non-Device-Farm ARN, or one from a region this client was
 // not built for fails fast, before any network call. A COMPLETED or STOPPING
 // session is reported as ended whatever its device. Then a non-Android device, or
-// an Android device below minimumAndroidMajor, is refused as an
+// an Android device below MinimumAndroidMajor, is refused as an
 // UnsupportedDeviceError (only the response names the device) before the endpoint
 // check, so a session still PREPARING on such a device is refused at once, not
 // after a wait and a retry. Only a RUNNING session with an endpoint resolves.
@@ -312,7 +333,7 @@ func (c awsRemoteAccessClient) GetSession(ctx context.Context, sessionARN string
 	}
 	// Only RUNNING is dialable: a pending session has no endpoint yet.
 	if status != types.ExecutionStatusRunning || endpoint == "" {
-		return RemoteAccessInfo{}, fmt.Errorf(wording.SessionNoEndpointFormat, sessionARN, ErrNoEndpointYet, status)
+		return RemoteAccessInfo{}, &NoEndpointError{SessionARN: sessionARN, Status: string(status)}
 	}
 
 	return RemoteAccessInfo{Endpoint: endpoint, ARN: aws.ToString(remoteAccessSession.Arn),
@@ -350,7 +371,7 @@ func ValidateSessionARN(sessionARN string) error {
 const androidPlatform = "Android"
 
 // UnsupportedDeviceError is the refusal of a device this client cannot serve: a
-// non-Android platform, or an Android release below minimumAndroidMajor. Platform
+// non-Android platform, or an Android release below MinimumAndroidMajor. Platform
 // is the word the text uses ("Android", "iOS", or the raw value). OSVersion is the
 // release the response reports. It matches ErrUnsupportedDevice for errors.Is. An
 // in-process caller tells the two refusals apart with errors.As and
@@ -363,7 +384,7 @@ type UnsupportedDeviceError struct {
 }
 
 // BelowAndroidFloor reports whether the device is Android but older than
-// minimumAndroidMajor. Otherwise the platform itself is unsupported.
+// MinimumAndroidMajor. Otherwise the platform itself is unsupported.
 func (refusal UnsupportedDeviceError) BelowAndroidFloor() bool {
 	return refusal.Platform == androidPlatform
 }
@@ -375,11 +396,11 @@ func (refusal UnsupportedDeviceError) Error() string {
 	if !refusal.BelowAndroidFloor() {
 		return fmt.Sprintf(wording.SessionNotAndroidFormat, refusal.SessionARN, refusal.Platform)
 	}
-	return fmt.Sprintf(wording.SessionAndroidTooOldFormat, refusal.SessionARN, refusal.OSVersion, minimumAndroidMajor)
+	return fmt.Sprintf(wording.SessionAndroidTooOldFormat, refusal.SessionARN, refusal.OSVersion, MinimumAndroidMajor)
 }
 
 // refuseUnsupportedDevice returns an UnsupportedDeviceError for a non-Android
-// device or an Android device below minimumAndroidMajor. A missing device or empty
+// device or an Android device below MinimumAndroidMajor. A missing device or empty
 // platform passes: the SDK Platform is a plain string, so absent and empty look the
 // same, and the gate refuses only what the response names as non-Android. An
 // Android version that does not parse passes with a warning. The gate is a
@@ -402,7 +423,7 @@ func refuseUnsupportedDevice(sessionARN string, device *types.Device, logger *sl
 		logger.Warn("device OS version not parsed; allowing the session", "os", refusal.OSVersion, "arn", sessionARN)
 		return nil
 	}
-	if major < minimumAndroidMajor {
+	if major < MinimumAndroidMajor {
 		return refusal
 	}
 	return nil

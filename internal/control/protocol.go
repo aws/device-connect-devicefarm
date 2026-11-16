@@ -46,8 +46,8 @@ type Request struct {
 }
 
 // Response is the daemon's reply. OK reports whether the operation succeeded;
-// Error carries the reason when it did not. Fixes carries the remedies the daemon
-// knows (failure.Split); the CLI prints each as a fix line. DeviceLabel and Port
+// Error carries the reason when it did not. Fixes carries the fix of a refused reply,
+// exactly one (failure.Split); the CLI prints it as a fix line. DeviceLabel and Port
 // describe the daemon's resulting state so the CLI can print the listening line
 // without a second round trip. Devices is one entry per connected device; OpStatus
 // and OpList both fill it. An OpList reply carries no Port. OpStatus fills ARN with

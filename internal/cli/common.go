@@ -190,8 +190,8 @@ func sendToBridge(cmd *cobra.Command, state *rootState, req control.Request) (co
 
 // attachDevice sends the add for --session-arn, starting the daemon when none
 // runs, and prints the listening line. The daemon resolves the ARN; its refusal
-// becomes the cause under refused, the command's own problem and fix.
-func attachDevice(cmd *cobra.Command, state *rootState, refused failure.Explained) error {
+// becomes the cause under problem, the command's own words.
+func attachDevice(cmd *cobra.Command, state *rootState, problem string) error {
 	if state.sessionARN == "" {
 		return usageError(cmd, errors.New(wording.ProblemSessionARNRequired))
 	}
@@ -200,11 +200,7 @@ func attachDevice(cmd *cobra.Command, state *rootState, refused failure.Explaine
 		return err
 	}
 	if !resp.OK {
-		refused.Cause = daemonRefusal(resp)
-		if len(resp.Fixes) > 0 {
-			refused.Fix = "" // the daemon's fix is the specific one
-		}
-		return &refused
+		return &failure.Explained{Problem: problem, Cause: daemonRefusal(resp)}
 	}
 	printListeningLine(cmd, resp)
 	if resp.ARN != "" && resp.ARN != state.sessionARN {
@@ -214,10 +210,15 @@ func attachDevice(cmd *cobra.Command, state *rootState, refused failure.Explaine
 }
 
 // daemonRefusal rebuilds the daemon's error from a refused reply: its text wrapped in each
-// fix, so failure.Write prints them as fix lines.
+// fix, so failure.Write prints them as fix lines. A reply with no fix is from an older bridge
+// and gets the restart fix.
 func daemonRefusal(resp control.Response) error {
 	refusal := errors.New(resp.Error)
-	for _, fix := range resp.Fixes {
+	fixes := resp.Fixes
+	if len(fixes) == 0 {
+		fixes = []string{wording.FixOtherVersionBridge}
+	}
+	for _, fix := range fixes {
 		refusal = failure.WithFix(refusal, fix)
 	}
 	return refusal

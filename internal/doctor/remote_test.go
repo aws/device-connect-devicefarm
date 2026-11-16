@@ -264,6 +264,8 @@ func TestGivenAResolverWhenTheSessionCheckRunsThenTheRowFollowsTheResolverOutcom
 			wantQuoted: "'" + wording.DoctorCreateSessionCommand + "'"},
 		{name: "not running yet", err: fmt.Errorf("session %w (status PENDING)", session.ErrNoEndpointYet), wantHint: notRunningHint,
 			wantQuoted: "'aws devicefarm get-remote-access-session --arn " + testSessionARN + " --region us-west-2'"},
+		{name: "running with no endpoint", err: &session.NoEndpointError{SessionARN: testSessionARN, Status: "RUNNING"},
+			wantHint: noEndpointHint, wantQuoted: "contact AWS Support"},
 		{name: "rejected", err: fmt.Errorf("GetRemoteAccessSession: %w", &session.RequestRejectedError{Code: "ExpiredTokenException",
 			Cause: errors.New("api error ExpiredTokenException: The security token included in the request is expired")}),
 			wantHint: requestRejectedHint, wantQuoted: "'aws sts get-caller-identity'"},
@@ -346,7 +348,8 @@ func TestGivenAnArnWithControlCharactersWhenAHintIsBuiltThenTheHintStaysOnOneLin
 	builders := map[string]func(Inputs) string{"invalid arn": invalidArnHint, "access denied": accessDeniedHint,
 		"not found": sessionGoneHint, "unsupported device": unsupportedDeviceHint, "ended": sessionEndedHint,
 		"ios device":      func(inputs Inputs) string { return nonAndroidDeviceHint(inputs, "iOS") },
-		"not running yet": notRunningHint, "rejected": requestRejectedHint, "network": sessionNetworkHint, "rerun": doctorRerun}
+		"not running yet": notRunningHint, "no endpoint": noEndpointHint, "rejected": requestRejectedHint,
+		"network": sessionNetworkHint, "rerun": doctorRerun}
 	for name, build := range builders {
 		t.Run(name, func(t *testing.T) {
 			hint := build(inputs)
