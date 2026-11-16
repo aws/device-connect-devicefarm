@@ -702,7 +702,7 @@ func differentDeviceAttached(label, sessionARN string) error {
 // It never names --allow-adb-reverse, which needs its caveat: with reverse on it adds
 // FixOtherOptionsClause.
 func (manager *DaemonManager) quotedRestart(sessionARN string) string {
-	quoted := "'" + StartCommand(manager.config.ListenAddr, manager.config.ListenPort) + wording.DoctorRestartSessionFlagLead + sessionARN + "'"
+	quoted := "'" + RestartCommand(manager.config.ListenAddr, manager.config.ListenPort, false, sessionARN) + "'"
 	if manager.config.ReverseEnabled {
 		quoted += wording.FixOtherOptionsClause
 	}
@@ -796,10 +796,9 @@ func (manager *DaemonManager) detachReason(sessionARN string, err error) (reason
 	case errors.Is(err, session.ErrSessionEnded):
 		return fmt.Sprintf(wording.DetachSessionEndedFormat, sessionARN, endedState(err)), true
 	}
-	// No flags in the restart: a FAIL line must not quote --allow-adb-reverse without its caveat.
 	var rejected *session.RequestRejectedError
 	if errors.As(err, &rejected) && rejected.CredentialsExpired() {
-		return fmt.Sprintf(wording.DetachCredentialsExpiredFormat, sessionARN, sessionARN), true
+		return fmt.Sprintf(wording.DetachCredentialsExpiredFormat, sessionARN, manager.quotedRestart(sessionARN)), true
 	}
 	for _, class := range classifiedFailures {
 		if errors.Is(err, class) {

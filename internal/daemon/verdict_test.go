@@ -52,8 +52,8 @@ func TestGivenEachLookupFailureWhenWordedThenTheReasonNamesTheStateAndOnlyADeadS
 				"cause, contact AWS Support", wantDetach: true},
 		{name: "expired credentials", err: &session.RequestRejectedError{Code: "ExpiredTokenException", Cause: errors.New("api error")},
 			wantReason: "the AWS credentials the bridge started with have expired, so it can no longer read remote access session " +
-				verdictARN + "; refresh the credentials, run 'devicefarm-connect bridge stop', start the bridge again from that " +
-				"shell with the same options, then run 'devicefarm-connect device add --session-arn " + verdictARN + "'",
+				verdictARN + "; refresh the credentials, then from that shell run 'devicefarm-connect bridge start --port 5037 " +
+				"--session-arn " + verdictARN + "'",
 			wantDetach: true},
 		{name: "rejected credentials", err: &session.RequestRejectedError{Code: "UnrecognizedClientException", Cause: errors.New("api error")},
 			wantReason: "the bridge can no longer read remote access session " + verdictARN +

@@ -310,6 +310,29 @@ func TestGivenAListenAddressWhenItsHostIsResolvedThenTheBindAndTheDialShareOneAd
 	assert.Error(t, err, "a name that does not resolve is the bind error")
 }
 
+func TestGivenARestartWhenItsCommandIsBuiltThenItIsOneStartWithThePortTheReverseFlagAndTheSessionAsGiven(t *testing.T) {
+	const sessionARN = "arn:aws:devicefarm:us-west-2:111122223333:session:a/b/0"
+	tests := []struct {
+		name       string
+		listenAddr string
+		port       int
+		reverse    bool
+		sessionARN string
+		want       string
+	}{
+		{"the port alone", "127.0.0.1", 5037, false, "", "devicefarm-connect bridge start --port 5037"},
+		{"a session", "127.0.0.1", 6000, false, sessionARN, "devicefarm-connect bridge start --port 6000 --session-arn " + sessionARN},
+		{"reverse on", "127.0.0.1", 5037, true, "", "devicefarm-connect bridge start --port 5037 --allow-adb-reverse"},
+		{"reverse on with a session off the default address", "0.0.0.0", 5037, true, sessionARN,
+			"devicefarm-connect bridge start --port 5037 --listen-addr 0.0.0.0 --allow-adb-reverse --session-arn " + sessionARN},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, RestartCommand(tc.listenAddr, tc.port, tc.reverse, tc.sessionARN))
+		})
+	}
+}
+
 func TestGivenANonDefaultListenAddressWhenAStartCommandIsQuotedThenItCarriesTheAddress(t *testing.T) {
 	assert.Equal(t, "devicefarm-connect bridge start --port 5037", StartCommand("127.0.0.1", 5037),
 		"a user on the default address never sees --listen-addr")
