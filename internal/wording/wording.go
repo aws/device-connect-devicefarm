@@ -283,7 +283,8 @@ const (
 	// Verb: the restart.
 	FixInstallLatestFormat = "Install the latest " + BinaryName + ", then run %s."
 	FixMalformedRequest    = "Restart the bridge: run " + StartWithYourOptionsClause + ". If the error remains, install the latest " + BinaryName + "."
-	// Also the command's own fix for a refusal with none, which an older bridge sends.
+	// Also the command's own fix for a refusal with no fix, when the bridge reports another version
+	// of this program or no version.
 	FixOtherVersionBridge = "The running bridge is another version of " + BinaryName + " than this command. Restart it: run " +
 		StartWithYourOptionsClause + ". If the error remains, install the latest " + BinaryName + ", then run '" + DoctorCommand +
 		"'. If the doctor does not find the cause, contact AWS Support."
@@ -508,6 +509,10 @@ const (
 	// Follow the running text. Verb: the session --session-arn asked for.
 	DoctorDetailDaemonDetachedClause          = "; the bridge detached the last device"
 	DoctorDetailDaemonNotAttachedClauseFormat = "; session %s is not attached"
+	// Follow the running text, before the other clauses. Verbs: the bridge's version, then the
+	// command's; Earlier, for a bridge that reports no version, has only the command's.
+	DoctorDetailDaemonOtherProgramVersionClauseFormat   = "; the bridge runs another version of " + BinaryName + " (%s) than this command (%s)"
+	DoctorDetailDaemonEarlierProgramVersionClauseFormat = "; the bridge runs an earlier version of " + BinaryName + " than this command (%s)"
 
 	DoctorDetailDaemonSilentFormat        = "a bridge (PID %d) is registered but does not answer: %s"
 	DoctorDetailDaemonNoStatusFormat      = "a bridge (PID %d) is registered but did not report its status: %s"
@@ -515,6 +520,11 @@ const (
 
 	DoctorHintDaemonNoStatus = "a bridge is registered but did not report its status. Run " + StartWithYourOptionsClause +
 		". The start ends that bridge and launches a new one."
+	// Verb: the restart with the bridge's own port, session and reverse setting.
+	DoctorHintDaemonOtherProgramVersionFormat = "the bridge runs another version of " + BinaryName + " than this command, so a command can " +
+		"fail. Run '%s' to start it again with this command's version of " + BinaryName + ". The restart drops an attached device with its " +
+		"forward rules and open adb connections, and its reverse rules no longer reach this machine; the device comes back when the " +
+		"command names its session."
 	// Verb: the restart with the reverse flag.
 	DoctorHintDaemonReverseOffFormat = "the bridge runs with adb reverse off, so every 'adb reverse' fails. Run '%s' to start it again " +
 		"with reverse on."
