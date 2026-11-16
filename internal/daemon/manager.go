@@ -738,12 +738,8 @@ func (m *DaemonManager) addFix(err error, sessionARN string) string {
 	return fmt.Sprintf(wording.FixDoctorThenRestartFormat, m.doctorCommand(sessionARN), m.quotedRestart(sessionARN))
 }
 
-const (
-	// deviceNotServedCloseCode is the websocket relay's close for a device the service does not serve.
-	deviceNotServedCloseCode = 1008
-	// defaultWSSPort is the port of a session address that names none.
-	defaultWSSPort = "443"
-)
+// deviceNotServedCloseCode is the websocket relay's close for a device the service does not serve.
+const deviceNotServedCloseCode = 1008
 
 // connectionFix is the fix for an add whose serial fetch failed, by the kind of the failure.
 func (manager *DaemonManager) connectionFix(failed bridge.ConnectionFailure, sessionARN string) string {
@@ -754,10 +750,7 @@ func (manager *DaemonManager) connectionFix(failed bridge.ConnectionFailure, ses
 	case bridge.FailureNoDevice, bridge.FailureNotWSS:
 		return fmt.Sprintf(wording.FixDoctorThenSupportFormat, doctor)
 	case bridge.FailureUnreachable:
-		host, port, err := net.SplitHostPort(failed.Host)
-		if err != nil {
-			host, port = failed.Host, defaultWSSPort
-		}
+		host, port := failed.DialedHostPort()
 		return fmt.Sprintf(wording.FixCheckReachFormat, host, port, sessionARN, doctor)
 	case bridge.FailureOtherProtocol:
 		return fmt.Sprintf(wording.FixInstallLatestFormat, manager.quotedRestart(sessionARN))

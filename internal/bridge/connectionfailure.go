@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 
 	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
@@ -44,8 +45,12 @@ const (
 	FailureSessionStopping
 )
 
-// catchAllCloseCode is the websocket close code for an internal error. Its reason names no cause.
-const catchAllCloseCode = 1011
+const (
+	// catchAllCloseCode is the websocket close code for an internal error. Its reason names no cause.
+	catchAllCloseCode = 1011
+	// defaultWSSPort is the port of a session address that names none.
+	defaultWSSPort = "443"
+)
 
 // ConnectionFailure is a failed connection to a device, sorted for the person who reads it.
 type ConnectionFailure struct {
@@ -54,10 +59,24 @@ type ConnectionFailure struct {
 	Cause string
 	// CloseCode is the close code that FailureServiceRefused and FailureServiceClosed name. Else zero.
 	CloseCode int
-	// Host is the host that FailureUnreachable and FailureUpgradeRefused name. Else empty.
+	// Host is the host of a failed dial, with the port when the session's address names one:
+	// FailureUnreachable, FailureUpgradeRefused, and FailureAttachDeadline in the dial. Else empty.
 	Host string
 	// detail is what adb's refusal texts quote: the server's reason, the dial's cause, else Cause.
 	detail string
+}
+
+// DialedHostPort splits Host into the host and the port, as the dial does. The port is 443 when
+// Host names none. Both are empty when Host is.
+func (failed ConnectionFailure) DialedHostPort() (host, port string) {
+	if failed.Host == "" {
+		return "", ""
+	}
+	host, port, err := net.SplitHostPort(failed.Host)
+	if err != nil {
+		return failed.Host, defaultWSSPort
+	}
+	return host, port
 }
 
 // plainFailure is a failure whose cause has no smaller part to quote.
@@ -85,16 +104,17 @@ func SortConnectionError(err error, sessionARN string) ConnectionFailure {
 			Cause: fmt.Sprintf(wording.RefusalSessionRefusedFormat, refusal.reason)}
 	case errors.As(err, &dialErr):
 		systemText := dialErr.cause.Error()
+		failed := ConnectionFailure{Host: dialErr.host, detail: systemText}
 		switch {
 		case errors.Is(dialErr.cause, ErrUpgradeRefused):
-			return ConnectionFailure{Kind: FailureUpgradeRefused, Host: dialErr.host, detail: systemText,
-				Cause: fmt.Sprintf(wording.RefusalUpgradeRefusedAtHostFormat, dialErr.host)}
+			failed.Kind, failed.Cause = FailureUpgradeRefused, fmt.Sprintf(wording.RefusalUpgradeRefusedAtHostFormat, dialErr.host)
 		// The bare deadline has no system text: time ran out in the TLS handshake or the upgrade.
 		case dialErr.cause == context.DeadlineExceeded:
-			return ConnectionFailure{Kind: FailureAttachDeadline, detail: systemText, Cause: wording.RefusalAttachDeadline}
+			failed.Kind, failed.Cause = FailureAttachDeadline, wording.RefusalAttachDeadline
+		default:
+			failed.Kind, failed.Cause = FailureUnreachable, fmt.Sprintf(wording.RefusalUnreachableFormat, dialErr.host, systemText)
 		}
-		return ConnectionFailure{Kind: FailureUnreachable, Host: dialErr.host, detail: systemText,
-			Cause: fmt.Sprintf(wording.RefusalUnreachableFormat, dialErr.host, systemText)}
+		return failed
 	case errors.As(err, &schemeErr):
 		return plainFailure(FailureNotWSS, schemeErr.Error())
 	case errors.As(err, &versionErr):

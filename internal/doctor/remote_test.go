@@ -5,9 +5,13 @@ package doctor
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -386,6 +390,32 @@ func relayInputs(endpoint string, dialer *bridge.WSDialer) (Inputs, *runState) {
 	return Inputs{Config: config.Default(), SessionARN: testSessionARN, Dialer: dialer}, &runState{endpoint: endpoint}
 }
 
+// rerunOnceHint is the relay hint for a failure after the dial, with no proxy set.
+func rerunOnceHint(inputs Inputs) string {
+	return "Device Farm or the device did not complete the adb connection, so an adb connection through the bridge would fail the " +
+		"same way. Rerun " + doctorRerun(inputs) + " once; a second failure means the network path to Device Farm or the device " +
+		"itself is at fault, so check the session in the Device Farm console."
+}
+
+// allowHostHint is the relay hint for a failed dial to host on port, with no proxy set.
+func allowHostHint(inputs Inputs, host, port string) string {
+	return "this machine could not open a WebSocket connection (wss) to " + host + " on TCP port " + port + ", so adb cannot reach " +
+		"the device through the bridge. If a firewall or a proxy on your network blocks the connection, ask your network " +
+		"administrator to allow direct outbound WebSocket connections (wss) to that host and port, then rerun " + doctorRerun(inputs) +
+		". If your network allows that connection and the error remains, contact AWS Support."
+}
+
+// upgradeServer is a TLS server whose handler answers the websocket upgrade, or never does, and a
+// dialer that trusts it and gives up after dialTimeout.
+func upgradeServer(t *testing.T, handler http.HandlerFunc, dialTimeout time.Duration) (string, *bridge.WSDialer) {
+	t.Helper()
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	trust := x509.NewCertPool()
+	trust.AddCert(server.Certificate())
+	return "wss://" + server.Listener.Addr().String(), bridge.NewWSDialer(dialTimeout).TrustRoots(trust)
+}
+
 func TestGivenARelayThatAcceptsTheSelectWhenTheSessionIsProbedThenTheRowNamesTheMintedSession(t *testing.T) {
 	sessions, _, dialer := relayMock(t, answeringAdb("OKAY"))
 	inputs, state := relayInputs(sessions.URL, dialer)
@@ -398,7 +428,7 @@ func TestGivenARelayThatAcceptsTheSelectWhenTheSessionIsProbedThenTheRowNamesThe
 	assert.Equal(t, fmt.Sprintf("adb session %s opened to the device", state.sessionUUID), result.Summary)
 }
 
-func TestGivenTheDeviceRefusesTheSelectWhenTheSessionIsProbedThenTheRowFailsWithTheRelayHint(t *testing.T) {
+func TestGivenTheDeviceRefusesTheSelectWhenTheSessionIsProbedThenTheRowFailsWithTheRerunHint(t *testing.T) {
 	sessions, _, dialer := relayMock(t, answeringAdb("FAIL000edevice offline"))
 	inputs, state := relayInputs(sessions.URL, dialer)
 
@@ -406,7 +436,7 @@ func TestGivenTheDeviceRefusesTheSelectWhenTheSessionIsProbedThenTheRowFailsWith
 
 	assert.Equal(t, Result{Status: Fail,
 		Summary: "could not open an adb session to the device: the device adb server refused the transport select: device offline",
-		Hint:    relayHint(inputs)}, result)
+		Hint:    rerunOnceHint(inputs)}, result)
 	assert.Empty(t, state.sessionUUID)
 }
 
@@ -439,15 +469,73 @@ func TestGivenAPresignedEndpointNobodyAnswersWhenEachRelayRowRunsThenTheRowCarri
 	}
 }
 
-func TestGivenNoProxyWhenTheRelayDialFailsThenTheHintCarriesNoProxyNote(t *testing.T) {
+func TestGivenNoProxyWhenARelayDialFailsThenTheHintNamesTheHostAndPortToAllowAndCarriesNoProxyNote(t *testing.T) {
 	noProxy(t)
-	inputs, state := relayInputs(testsupport.PresignedUnreachableEndpoint, bridge.NewWSDialer(time.Second))
+	nobodyAnswers := func(*testing.T) (string, *bridge.WSDialer) {
+		return testsupport.PresignedUnreachableEndpoint, bridge.NewWSDialer(time.Second)
+	}
+	tests := []struct {
+		name string
+		id   string
+		// relay gives the endpoint and a dialer whose dial fails there.
+		relay func(*testing.T) (string, *bridge.WSDialer)
+	}{
+		{"nobody answers the adb session row", checkRelaySession, nobodyAnswers},
+		{"nobody answers the adb reverse row", checkReverse, nobodyAnswers},
+		{"the upgrade is answered with an HTTP error", checkRelaySession, func(t *testing.T) (string, *bridge.WSDialer) {
+			return upgradeServer(t, func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusForbidden) }, time.Second)
+		}},
+		{"the upgrade is never answered", checkRelaySession, func(t *testing.T) (string, *bridge.WSDialer) {
+			return upgradeServer(t, func(_ http.ResponseWriter, request *http.Request) { <-request.Context().Done() }, 100*time.Millisecond)
+		}},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			endpoint, dialer := testCase.relay(t)
+			inputs, state := relayInputs(endpoint, dialer)
+			address, err := url.Parse(endpoint)
+			require.NoError(t, err)
+
+			result := runRemote(t, inputs, state, testCase.id)
+
+			assert.Equal(t, Fail, result.Status)
+			assert.Equal(t, allowHostHint(inputs, address.Hostname(), address.Port()), result.Hint)
+		})
+	}
+}
+
+func TestGivenAProxyWhenARelayProbeFailsThenEitherHintEndsWithTheProxyNote(t *testing.T) {
+	sessions, _, trusting := relayMock(t, answeringAdb("FAIL000edevice offline"))
+	t.Setenv("https_proxy", "http://proxy.example:3128")
+	tests := []struct {
+		name     string
+		endpoint string
+		dialer   *bridge.WSDialer
+		hint     func(Inputs) string
+	}{
+		{"a failed dial", testsupport.PresignedUnreachableEndpoint, bridge.NewWSDialer(time.Second),
+			func(inputs Inputs) string { return allowHostHint(inputs, "127.0.0.1", "1") }},
+		{"a failure after the dial", sessions.URL, trusting, rerunOnceHint},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			inputs, state := relayInputs(testCase.endpoint, testCase.dialer)
+
+			result := runRemote(t, inputs, state, checkRelaySession)
+
+			assert.Equal(t, testCase.hint(inputs)+" "+wording.DoctorHintProxyIgnored, result.Hint)
+		})
+	}
+}
+
+func TestGivenAHostWithAControlCharacterWhenTheRelayDialFailsThenTheHintShowsItEscaped(t *testing.T) {
+	noProxy(t)
+	// The escaped byte pair is U+0085, a control character that a URL host can carry. No resolver looks such a name up.
+	inputs, state := relayInputs("wss://relay%C2%85forged.example/", bridge.NewWSDialer(time.Second))
 
 	result := runRemote(t, inputs, state, checkRelaySession)
 
-	assert.Equal(t, Fail, result.Status)
-	assert.Equal(t, relayHint(inputs), result.Hint)
-	assert.NotContains(t, result.Hint, wording.DoctorHintProxyIgnored)
+	assert.Equal(t, allowHostHint(inputs, `relay\u0085forged.example`, "443"), result.Hint)
 }
 
 func TestGivenAProbedSessionWhenReattachedThenTheRowNamesTheResumedSession(t *testing.T) {
@@ -471,7 +559,7 @@ func TestGivenASilentRelayWhenTheRowDeadlineNearsThenTheProbeGivesUpFirstAndKeep
 		id      string
 		hintFor func(Inputs) string
 	}{
-		{checkRelaySession, relayHint},
+		{checkRelaySession, rerunOnceHint},
 		{checkAdbVersion, func(Inputs) string { return wording.DoctorHintRemoteAdbSilent }},
 	}
 	for _, row := range rows {

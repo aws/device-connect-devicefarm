@@ -44,6 +44,10 @@ const (
 	fixDoctorThenSupport = "Run '" + fixDoctorCommand + "'. If the doctor does not find the cause, contact AWS Support."
 	fixRetryThenDoctor   = "Run '" + fixAddCommand + "' again. If the error remains, run '" + fixDoctorCommand +
 		"'. If the doctor does not find the cause, contact AWS Support."
+	// Ends the fix for a host the bridge cannot reach, after "... on TCP port <port>".
+	fixReachTail = ". If a firewall or a proxy on your network blocks the connection, ask your network administrator to allow " +
+		"direct outbound WebSocket connections (wss) to that host and port. Then run '" + fixAddCommand + "' again. '" +
+		fixDoctorCommand + "' tests the connection."
 	fixOtherVersion = "The running bridge is another version of devicefarm-connect than this command. Restart it: run " +
 		"'devicefarm-connect bridge start' with the options that you started it with. If the error remains, install the " +
 		"latest devicefarm-connect, then run 'devicefarm-connect doctor'. If the doctor does not find the cause, contact AWS Support."
@@ -120,9 +124,8 @@ func (s *controlHandlerSuite) TestSerialFetchFailsTheReplyNamesWhatFailedAndTheL
 		logged   string
 	}{
 		{name: "nothing listens at the endpoint", endpoint: testsupport.PresignedUnreachableEndpoint,
-			cause: "cannot connect to Device Farm at 127.0.0.1:1: dial tcp 127.0.0.1:1: connect: connection refused",
-			fix: "Check that this machine can reach 127.0.0.1 on port 1, then run '" + fixAddCommand + "' again. '" +
-				fixDoctorCommand + "' tests the connection.",
+			cause:  "cannot connect to Device Farm at 127.0.0.1:1: dial tcp 127.0.0.1:1: connect: connection refused",
+			fix:    "Check that this machine can reach 127.0.0.1 on TCP port 1" + fixReachTail,
 			logged: "fetch the device serial: " + testsupport.ScrubbedDialText + "adb: dial tcp 127.0.0.1:1"},
 		{name: "the service closes with a reason", endpoint: closing.URL, fix: fixOtherDevice,
 			cause:  "Device Farm refused the connection to the device: Device Connect is not supported on this device (close code 1008)",
@@ -478,14 +481,13 @@ func TestGivenEachKindOfFailedConnectionWhenItsFixIsPickedThenItIsTheFixOfItsCla
 		{"that close with no reason", bridge.ConnectionFailure{Kind: bridge.FailureServiceClosed, CloseCode: 1008}, fixOtherDevice},
 		{"the catch-all close", bridge.ConnectionFailure{Kind: bridge.FailureServiceClosed, CloseCode: 1011}, fixRetryThenDoctor},
 		{"a rejected upgrade", bridge.ConnectionFailure{Kind: bridge.FailureUpgradeRefused, Host: "device.example"}, fixRetryThenDoctor},
+		{"a dial that ran out of time", bridge.ConnectionFailure{Kind: bridge.FailureAttachDeadline, Host: "device.example"}, fixRetryThenDoctor},
 		{"no device listed", bridge.ConnectionFailure{Kind: bridge.FailureNoDevice}, fixDoctorThenSupport},
 		{"an address that is not wss", bridge.ConnectionFailure{Kind: bridge.FailureNotWSS}, fixDoctorThenSupport},
 		{"an unreachable host", bridge.ConnectionFailure{Kind: bridge.FailureUnreachable, Host: "device.example"},
-			"Check that this machine can reach device.example on port 443, then run '" + fixAddCommand + "' again. '" +
-				fixDoctorCommand + "' tests the connection."},
+			"Check that this machine can reach device.example on TCP port 443" + fixReachTail},
 		{"an unreachable host that names its port", bridge.ConnectionFailure{Kind: bridge.FailureUnreachable, Host: "device.example:8443"},
-			"Check that this machine can reach device.example on port 8443, then run '" + fixAddCommand + "' again. '" +
-				fixDoctorCommand + "' tests the connection."},
+			"Check that this machine can reach device.example on TCP port 8443" + fixReachTail},
 		{"another wire protocol", bridge.ConnectionFailure{Kind: bridge.FailureOtherProtocol},
 			"Install the latest devicefarm-connect, then run '" + fixRestartCommand + "'."},
 		{"the session-stopping close", bridge.ConnectionFailure{Kind: bridge.FailureSessionStopping}, fixNewSession},
