@@ -23,6 +23,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/daemon"
 	"github.com/aws/device-connect-devicefarm/internal/forward"
+	"github.com/aws/device-connect-devicefarm/internal/version"
 	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
@@ -293,10 +294,30 @@ func attachedIsAsked(attachedARN, askedARN, returnedARN string) bool {
 	return attachedARN != "" && (attachedARN == askedARN || attachedARN == returnedARN)
 }
 
-// bridgeRowResult builds the row for a bridge that answered status. WARN on the first match: a
-// detached device (unless the reason is about another session than the asked one), the asked
-// session not attached, reverse off. Never FAIL: the bridge runs. askedARN and returnedARN (see
-// lookUpReturnedARN) both name the asked session.
+// programVersionClause is the summary clause for a bridge that runs another version of this
+// program than the command, "" for the same one. A bridge that reports none is an earlier one.
+func programVersionClause(bridgeProgramVersion string) string {
+	switch bridgeProgramVersion {
+	case version.String():
+		return ""
+	case "":
+		return fmt.Sprintf(wording.DoctorDetailDaemonEarlierProgramVersionClauseFormat, version.String())
+	}
+	return fmt.Sprintf(wording.DoctorDetailDaemonOtherProgramVersionClauseFormat, safeValue(bridgeProgramVersion), version.String())
+}
+
+// otherProgramVersionHint restarts the bridge with its own port, session and reverse setting, so
+// it runs this command's version.
+func otherProgramVersionHint(reply control.Response) string {
+	return caveatIf(fmt.Sprintf(wording.DoctorHintDaemonOtherProgramVersionFormat,
+		restartWith(reply, reply.Port, reply.ReverseEnabled)), reply.ReverseEnabled)
+}
+
+// bridgeRowResult builds the row for a bridge that answered status. WARN on the first match:
+// another version of this program than the command (such a bridge can lack the fields the later
+// matches read), a detached device (unless the reason is about another session than the asked
+// one), the asked session not attached, reverse off. Never FAIL: the bridge runs. askedARN and
+// returnedARN (see lookUpReturnedARN) both name the asked session.
 func bridgeRowResult(askedARN, returnedARN string, reply control.Response, pid int) Result {
 	device := wording.DoctorDetailDaemonNoDeviceClause
 	if reply.DeviceLabel != "" {
@@ -306,7 +327,8 @@ func bridgeRowResult(askedARN, returnedARN string, reply control.Response, pid i
 	if !reply.ReverseEnabled {
 		reverse = wording.DoctorDetailDaemonReverseOffClause
 	}
-	summary := fmt.Sprintf(wording.DoctorDetailDaemonRunningFormat, pid, reply.Port, device, reverse)
+	otherProgramVersion := programVersionClause(reply.ProgramVersion)
+	summary := fmt.Sprintf(wording.DoctorDetailDaemonRunningFormat, pid, reply.Port, device, reverse) + otherProgramVersion
 	// The reply carries a detach reason only while no device is attached.
 	if reply.LastDetachReason != "" {
 		summary += wording.DoctorDetailDaemonDetachedClause
@@ -319,6 +341,8 @@ func bridgeRowResult(askedARN, returnedARN string, reply control.Response, pid i
 	detachAnswersAsk := askedARN == "" || strings.Contains(reply.LastDetachReason, askedARN) ||
 		returnedARN != "" && strings.Contains(reply.LastDetachReason, returnedARN)
 	switch {
+	case otherProgramVersion != "":
+		return Result{Status: Warn, Summary: summary, Hint: otherProgramVersionHint(reply)}
 	case reply.LastDetachReason != "" && detachAnswersAsk:
 		return Result{Status: Warn, Summary: summary, Hint: detachedHint(reply.LastDetachReason)}
 	case askedMissing:
@@ -382,9 +406,9 @@ func checkListenPortFree(inputs Inputs, state *runState) Result {
 				Summary: fmt.Sprintf(wording.DoctorDetailOtherBridgeOnPortFormat, pid, safeValue(address)),
 				Hint:    daemon.BridgeHoldsPortText(safeValue(cfg.ListenAddr), cfg.ListenPort, pid)}
 		}
-		version, connected, adbServer := daemon.ProbeOccupant(occupantAddress, occupantReplyTimeout)
+		adbServerVersion, connected, adbServer := daemon.ProbeOccupant(occupantAddress, occupantReplyTimeout)
 		if adbServer && identityRefused {
-			return Result{Status: Warn, Summary: fmt.Sprintf(wording.DoctorDetailAdbServerOnPortFormat, version, safeValue(address)),
+			return Result{Status: Warn, Summary: fmt.Sprintf(wording.DoctorDetailAdbServerOnPortFormat, adbServerVersion, safeValue(address)),
 				Hint: adbServerHint(safeValue(cfg.ListenAddr), cfg.ListenPort)}
 		}
 		if connected {

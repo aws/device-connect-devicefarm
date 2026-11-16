@@ -41,18 +41,20 @@ type Handler func(Request) Response
 // (Serve) so the daemon can bind the socket before announcing readiness, which
 // removes the race where the CLI connects before the listener exists.
 type LocalSocketServer struct {
-	socketPath string
-	logger     *slog.Logger
-	listener   net.Listener
+	socketPath     string
+	programVersion string
+	logger         *slog.Logger
+	listener       net.Listener
 }
 
 // NewLocalSocketServer builds a control server bound to socketPath once Listen is
-// called. A nil logger defaults to slog.Default.
-func NewLocalSocketServer(socketPath string, logger *slog.Logger) *LocalSocketServer {
+// called. It stamps programVersion, the daemon's own, on every reply. A nil logger
+// defaults to slog.Default.
+func NewLocalSocketServer(socketPath, programVersion string, logger *slog.Logger) *LocalSocketServer {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &LocalSocketServer{socketPath: socketPath, logger: logger}
+	return &LocalSocketServer{socketPath: socketPath, programVersion: programVersion, logger: logger}
 }
 
 // Listen binds the Unix-domain socket and sets its mode to 0600. A stale socket
@@ -128,15 +130,21 @@ func (s *LocalSocketServer) handleConn(conn net.Conn, handler Handler) {
 	var req Request
 	if err := json.NewDecoder(conn).Decode(&req); err != nil {
 		s.logger.Warn("malformed control request", "error", err)
-		_ = json.NewEncoder(conn).Encode(Response{OK: false, Error: wording.RefusalMalformedRequest,
+		_ = s.writeReply(conn, Response{OK: false, Error: wording.RefusalMalformedRequest,
 			Fixes: []string{wording.FixMalformedRequest}})
 		return
 	}
 
-	resp := handler(req)
-	if err := json.NewEncoder(conn).Encode(resp); err != nil {
+	if err := s.writeReply(conn, handler(req)); err != nil {
 		s.logger.Warn("failed to write control response", "error", err)
 	}
+}
+
+// writeReply stamps the program's version on every reply, also the malformed-request one,
+// which no handler builds.
+func (server *LocalSocketServer) writeReply(conn net.Conn, resp Response) error {
+	resp.ProgramVersion = server.programVersion
+	return json.NewEncoder(conn).Encode(resp)
 }
 
 // removeStaleSocket deletes a leftover socket file so a re-bind does not fail. A

@@ -56,11 +56,14 @@ type Request struct {
 // was set). LastDetachReason and LastDetachAt say why and when the daemon last
 // detached a device on its own (a session gone or ended);
 // OpStatus and OpList carry them while no device is attached, and a remove by the user
-// leaves them empty.
+// leaves them empty. ProgramVersion is the daemon's version of this program, not adb's. The
+// server stamps it on every reply and overwrites a handler's value. A daemon from before the
+// field sends none.
 type Response struct {
 	OK               bool             `json:"ok"`
 	Error            string           `json:"error,omitempty"`
 	Fixes            []string         `json:"fixes,omitempty"`
+	ProgramVersion   string           `json:"programVersion,omitempty"`
 	DeviceLabel      string           `json:"deviceLabel,omitempty"`
 	Port             int              `json:"port,omitempty"`
 	Devices          []AttachedDevice `json:"devices,omitempty"`

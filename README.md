@@ -337,6 +337,10 @@ from the shell that will run `bridge start`: the bridge inherits that shell's en
 doctor reports a running bridge in the Local machine row and does not change it. The row's
 `bridge` check is `WARN` when:
 
+- the bridge runs another version of `devicefarm-connect` than this command, for example after
+  you install another `devicefarm-connect` while the bridge runs. The fix restarts the bridge with
+  the port, session, and reverse setting that the bridge reports. The doctor reports this first,
+  because it can misread the status of such a bridge.
 - the bridge detached its device. The fix quotes the bridge's reason.
 - the `--session-arn` session is not attached. The fix is the `device add` command for it.
 - reverse is off. The fix restarts the bridge with `--allow-adb-reverse`. That flag lets the

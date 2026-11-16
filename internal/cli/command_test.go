@@ -24,6 +24,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/daemon"
 	"github.com/aws/device-connect-devicefarm/internal/failure"
+	"github.com/aws/device-connect-devicefarm/internal/version"
 	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
@@ -75,10 +76,17 @@ func fakeRuntimePaths(t *testing.T) daemon.Paths {
 }
 
 // serveControl serves handler on a real control socket at paths, so command tests run
-// end to end over a Unix socket without forking the daemon.
+// end to end over a Unix socket without forking the daemon. It reports this program's version.
 func serveControl(t *testing.T, paths daemon.Paths, handler control.Handler) {
 	t.Helper()
-	server := control.NewLocalSocketServer(paths.ControlSocket, slog.New(slog.DiscardHandler))
+	serveControlOfProgramVersion(t, paths, version.String(), handler)
+}
+
+// serveControlOfProgramVersion is serveControl for a bridge that reports programVersion on every
+// reply; "" reports none, as a bridge from before the field does.
+func serveControlOfProgramVersion(t *testing.T, paths daemon.Paths, programVersion string, handler control.Handler) {
+	t.Helper()
+	server := control.NewLocalSocketServer(paths.ControlSocket, programVersion, slog.New(slog.DiscardHandler))
 	require.NoError(t, server.Listen())
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

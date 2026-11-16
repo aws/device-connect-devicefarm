@@ -15,6 +15,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/daemon"
 	"github.com/aws/device-connect-devicefarm/internal/failure"
+	"github.com/aws/device-connect-devicefarm/internal/version"
 	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
@@ -210,12 +211,13 @@ func attachDevice(cmd *cobra.Command, state *rootState, problem string) error {
 }
 
 // daemonRefusal rebuilds the daemon's error from a refused reply: its text wrapped in each
-// fix, so failure.Write prints them as fix lines. A reply with no fix is from an older bridge
-// and gets the restart fix.
+// fix, so failure.Write prints them as fix lines. A reply with no fix gets the restart fix
+// when the bridge runs another version of this program, or reports none as an older bridge
+// does. A bridge of this version sends a fix with every refusal.
 func daemonRefusal(resp control.Response) error {
 	refusal := errors.New(resp.Error)
 	fixes := resp.Fixes
-	if len(fixes) == 0 {
+	if len(fixes) == 0 && resp.ProgramVersion != version.String() {
 		fixes = []string{wording.FixOtherVersionBridge}
 	}
 	for _, fix := range fixes {
