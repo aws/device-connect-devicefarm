@@ -9,6 +9,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials/processcreds"
+
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // CredentialSummary: the credential chain's source. Never the key.
@@ -18,7 +20,7 @@ type CredentialSummary struct {
 
 // errCredentialProcessOutput replaces every credential_process failure, cause included: the
 // SDK's own text quotes the helper's whole output, keys included.
-var errCredentialProcessOutput = errors.New("the credential_process helper failed or returned unusable output")
+var errCredentialProcessOutput = errors.New(wording.SessionCredentialProcessFailed)
 
 // scrubCredentialProcess swaps a credential_process failure for errCredentialProcessOutput.
 // Every path that resolves credentials calls it before its error leaves the package.

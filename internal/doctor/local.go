@@ -23,6 +23,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/daemon"
 	"github.com/aws/device-connect-devicefarm/internal/forward"
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // Check ids, shared so Needs can name them.
@@ -47,27 +48,11 @@ const (
 	maxControlSocketPath = 103
 )
 
-const (
-	bridgeStopCommand  = config.BinaryName + " bridge stop"
-	bridgeStartCommand = config.BinaryName + " bridge start"
-	doctorCommand      = config.BinaryName + " doctor"
-	// restartDaemonHint is the stop-then-start every restart hint quotes.
-	restartDaemonHint = bridgeStopCommand + " && " + bridgeStartCommand
-	// reverseCaveat follows every mention of --allow-adb-reverse.
-	reverseCaveat = "'--allow-adb-reverse' lets the device open connections to this machine, so use it only with a " +
-		"device you trust; a public physical device can run software you do not control."
-	runtimeDirHint = "the client cannot use this working directory, so '" + bridgeStartCommand + "' cannot launch the bridge. " +
-		"Set '" + daemon.RuntimeDirEnvVar + "' to a directory with a short path that only this user can write, then rerun '" + doctorCommand +
-		"'. Every " + config.BinaryName + " command reads that variable, so 'bridge start' and the bridge it launches use the new directory too."
-	deadDaemonHint = "a bridge is registered but did not report its status. Run '" + restartDaemonHint +
-		"'. The stop ends that bridge and the start launches a new one."
-)
-
 // daemonFlags renders the listener flags a restart keeps.
 func daemonFlags(port int, reverse bool) string {
-	flags := fmt.Sprintf("--port %d", port)
+	flags := fmt.Sprintf(wording.DoctorRestartPortFlagFormat, port)
 	if reverse {
-		flags += " --allow-adb-reverse"
+		flags += wording.DoctorRestartReverseFlag
 	}
 	return flags
 }
@@ -75,17 +60,17 @@ func daemonFlags(port int, reverse bool) string {
 // restartWith renders the restart command: stop, then start on port with reverse as asked and the
 // session the daemon reported.
 func restartWith(reply control.Response, port int, reverse bool) string {
-	command := restartDaemonHint + " " + daemonFlags(port, reverse)
+	command := wording.DoctorRestartCommand + " " + daemonFlags(port, reverse)
 	if reply.ARN != "" {
-		command += " --session-arn " + reply.ARN
+		command += wording.DoctorRestartSessionFlagLead + reply.ARN
 	}
 	return command
 }
 
-// caveatIf appends reverseCaveat when the quoted command carries --allow-adb-reverse.
+// caveatIf appends the reverse caveat when the quoted command carries --allow-adb-reverse.
 func caveatIf(hint string, reverse bool) string {
 	if reverse {
-		return hint + " " + reverseCaveat
+		return hint + " " + wording.DoctorHintReverseCaveat
 	}
 	return hint
 }
@@ -108,59 +93,40 @@ func safeValue(value string) string {
 
 // reverseOffHint restarts the daemon with reverse on, its port and device kept, then states the caveat.
 func reverseOffHint(reply control.Response) string {
-	return caveatIf(fmt.Sprintf("the bridge runs with adb reverse off, so every 'adb reverse' fails. Run '%s' to start it again "+
-		"with reverse on.", restartWith(reply, reply.Port, true)), true)
+	return caveatIf(fmt.Sprintf(wording.DoctorHintDaemonReverseOffFormat, restartWith(reply, reply.Port, true)), true)
 }
-
-const (
-	loopbackHint = "'adb forward' could not open or reach a port on 127.0.0.1, so every 'adb forward' would fail. Allow '" +
-		config.BinaryName + "' to listen on 127.0.0.1 in the sandbox, container or firewall rules, then rerun '" + doctorCommand +
-		"'. Each 'adb forward' rule opens one port on 127.0.0.1, and every forwarded connection enters through it."
-	adbPointHint = "point adb at it with 'adb -P <n>'"
-)
 
 // listenConfigHint names the listen flags to fix. On the default address only --port can be at
 // fault, so a user who never passed --listen-addr is not told it exists.
 func listenConfigHint(listenAddr string) string {
 	if listenAddr == config.DefaultListenAddr {
-		return "'--port' does not name a port the bridge can bind. Pass '--port' a number from 1 to 65535, as in '" + bridgeStartCommand +
-			" --port 5037'. The bridge listens on exactly that port, so point adb at the same port."
+		return wording.DoctorHintPortInvalid
 	}
-	return "the listen flags do not name an address the bridge can bind. Pass '--port' a number from 1 to 65535 and " +
-		"'--listen-addr' a non-empty address with no port or brackets, as in '" + bridgeStartCommand + " --port 5037 --listen-addr 127.0.0.1'. The bridge " +
-		"binds exactly that address, so point adb at the same port."
+	return wording.DoctorHintListenFlagsInvalid
 }
 
 // adbServerHint: bridge start stops the adb server on the probed address before it starts the daemon;
 // a program that takes the port back gets AdbServerKeepsPortFix.
 func adbServerHint(listenAddr string, port int) string {
-	return fmt.Sprintf("an adb server is listening on %s, so the bridge cannot bind it until that server stops. Run '%s': it stops that "+
-		"server first, as 'adb kill-server' would. If a program that restarts adb, such as Android Studio, takes the port back, %s",
+	return fmt.Sprintf(wording.DoctorHintAdbServerOnPortFormat,
 		net.JoinHostPort(listenAddr, strconv.Itoa(port)), daemon.StartCommand(listenAddr, port),
 		daemon.AdbServerKeepsPortFix(listenAddr, port, daemon.LeadQuotesStart))
 }
 
 // lowPortHint: the bind was refused for want of permission.
 func lowPortHint(port int) string {
-	return fmt.Sprintf("this user may not bind port %d; ports below 1024 need administrator rights on most systems. "+
-		"Run '%s --port <n>' with a port above 1023 and %s. The bridge then listens on that port instead of %d.",
-		port, bridgeStartCommand, adbPointHint, port)
+	return fmt.Sprintf(wording.DoctorHintPortNeedsAdminFormat, port, port)
 }
 
 // reservedPortHint: Windows refused the bind with access denied: an excluded port range, or a
 // wildcard exclusive holder that did not answer the probe.
 func reservedPortHint(port int) string {
-	return fmt.Sprintf("Windows refuses to bind port %d: the port sits in a range that Hyper-V, WSL or Docker reserved, or another "+
-		"program holds it exclusively. See the reserved ranges with 'netsh int ipv4 show excludedportrange protocol=tcp', then run "+
-		"'%s --port <n>' with a port outside them and %s. The bridge then listens on that port instead of %d.",
-		port, bridgeStartCommand, adbPointHint, port)
+	return fmt.Sprintf(wording.DoctorHintPortReservedFormat, port, port)
 }
 
 // listenAddrHint: the listen address is not one of this machine's.
 func listenAddrHint(address string, port int) string {
-	return fmt.Sprintf("'%s' is not an address of this machine, so nothing can bind it. Pass '--listen-addr' an address this "+
-		"machine owns, as in '%s --listen-addr 127.0.0.1 --port %d'. The bridge binds exactly that address, so adb must "+
-		"reach it there.", safeValue(address), bridgeStartCommand, port)
+	return fmt.Sprintf(wording.DoctorHintAddressNotLocalFormat, safeValue(address), port)
 }
 
 // winsockAccessDenied is WSAEACCES, which a Windows bind error carries for an excluded range or an
@@ -186,15 +152,14 @@ func bindErrorHint(err error, goos string, listenAddr string, port int) (summary
 // bridge start prints.
 func heldPortPair(listenAddr string, port int) (summary, hint string) {
 	listenAddr = safeValue(listenAddr)
-	return fmt.Sprintf("cannot bind %s because another program is listening on it", net.JoinHostPort(listenAddr, strconv.Itoa(port))),
+	return fmt.Sprintf(wording.DoctorDetailPortHeldByProgramFormat, net.JoinHostPort(listenAddr, strconv.Itoa(port))),
 		daemon.HeldPortText(listenAddr, port)
 }
 
 // otherPortDaemonHint moves the running daemon to the probed port, its flags and device kept, or
 // points adb at the port it holds.
 func otherPortDaemonHint(reply control.Response, port int) string {
-	return caveatIf(fmt.Sprintf("the running bridge listens on port %d, not %d. "+
-		"Run '%s' to move it to port %d, or point adb at it with 'adb -P %d'.",
+	return caveatIf(fmt.Sprintf(wording.DoctorHintDaemonOnOtherPortFormat,
 		reply.Port, port, restartWith(reply, port, reply.ReverseEnabled), port, reply.Port), reply.ReverseEnabled)
 }
 
@@ -237,13 +202,13 @@ func (state *runState) daemon() (control.Response, int) {
 // bridge row can make the run's session lookup (lookUpReturnedARN).
 func localChecks(inputs Inputs, state *runState) []Check {
 	return []Check{
-		{ID: checkRuntimeDir, Title: "working directory", Category: CategoryLocal, Timeout: localTimeout,
+		{ID: checkRuntimeDir, Title: wording.DoctorTitleWorkingDirectory, Category: CategoryLocal, Timeout: localTimeout,
 			Run: func(context.Context) Result { return checkRuntimeDirectory(state) }},
-		{ID: checkDaemon, Title: "bridge", Category: CategoryLocal, Needs: []string{checkRuntimeDir}, Timeout: daemonTimeout,
+		{ID: checkDaemon, Title: wording.DoctorTitleBridge, Category: CategoryLocal, Needs: []string{checkRuntimeDir}, Timeout: daemonTimeout,
 			Run: func(ctx context.Context) Result { return checkRunningDaemon(ctx, inputs, state) }},
-		{ID: checkListenPort, Title: "listen port", Category: CategoryLocal, Needs: []string{checkDaemon}, Timeout: listenPortTimeout,
+		{ID: checkListenPort, Title: wording.DoctorTitleListenPort, Category: CategoryLocal, Needs: []string{checkDaemon}, Timeout: listenPortTimeout,
 			Run: func(context.Context) Result { return checkListenPortFree(inputs, state) }},
-		{ID: checkForwardTable, Title: "adb forward", Category: CategoryLocal, Timeout: localTimeout,
+		{ID: checkForwardTable, Title: wording.DoctorTitleAdbForward, Category: CategoryLocal, Timeout: localTimeout,
 			Run: func(ctx context.Context) Result { return checkForwardTableBinds(ctx, inputs) }},
 	}
 }
@@ -254,26 +219,26 @@ func localChecks(inputs Inputs, state *runState) []Check {
 func checkRuntimeDirectory(state *runState) Result {
 	// The whole summary is escaped: an OS error repeats the path, newline and all.
 	fail := func(summary string) Result {
-		return Result{Status: Fail, Summary: safeValue(summary), Hint: runtimeDirHint}
+		return Result{Status: Fail, Summary: safeValue(summary), Hint: fmt.Sprintf(wording.DoctorHintDirectoryUnusableFormat, daemon.RuntimeDirEnvVar)}
 	}
 	paths, err := daemon.DefaultPaths()
 	if err != nil {
-		return fail("cannot use the working directory: " + err.Error())
+		return fail(wording.DoctorDetailDirectoryUnusableLead + err.Error())
 	}
 	if over := len(paths.ControlSocket) - maxControlSocketPath; over > 0 {
-		return fail(fmt.Sprintf("working directory %s is %d bytes too long for this system", paths.RuntimeDir, over))
+		return fail(fmt.Sprintf(wording.DoctorDetailDirectoryTooLongFormat, paths.RuntimeDir, over))
 	}
 	probe, err := os.CreateTemp(paths.RuntimeDir, ".doctor-")
 	if err != nil {
-		return fail(fmt.Sprintf("cannot write a file in the working directory %s: %v", paths.RuntimeDir, err))
+		return fail(fmt.Sprintf(wording.DoctorDetailDirectoryNotWritableFormat, paths.RuntimeDir, err))
 	}
 	// Bytes, not an empty file: a pidfile write needs space, and a full disk still hands out inodes.
 	_, writeErr := probe.WriteString("probe")
 	if err := cmp.Or(writeErr, probe.Close(), os.Remove(probe.Name())); err != nil {
-		return fail(fmt.Sprintf("cannot write a file in the working directory %s: %v", paths.RuntimeDir, err))
+		return fail(fmt.Sprintf(wording.DoctorDetailDirectoryNotWritableFormat, paths.RuntimeDir, err))
 	}
 	state.paths = paths
-	return Result{Status: Pass, Summary: "working directory " + safeValue(paths.RuntimeDir) + " is writable"}
+	return Result{Status: Pass, Summary: fmt.Sprintf(wording.DoctorDetailDirectoryWritableFormat, safeValue(paths.RuntimeDir))}
 }
 
 // causeWithoutSocketPath renders err without the control socket path: a *net.OpError in the chain
@@ -291,19 +256,19 @@ func causeWithoutSocketPath(err error) string {
 func checkRunningDaemon(ctx context.Context, inputs Inputs, state *runState) Result {
 	pid, running := daemon.NewManager(inputs.Config, state.paths, nil, inputs.Logger).Status()
 	if !running {
-		return Result{Status: Pass, Summary: "not running; bridge start, device add or device list will launch it"}
+		return Result{Status: Pass, Summary: wording.DoctorDetailDaemonNotRunning}
 	}
 	reply, err := control.NewDaemonClient(state.paths.ControlSocket).Send(control.Request{Op: control.OpStatus})
 	switch {
 	case errors.Is(err, control.ErrDaemonNotRunning):
-		return Result{Status: Fail, Summary: fmt.Sprintf("a bridge (pid %d) is registered but does not answer: %s", pid, causeWithoutSocketPath(err)),
-			Hint: deadDaemonHint}
+		return Result{Status: Fail, Summary: fmt.Sprintf(wording.DoctorDetailDaemonSilentFormat, pid, causeWithoutSocketPath(err)),
+			Hint: wording.DoctorHintDaemonNoStatus}
 	case err != nil:
-		return Result{Status: Fail, Summary: fmt.Sprintf("a bridge (pid %d) is registered but did not report its status: %s", pid, causeWithoutSocketPath(err)),
-			Hint: deadDaemonHint}
+		return Result{Status: Fail, Summary: fmt.Sprintf(wording.DoctorDetailDaemonNoStatusFormat, pid, causeWithoutSocketPath(err)),
+			Hint: wording.DoctorHintDaemonNoStatus}
 	case !reply.OK:
-		return Result{Status: Fail, Summary: fmt.Sprintf("a bridge (pid %d) is registered but refused to report its status: %s", pid, reply.Error),
-			Hint: deadDaemonHint}
+		return Result{Status: Fail, Summary: fmt.Sprintf(wording.DoctorDetailDaemonStatusRefusedFormat, pid, reply.Error),
+			Hint: wording.DoctorHintDaemonNoStatus}
 	}
 	state.setDaemon(reply, pid)
 	askedARN := strings.TrimSpace(inputs.SessionARN)
@@ -343,22 +308,22 @@ func attachedIsAsked(attachedARN, askedARN, returnedARN string) bool {
 // session not attached, reverse off. Never FAIL: the bridge runs. askedARN and returnedARN (see
 // lookUpReturnedARN) both name the asked session.
 func bridgeRowResult(askedARN, returnedARN string, reply control.Response, pid int) Result {
-	device := "no device"
+	device := wording.DoctorDetailDaemonNoDeviceClause
 	if reply.DeviceLabel != "" {
-		device = fmt.Sprintf("device %s, session %s", safeValue(reply.DeviceLabel), safeValue(reply.ARN))
+		device = fmt.Sprintf(wording.DoctorDetailDaemonDeviceClauseFormat, safeValue(reply.DeviceLabel), safeValue(reply.ARN))
 	}
-	reverse := "reverse on"
+	reverse := wording.DoctorDetailDaemonReverseOnClause
 	if !reply.ReverseEnabled {
-		reverse = "reverse off"
+		reverse = wording.DoctorDetailDaemonReverseOffClause
 	}
-	summary := fmt.Sprintf("running (pid %d) on port %d; %s; %s", pid, reply.Port, device, reverse)
+	summary := fmt.Sprintf(wording.DoctorDetailDaemonRunningFormat, pid, reply.Port, device, reverse)
 	// The reply carries a detach reason only while no device is attached.
 	if reply.LastDetachReason != "" {
-		summary += "; the bridge detached the last device"
+		summary += wording.DoctorDetailDaemonDetachedClause
 	}
 	askedMissing := askedARN != "" && !attachedIsAsked(reply.ARN, askedARN, returnedARN)
 	if askedMissing {
-		summary += fmt.Sprintf("; session %s is not attached", safeValue(askedARN))
+		summary += fmt.Sprintf(wording.DoctorDetailDaemonNotAttachedClauseFormat, safeValue(askedARN))
 	}
 	// Every detach reason names its session.
 	detachAnswersAsk := askedARN == "" || strings.Contains(reply.LastDetachReason, askedARN) ||
@@ -376,19 +341,18 @@ func bridgeRowResult(askedARN, returnedARN string, reply control.Response, pid i
 
 // detachedHint quotes the bridge's reason, which names the fix.
 func detachedHint(reason string) string {
-	return fmt.Sprintf("the bridge detached the device, so adb finds no device: %s.", safeValue(reason))
+	return fmt.Sprintf(wording.DoctorHintDaemonDetachedFormat, safeValue(reason))
 }
 
 // notAttachedHint names the add command for the asked session. The bridge holds one device, so
 // the hint puts 'device remove' first when a device is attached.
 func notAttachedHint(reply control.Response, askedARN string) string {
 	arn := safeValue(askedARN)
-	add := fmt.Sprintf("'%s device add --session-arn %s'", config.BinaryName, arn)
+	add := fmt.Sprintf(wording.DoctorDeviceAddCommandFormat, arn)
 	if reply.DeviceLabel == "" {
-		return fmt.Sprintf("session %s is not attached to the bridge, so adb cannot reach its device. Run %s.", arn, add)
+		return fmt.Sprintf(wording.DoctorHintSessionNotAttachedFormat, arn, add)
 	}
-	return fmt.Sprintf("session %s is not attached to the bridge, so adb cannot reach its device. Run '%s device remove', "+
-		"then %s. The remove detaches %s.", arn, config.BinaryName, add, safeValue(reply.DeviceLabel))
+	return fmt.Sprintf(wording.DoctorHintSessionNotAttachedRemoveFirstFormat, arn, add, safeValue(reply.DeviceLabel))
 }
 
 // checkListenPortFree binds the listen address once and frees it; a running daemon on the port
@@ -405,16 +369,16 @@ func checkListenPortFree(inputs Inputs, state *runState) Result {
 	address := net.JoinHostPort(cfg.ListenAddr, strconv.Itoa(cfg.ListenPort))
 	if daemonReply, daemonPID := state.daemon(); daemonReply.OK {
 		if daemonReply.Port == cfg.ListenPort {
-			return Result{Status: Pass, Summary: fmt.Sprintf("%s is held by the running bridge (pid %d)", address, daemonPID)}
+			return Result{Status: Pass, Summary: fmt.Sprintf(wording.DoctorDetailPortHeldByDaemonFormat, address, daemonPID)}
 		}
 		// A daemon on another port is the finding; no bind.
-		return Result{Status: Warn, Summary: fmt.Sprintf("the running bridge (pid %d) listens on port %d, not %d",
+		return Result{Status: Warn, Summary: fmt.Sprintf(wording.DoctorDetailDaemonOnOtherPortFormat,
 			daemonPID, daemonReply.Port, cfg.ListenPort), Hint: otherPortDaemonHint(daemonReply, cfg.ListenPort)}
 	}
 	listener, err := net.Listen("tcp", address)
 	if err == nil {
 		listener.Close()
-		return Result{Status: Pass, Summary: address + " is free"}
+		return Result{Status: Pass, Summary: address + wording.DoctorDetailPortFreeTail}
 	}
 	if errors.Is(err, os.ErrPermission) {
 		return Result{Status: Fail, Summary: safeValue(err.Error()), Hint: lowPortHint(cfg.ListenPort)}
@@ -425,12 +389,12 @@ func checkListenPortFree(inputs Inputs, state *runState) Result {
 		pid, isBridge, identityRefused := daemon.ProbeBridge(occupantAddress, occupantReplyTimeout)
 		if isBridge {
 			return Result{Status: Fail,
-				Summary: fmt.Sprintf("another %s bridge (pid %d) is listening on %s", config.BinaryName, pid, safeValue(address)),
+				Summary: fmt.Sprintf(wording.DoctorDetailOtherBridgeOnPortFormat, pid, safeValue(address)),
 				Hint:    daemon.BridgeHoldsPortText(safeValue(cfg.ListenAddr), cfg.ListenPort, pid)}
 		}
 		version, connected, adbServer := daemon.ProbeOccupant(occupantAddress, occupantReplyTimeout)
 		if adbServer && identityRefused {
-			return Result{Status: Warn, Summary: fmt.Sprintf("an adb server (version %d) is listening on %s", version, safeValue(address)),
+			return Result{Status: Warn, Summary: fmt.Sprintf(wording.DoctorDetailAdbServerOnPortFormat, version, safeValue(address)),
 				Hint: adbServerHint(safeValue(cfg.ListenAddr), cfg.ListenPort)}
 		}
 		if connected {
@@ -455,13 +419,13 @@ func checkForwardTableBinds(ctx context.Context, inputs Inputs) Result {
 	defer table.Close()
 	installed := table.Install("tcp:0", "tcp:0", false)
 	if installed.Status != forward.AdbInstallOK {
-		return Result{Status: Fail, Summary: "adb forward cannot listen on 127.0.0.1: " + installed.FailReason, Hint: loopbackHint}
+		return Result{Status: Fail, Summary: wording.DoctorDetailForwardCannotListenLead + installed.FailReason, Hint: wording.DoctorHintForwardBlocked}
 	}
 	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(installed.ResolvedPort))
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", address)
 	if err != nil {
-		return Result{Status: Fail, Summary: fmt.Sprintf("cannot reach the port adb forward opened on 127.0.0.1: %v", err), Hint: loopbackHint}
+		return Result{Status: Fail, Summary: fmt.Sprintf(wording.DoctorDetailForwardUnreachableFormat, err), Hint: wording.DoctorHintForwardBlocked}
 	}
 	conn.Close()
-	return Result{Status: Pass, Summary: fmt.Sprintf("adb forward can listen on 127.0.0.1 (tried port %d)", installed.ResolvedPort)}
+	return Result{Status: Pass, Summary: fmt.Sprintf(wording.DoctorDetailForwardListensFormat, installed.ResolvedPort)}
 }

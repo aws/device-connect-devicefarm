@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/aws/device-connect-devicefarm/internal/adbwire"
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // StreamOpener carries an accepted local connection onto the transport as one
@@ -100,7 +101,7 @@ func (table *ForwardRulesTable) Install(localText, remoteText string, noRebind b
 
 	if len(table.rules) >= table.maxRules {
 		return AdbInstallResult{Status: AdbInstallTooManyRules,
-			FailReason: fmt.Sprintf("too many forward rules (limit %d)", table.maxRules)}
+			FailReason: fmt.Sprintf(wording.AdbFailTooManyForwardRulesFormat, table.maxRules)}
 	}
 
 	// Loopback only, like adb host listeners without -a.

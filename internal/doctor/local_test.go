@@ -29,6 +29,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/daemon"
 	"github.com/aws/device-connect-devicefarm/internal/forward"
 	"github.com/aws/device-connect-devicefarm/internal/session"
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // shortRuntimeDir points XDG_RUNTIME_DIR at a short temp dir and returns the paths.
@@ -246,7 +247,8 @@ func TestGivenAnUnusableRuntimeDirWhenCheckedThenItFailsNamingTheEnvVar(t *testi
 			assert.Equal(t, Fail, result.Status)
 			assert.Contains(t, result.Summary, tc.wantSummary)
 			assert.NotContains(t, result.Summary, "\n", "a row is one line")
-			assert.Equal(t, runtimeDirHint, result.Hint)
+			assert.Equal(t, fmt.Sprintf(wording.DoctorHintDirectoryUnusableFormat, daemon.RuntimeDirEnvVar), result.Hint)
+			assert.Contains(t, result.Hint, "'"+daemon.RuntimeDirEnvVar+"'", "the hint quotes the variable")
 			assert.Empty(t, state.paths.RuntimeDir, "a failed row leaves no paths for later checks")
 		})
 	}
@@ -257,7 +259,7 @@ func TestGivenNoDaemonWhenCheckedThenItPassesAsNotRunning(t *testing.T) {
 
 	result := runLocal(t, localInputs(t), state, checkDaemon)
 
-	assert.Equal(t, Result{Status: Pass, Summary: "not running; bridge start, device add or device list will launch it"}, result)
+	assert.Equal(t, Result{Status: Pass, Summary: "not running; bridge start, device add, or device list launches it"}, result)
 }
 
 func TestGivenARunningDaemonWhenCheckedThenTheRowReportsItsStatusAndReverseState(t *testing.T) {
@@ -276,9 +278,9 @@ func TestGivenARunningDaemonWhenCheckedThenTheRowReportsItsStatusAndReverseState
 			wantStatus: Pass, wantTail: "on port 6000; no device; reverse on"},
 		{name: "reverse off with a device", reply: control.Response{OK: true, Port: 5037, DeviceLabel: "Pixel 9 (OS 16)", ARN: "arn:2"},
 			wantStatus: Warn, wantTail: "on port 5037; device Pixel 9 (OS 16), session arn:2; reverse off",
-			wantRestart: restartDaemonHint + " --port 5037 --allow-adb-reverse --session-arn arn:2"},
+			wantRestart: wording.DoctorRestartCommand + " --port 5037 --allow-adb-reverse --session-arn arn:2"},
 		{name: "reverse off with no device", reply: control.Response{OK: true, Port: 6000},
-			wantStatus: Warn, wantTail: "on port 6000; no device; reverse off", wantRestart: restartDaemonHint + " --port 6000 --allow-adb-reverse"},
+			wantStatus: Warn, wantTail: "on port 6000; no device; reverse off", wantRestart: wording.DoctorRestartCommand + " --port 6000 --allow-adb-reverse"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -287,10 +289,10 @@ func TestGivenARunningDaemonWhenCheckedThenTheRowReportsItsStatusAndReverseState
 			result := runLocal(t, localInputs(t), state, checkDaemon)
 
 			assert.Equal(t, tc.wantStatus, result.Status)
-			assert.Equal(t, fmt.Sprintf("running (pid %d) %s", os.Getpid(), tc.wantTail), result.Summary)
+			assert.Equal(t, fmt.Sprintf("running (PID %d) %s", os.Getpid(), tc.wantTail), result.Summary)
 			if tc.wantStatus == Warn {
 				assert.Contains(t, result.Hint, "'"+tc.wantRestart+"'", "the hint quotes the restart with the reported port and session")
-				assert.Contains(t, result.Hint, reverseCaveat)
+				assert.Contains(t, result.Hint, wording.DoctorHintReverseCaveat)
 			} else {
 				assert.Empty(t, result.Hint)
 			}
@@ -336,7 +338,7 @@ func TestGivenADetachReasonWhenTheBridgeIsCheckedThenTheRowWarnsAndTheHintQuotes
 
 			result := runLocal(t, inputs, state, checkDaemon)
 
-			assert.Equal(t, Result{Status: Warn, Summary: fmt.Sprintf("running (pid %d) on port 5037; %s", os.Getpid(), tc.wantTail),
+			assert.Equal(t, Result{Status: Warn, Summary: fmt.Sprintf("running (PID %d) on port 5037; %s", os.Getpid(), tc.wantTail),
 				Hint: "the bridge detached the device, so adb finds no device: " + endedReason + "."}, result,
 				"the detach outranks the asked session and reverse off")
 		})
@@ -369,7 +371,7 @@ func TestGivenAnAskedSessionTheBridgeDoesNotHoldWhenCheckedThenTheRowWarnsWithTh
 			result := bridgeRowResult(testSessionARN, testSessionARN, tc.reply, 4242)
 
 			assert.Equal(t, Result{Status: Warn, Hint: tc.wantHint,
-				Summary: "running (pid 4242) on port 5037; " + tc.wantTail + "; session " + testSessionARN + " is not attached"}, result,
+				Summary: "running (PID 4242) on port 5037; " + tc.wantTail + "; session " + testSessionARN + " is not attached"}, result,
 				"the asked session outranks reverse off")
 		})
 	}
@@ -440,7 +442,7 @@ func TestGivenTheServiceReturnsAnotherArnForTheAskedSessionWhenTheBridgeIsChecke
 			result := runLocal(t, inputs, state, checkDaemon)
 
 			assert.Equal(t, Result{Status: tc.wantStatus, Hint: tc.wantHint,
-				Summary: fmt.Sprintf("running (pid %d) on port 5037; %s", os.Getpid(), tc.wantSummary)}, result)
+				Summary: fmt.Sprintf("running (PID %d) on port 5037; %s", os.Getpid(), tc.wantSummary)}, result)
 			assert.Equal(t, []string{testSessionARN}, resolver.arns, "one lookup, of the typed ARN")
 		})
 	}
@@ -474,7 +476,7 @@ func TestGivenNoReturnedArnForTheAskedSessionWhenTheBridgeIsCheckedThenTheTypedA
 			result := runLocal(t, inputs, state, checkDaemon)
 
 			assert.Equal(t, Result{Status: Warn, Hint: notAttachedHint(tc.reply, testSessionARN),
-				Summary: fmt.Sprintf("running (pid %d) on port 5037; %s; session %s is not attached", os.Getpid(), tc.wantTail, testSessionARN)},
+				Summary: fmt.Sprintf("running (PID %d) on port 5037; %s; session %s is not attached", os.Getpid(), tc.wantTail, testSessionARN)},
 				result)
 			assert.Equal(t, []string{testSessionARN}, tc.resolver.arns, "the lookup was tried")
 		})
@@ -502,7 +504,7 @@ func TestGivenTheTypedArnNamesWhatTheBridgeHoldsOrItHoldsNothingWhenCheckedThenN
 
 			result := runLocal(t, inputs, state, checkDaemon)
 
-			assert.Contains(t, result.Summary, "running (pid ", "the row reached the bridge")
+			assert.Contains(t, result.Summary, "running (PID ", "the row reached the bridge")
 			assert.Empty(t, resolver.arns, "the row must not call the service")
 		})
 	}
@@ -557,7 +559,7 @@ func TestGivenALockedPidfileWhoseDaemonDoesNotAnswerOrRefusesStatusWhenCheckedTh
 		wantSummary string
 	}{
 		{name: "no control socket", paths: fakeRuntimePaths,
-			wantSummary: fmt.Sprintf("a bridge (pid %d) is registered but does not answer: connect: ", os.Getpid())},
+			wantSummary: fmt.Sprintf("a bridge (PID %d) is registered but does not answer: connect: ", os.Getpid())},
 		{name: "status refused", paths: func(t *testing.T) daemon.Paths {
 			return fakeDaemon(t, control.Response{OK: false, Error: "boom"})
 		}, wantSummary: "is registered but refused to report its status: boom"},
@@ -589,8 +591,8 @@ func TestGivenALockedPidfileWhoseDaemonDoesNotAnswerOrRefusesStatusWhenCheckedTh
 			assert.Equal(t, Fail, result.Status)
 			assert.Contains(t, result.Summary, tc.wantSummary)
 			assert.NotContains(t, result.Summary, state.paths.ControlSocket, "the row names no path")
-			assert.Equal(t, deadDaemonHint, result.Hint)
-			assert.Contains(t, result.Hint, "'"+restartDaemonHint+"'", "the hint quotes the restart")
+			assert.Equal(t, wording.DoctorHintDaemonNoStatus, result.Hint)
+			assert.Contains(t, result.Hint, "'"+wording.DoctorRestartCommand+"'", "the hint quotes the restart")
 			reply, _ := state.daemon()
 			assert.False(t, reply.OK, "a failed row leaves no status for later checks")
 		})
@@ -617,7 +619,7 @@ func TestGivenTheListenPortWhenCheckedThenTheRowNamesItsOccupant(t *testing.T) {
 		{name: "another bridge", setup: func(t *testing.T, inputs *Inputs, _ *runState) {
 			// A bridge answers host:version too; the identity request tells it from an adb server.
 			occupyPort(t, inputs.Config.ListenPort, answeringAsABridge(4242))
-		}, wantStatus: Fail, wantSummary: "another devicefarm-connect bridge (pid 4242) is listening on",
+		}, wantStatus: Fail, wantSummary: "another devicefarm-connect bridge (PID 4242) is listening on",
 			wantHint: func(listenAddr string, port int) string { return daemon.BridgeHoldsPortText(listenAddr, port, 4242) }},
 		{name: "an occupant silent to the identity request", setup: func(t *testing.T, inputs *Inputs, _ *runState) {
 			// It may be a bridge cut mid-answer, so its version reply is not taken for an adb server.
@@ -644,11 +646,11 @@ func TestGivenTheListenPortWhenCheckedThenTheRowNamesItsOccupant(t *testing.T) {
 		{name: "the running daemon on this port", setup: func(t *testing.T, inputs *Inputs, state *runState) {
 			occupyPort(t, inputs.Config.ListenPort, silentOccupant) // a bind attempt would fail
 			state.daemonStatus, state.daemonPID = control.Response{OK: true, Port: inputs.Config.ListenPort}, 4242
-		}, wantStatus: Pass, wantSummary: "is held by the running bridge (pid 4242)"},
+		}, wantStatus: Pass, wantSummary: "is held by the running bridge (PID 4242)"},
 		{name: "the running daemon on another port", setup: func(_ *testing.T, inputs *Inputs, state *runState) {
 			state.daemonStatus = control.Response{OK: true, Port: inputs.Config.ListenPort + 1, ARN: "arn:1", ReverseEnabled: true}
 			state.daemonPID = 4242
-		}, wantStatus: Warn, wantSummary: "the running bridge (pid 4242) listens on port", wantHint: func(_ string, port int) string {
+		}, wantStatus: Warn, wantSummary: "the running bridge (PID 4242) listens on port", wantHint: func(_ string, port int) string {
 			return otherPortDaemonHint(control.Response{OK: true, Port: port + 1, ARN: "arn:1", ReverseEnabled: true}, port)
 		}, summaryNamesNoAddress: true},
 	}
@@ -704,27 +706,27 @@ func TestGivenAPortProblemWhenItsHintIsBuiltThenEveryCommandCarriesTheRealPortOn
 		wantAbsent string
 	}{
 		{name: "an adb server", hint: adbServerHint("127.0.0.1", port), wantQuoted: []string{"127.0.0.1:5555",
-			"'" + bridgeStartCommand + " --port 5555':", "'adb kill-server'", "'" + bridgeStartCommand + " --port <n>'", "'adb -P <n>'"},
+			"'" + wording.BridgeStartCommand + " --port 5555':", "'adb kill-server'", "'" + wording.BridgeStartCommand + " --port <n>'", "'adb -P <n>'"},
 			wantAbsent: "--listen-addr"},
 		{name: "an adb server on another address", hint: adbServerHint("127.0.0.2", port), wantQuoted: []string{"127.0.0.2:5555",
-			"'" + bridgeStartCommand + " --port 5555 --listen-addr 127.0.0.2':"}},
+			"'" + wording.BridgeStartCommand + " --port 5555 --listen-addr 127.0.0.2':"}},
 		{name: "an invalid listen config on the default address", hint: listenConfigHint(config.DefaultListenAddr),
-			wantQuoted: []string{"'--port' a number from 1 to 65535", "'" + bridgeStartCommand + " --port 5037'"}, wantAbsent: "--listen-addr"},
+			wantQuoted: []string{"'--port' a number from 1 to 65535", "'" + wording.BridgeStartCommand + " --port 5037'"}, wantAbsent: "--listen-addr"},
 		{name: "an invalid listen config on another address", hint: listenConfigHint("0.0.0.0"), wantQuoted: []string{"'--port' a number from 1 to 65535",
-			"'--listen-addr' a non-empty address with no port or brackets", "'" + bridgeStartCommand + " --port 5037 --listen-addr 127.0.0.1'"}},
+			"'--listen-addr' a non-empty address with no port or brackets", "'" + wording.BridgeStartCommand + " --port 5037 --listen-addr 127.0.0.1'"}},
 		{name: "another occupant", hint: daemon.HeldPortText("127.0.0.1", port), wantQuoted: []string{"127.0.0.1:5555",
-			"'" + bridgeStartCommand + " --port 5555'", "'" + bridgeStartCommand + " --port <n>'", "'adb -P <n>'"}, wantAbsent: "--listen-addr"},
-		{name: "a privileged port", hint: lowPortHint(port), wantQuoted: []string{"'" + bridgeStartCommand + " --port <n>'", "'adb -P <n>'"}},
+			"'" + wording.BridgeStartCommand + " --port 5555'", "'" + wording.BridgeStartCommand + " --port <n>'", "'adb -P <n>'"}, wantAbsent: "--listen-addr"},
+		{name: "a privileged port", hint: lowPortHint(port), wantQuoted: []string{"'" + wording.BridgeStartCommand + " --port <n>'", "'adb -P <n>'"}},
 		{name: "a Windows reserved port", hint: reservedPortHint(port), wantQuoted: []string{"port 5555",
-			"'netsh int ipv4 show excludedportrange protocol=tcp'", "'" + bridgeStartCommand + " --port <n>'", "'adb -P <n>'"}, wantAbsent: "--listen-addr"},
+			"'netsh int ipv4 show excludedportrange protocol=tcp'", "'" + wording.BridgeStartCommand + " --port <n>'", "'adb -P <n>'"}, wantAbsent: "--listen-addr"},
 		{name: "an address not on this machine", hint: listenAddrHint("203.0.113.1", port),
-			wantQuoted: []string{"'203.0.113.1'", "'" + bridgeStartCommand + " --listen-addr 127.0.0.1 --port 5555'"}},
+			wantQuoted: []string{"'203.0.113.1'", "'" + wording.BridgeStartCommand + " --listen-addr 127.0.0.1 --port 5555'"}},
 		{name: "an address with control characters", hint: listenAddrHint("203.0.113.1\n[PASS] forged\x1b[0m", port),
 			wantQuoted: []string{`'203.0.113.1\n[PASS] forged\x1b[0m'`}, wantAbsent: "\x1b"},
 		{name: "the daemon on another port with reverse on", hint: otherPortDaemonHint(reverseDaemon, port),
-			wantQuoted: []string{"'" + restartDaemonHint + " --port 5555 --allow-adb-reverse --session-arn arn:1'", "'adb -P 6000'", reverseCaveat}},
+			wantQuoted: []string{"'" + wording.DoctorRestartCommand + " --port 5555 --allow-adb-reverse --session-arn arn:1'", "'adb -P 6000'", wording.DoctorHintReverseCaveat}},
 		{name: "the daemon on another port with reverse off", hint: otherPortDaemonHint(control.Response{OK: true, Port: 6000}, port),
-			wantQuoted: []string{"'" + restartDaemonHint + " --port 5555'", "'adb -P 6000'"}, wantAbsent: reverseCaveat},
+			wantQuoted: []string{"'" + wording.DoctorRestartCommand + " --port 5555'", "'adb -P 6000'"}, wantAbsent: wording.DoctorHintReverseCaveat},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -821,7 +823,7 @@ func TestGivenACancelledContextWhenTheForwardTableIsCheckedThenTheDialFails(t *t
 
 	assert.Equal(t, Fail, result.Status)
 	assert.Contains(t, result.Summary, "dial tcp 127.0.0.1:")
-	assert.Equal(t, loopbackHint, result.Hint)
+	assert.Equal(t, wording.DoctorHintForwardBlocked, result.Hint)
 }
 
 func TestGivenTheClosingOpenerWhenAConnectionArrivesThenItIsClosedAtOnce(t *testing.T) {

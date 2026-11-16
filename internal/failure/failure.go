@@ -11,6 +11,8 @@ import (
 	"io"
 	"slices"
 	"strings"
+
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // Explained is a failure in the user's words: Problem says what did not
@@ -57,12 +59,12 @@ func Write(writer io.Writer, program string, err error) {
 		return
 	}
 	lines, fixes := unroll(err)
-	fmt.Fprintf(writer, "%s: error: %s\n", program, lines[0])
+	fmt.Fprintf(writer, wording.ProblemLineFormat, program, lines[0])
 	for _, cause := range lines[1:] {
-		fmt.Fprintf(writer, "  cause: %s\n", cause)
+		fmt.Fprintf(writer, wording.CauseLineFormat, cause)
 	}
 	for index := len(fixes) - 1; index >= 0; index-- {
-		fmt.Fprintf(writer, "  fix:   %s\n", fixes[index])
+		fmt.Fprintf(writer, wording.FixLineFormat, fixes[index])
 	}
 }
 

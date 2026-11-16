@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/aws/device-connect-devicefarm/internal/daemon"
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // newDaemonCommand is the hidden foreground daemon body. `bridge start` re-execs
@@ -20,7 +21,7 @@ import (
 func newDaemonCommand(state *rootState) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:    daemon.DaemonSubcommand,
-		Short:  "Run the bridge in the foreground (internal; used by 'bridge start')",
+		Short:  wording.HelpDaemon,
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {

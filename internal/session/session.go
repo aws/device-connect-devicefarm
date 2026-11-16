@@ -36,6 +36,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/devicefarm"
 	"github.com/aws/aws-sdk-go-v2/service/devicefarm/types"
 	"github.com/aws/smithy-go/logging"
+
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // maxRetryAttempts caps how many times the SDK tries GetRemoteAccessSession
@@ -70,23 +72,23 @@ const MaxSessionLength = 150 * time.Minute
 // place; the SDK's own text stays inside the wrap.
 var (
 	// ErrInvalidARN: not a Device Farm session ARN this client can serve.
-	ErrInvalidARN = errors.New("invalid session ARN")
+	ErrInvalidARN = errors.New(wording.SessionInvalidARN)
 	// ErrAccessDenied: the credentials lack devicefarm:GetRemoteAccessSession on the session.
-	ErrAccessDenied = errors.New("access denied")
+	ErrAccessDenied = errors.New(wording.SessionAccessDenied)
 	// ErrSessionNotFound: no session has this ARN in this account and region.
-	ErrSessionNotFound = errors.New("not found")
+	ErrSessionNotFound = errors.New(wording.SessionNotFound)
 	// ErrUnsupportedDevice: the session's device is one this client does not serve (a non-Android
 	// platform, or an Android release below minimumAndroidMajor). UnsupportedDeviceError matches it
 	// and keeps its own text.
-	ErrUnsupportedDevice = errors.New("unsupported device")
+	ErrUnsupportedDevice = errors.New(wording.SessionUnsupportedDevice)
 	// ErrSessionEnded: the session is COMPLETED or STOPPING. SessionEndedError carries which.
-	ErrSessionEnded = errors.New("has ended")
+	ErrSessionEnded = errors.New(wording.SessionEnded)
 	// ErrNoEndpointYet: the session is not RUNNING, so it has no endpoint to dial.
-	ErrNoEndpointYet = errors.New("has no interactive endpoint yet")
+	ErrNoEndpointYet = errors.New(wording.SessionNoEndpointYet)
 	// ErrRequestRejected: the service answered with a 4xx that is not a throttle: the request
 	// itself is bad (credentials, signature, token, ARN shape). RequestRejectedError carries the
 	// code. Throttles, 5xx and transport failures carry no sentinel.
-	ErrRequestRejected = errors.New("request rejected")
+	ErrRequestRejected = errors.New(wording.SessionRequestRejected)
 	// ErrNoCredentials: the credential chain gave no credentials (none configured, or a provider
 	// such as SSO that can no longer refresh). The provider's text stays; this adds no words.
 	ErrNoCredentials = errors.New("no usable AWS credentials")
@@ -143,7 +145,7 @@ type SessionEndedError struct {
 }
 
 func (ended *SessionEndedError) Error() string {
-	return fmt.Sprintf("remote access session %q %v (status %s)", ended.SessionARN, ErrSessionEnded, ended.Status)
+	return fmt.Sprintf(wording.SessionEndedWithStatusFormat, ended.SessionARN, ended.Status)
 }
 
 func (*SessionEndedError) Is(target error) bool { return target == ErrSessionEnded }
@@ -256,7 +258,7 @@ func classifyAPIError(err error) error {
 	case "AccessDeniedException":
 		return fmt.Errorf("%w: %w", ErrAccessDenied, err)
 	case "NotFoundException":
-		return fmt.Errorf("session %w: %w", ErrSessionNotFound, err)
+		return fmt.Errorf(wording.SessionNotFoundCauseFormat, ErrSessionNotFound, err)
 	case "ArgumentException":
 		return fmt.Errorf("%w: %w", ErrInvalidARN, err)
 	}
@@ -289,12 +291,12 @@ func (c awsRemoteAccessClient) GetSession(ctx context.Context, sessionARN string
 		Arn: aws.String(sessionARN),
 	})
 	if err != nil {
-		return RemoteAccessInfo{}, fmt.Errorf("GetRemoteAccessSession %q: %w", sessionARN, classifyAPIError(err))
+		return RemoteAccessInfo{}, fmt.Errorf(wording.SessionCallFailedFormat, sessionARN, classifyAPIError(err))
 	}
 
 	remoteAccessSession := out.RemoteAccessSession
 	if remoteAccessSession == nil {
-		return RemoteAccessInfo{}, fmt.Errorf("remote access session %q %w", sessionARN, ErrSessionNotFound)
+		return RemoteAccessInfo{}, fmt.Errorf(wording.SessionNotFoundFormat, sessionARN, ErrSessionNotFound)
 	}
 	// An ended session is ended whatever its device: the floor below is about attaching.
 	status := remoteAccessSession.Status
@@ -310,8 +312,7 @@ func (c awsRemoteAccessClient) GetSession(ctx context.Context, sessionARN string
 	}
 	// Only RUNNING is dialable: a pending session has no endpoint yet.
 	if status != types.ExecutionStatusRunning || endpoint == "" {
-		return RemoteAccessInfo{}, fmt.Errorf("remote access session %q %w (status %s); is it RUNNING?",
-			sessionARN, ErrNoEndpointYet, status)
+		return RemoteAccessInfo{}, fmt.Errorf(wording.SessionNoEndpointFormat, sessionARN, ErrNoEndpointYet, status)
 	}
 
 	return RemoteAccessInfo{Endpoint: endpoint, ARN: aws.ToString(remoteAccessSession.Arn),
@@ -328,26 +329,19 @@ func (c awsRemoteAccessClient) GetSession(ctx context.Context, sessionARN string
 func ValidateSessionARN(sessionARN string) error {
 	parsed, err := arn.Parse(sessionARN)
 	if err != nil {
-		return fmt.Errorf("%w: parse session ARN %q: %w", ErrInvalidARN, sessionARN, err)
+		return fmt.Errorf(wording.SessionParseARNFormat, ErrInvalidARN, sessionARN, err)
 	}
 	if parsed.Partition != "aws" {
-		return fmt.Errorf("%w: ARN %q is not an AWS ARN (partition %q)", ErrInvalidARN, sessionARN, parsed.Partition)
+		return fmt.Errorf(wording.SessionNotAWSARNFormat, ErrInvalidARN, sessionARN, parsed.Partition)
 	}
 	if parsed.Service != "devicefarm" {
-		return fmt.Errorf("%w: ARN %q is not a Device Farm ARN (service %q)", ErrInvalidARN, sessionARN, parsed.Service)
+		return fmt.Errorf(wording.SessionNotDeviceFarmARNFormat, ErrInvalidARN, sessionARN, parsed.Service)
 	}
 	if parsed.Region != clientRegion {
-		return fmt.Errorf(
-			"%w: session ARN %q is in region %q, but Device Farm remote access is only supported in %s",
-			ErrInvalidARN, sessionARN, parsed.Region, clientRegion,
-		)
+		return fmt.Errorf(wording.SessionWrongRegionFormat, ErrInvalidARN, sessionARN, parsed.Region, clientRegion)
 	}
 	if kind, id, found := strings.Cut(parsed.Resource, ":"); !found || kind != "session" || id == "" {
-		return fmt.Errorf(
-			"%w: ARN %q is not a remote access session ARN (resource %q); a session ARN looks like "+
-				"arn:aws:devicefarm:%s:<account>:session:<ids>",
-			ErrInvalidARN, sessionARN, parsed.Resource, clientRegion,
-		)
+		return fmt.Errorf(wording.SessionNotSessionARNFormat, ErrInvalidARN, sessionARN, parsed.Resource, clientRegion)
 	}
 	return nil
 }
@@ -379,15 +373,9 @@ func (UnsupportedDeviceError) Is(target error) bool { return target == ErrUnsupp
 // Error is the sentence the user reads on stderr.
 func (refusal UnsupportedDeviceError) Error() string {
 	if !refusal.BelowAndroidFloor() {
-		return fmt.Sprintf(
-			"remote access session %q is on an %s device, but this client only supports Android devices",
-			refusal.SessionARN, refusal.Platform,
-		)
+		return fmt.Sprintf(wording.SessionNotAndroidFormat, refusal.SessionARN, refusal.Platform)
 	}
-	return fmt.Sprintf(
-		"remote access session %q is on an Android %s device, but this client only supports Android %d and above",
-		refusal.SessionARN, refusal.OSVersion, minimumAndroidMajor,
-	)
+	return fmt.Sprintf(wording.SessionAndroidTooOldFormat, refusal.SessionARN, refusal.OSVersion, minimumAndroidMajor)
 }
 
 // refuseUnsupportedDevice returns an UnsupportedDeviceError for a non-Android
@@ -448,8 +436,8 @@ func androidMajor(osVersion string) (int, bool) {
 // e.g. "Google Pixel 9 (OS 16)". Missing fields degrade to placeholders rather
 // than failing resolution: the label is cosmetic, not load-bearing.
 func deviceLabel(device *types.Device) string {
-	name := "unknown device"
-	osVersion := "unknown"
+	name := wording.SessionUnknownDeviceName
+	osVersion := wording.SessionUnknownOSVersion
 	if device != nil {
 		if n := aws.ToString(device.Name); n != "" {
 			name = n
@@ -458,5 +446,5 @@ func deviceLabel(device *types.Device) string {
 			osVersion = o
 		}
 	}
-	return fmt.Sprintf("%s (OS %s)", name, osVersion)
+	return fmt.Sprintf(wording.SessionDeviceLabelFormat, name, osVersion)
 }

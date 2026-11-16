@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"golang.org/x/net/websocket"
+
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // wsOrigin satisfies x/net's requirement for a syntactically valid Origin
@@ -47,7 +49,7 @@ var errNoRoute = errors.New("no route named for the websocket dial")
 
 // errSchemeNotWSS means the endpoint is not wss://, refused before dialing so the presigned
 // query never travels in the clear. The error names the scheme, never the URL.
-var errSchemeNotWSS = errors.New("only wss endpoints are dialed")
+var errSchemeNotWSS = errors.New(wording.RefusalEndpointNotWSS)
 
 // endpointWithRoute returns endpoint with its "path" query parameter set to route, and
 // refuses any scheme but wss. url.Values keeps the result correct whether or not the
@@ -312,8 +314,7 @@ func withoutEndpoint(err error) error {
 // ErrUpgradeRefused: the server answered the websocket upgrade with an HTTP
 // error. The websocket library does not expose the status, so the text names the
 // possible causes instead.
-var ErrUpgradeRefused = errors.New("the server refused the websocket upgrade: the session may have ended, " +
-	"its endpoint URL may have expired, or the session ARN may name another account")
+var ErrUpgradeRefused = errors.New(wording.RefusalUpgradeRefused)
 
 // Dial opens one websocket to endpoint on route, with its inbound per-message cap
 // armed. The caller owns closing it.

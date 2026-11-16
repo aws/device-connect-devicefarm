@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/aws/device-connect-devicefarm/internal/report"
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // Status is a row's verdict, lowercase. Only FAIL fails the run.
@@ -47,10 +48,10 @@ const (
 var categoryOrder = []Category{CategoryLocal, CategoryAWS, CategoryNetwork, CategoryDependencies}
 
 var categoryTitles = map[Category]string{
-	CategoryLocal:        "Local machine",
-	CategoryAWS:          "AWS",
-	CategoryNetwork:      "Network",
-	CategoryDependencies: "Dependencies",
+	CategoryLocal:        wording.DoctorCategoryLocalMachine,
+	CategoryAWS:          wording.DoctorCategoryAWS,
+	CategoryNetwork:      wording.DoctorCategoryNetwork,
+	CategoryDependencies: wording.DoctorCategoryDependencies,
 }
 
 // title is the row name. A category outside the table shows its raw id.
@@ -139,7 +140,7 @@ func Run(ctx context.Context, checks []Check) Report {
 	for _, check := range checks {
 		row := Row{ID: check.ID, Title: check.Title, Category: check.Category, Needs: check.Needs}
 		if blocker := firstBlockingNeed(check.Needs, statuses); blocker != "" {
-			row.Result = Result{Status: Skip, Summary: "needs " + blocker}
+			row.Result = Result{Status: Skip, Summary: wording.DoctorRowNeedsLead + blocker}
 		} else {
 			checkStarted := time.Now()
 			row.Result = runBounded(ctx, check)
@@ -192,7 +193,7 @@ func runBounded(ctx context.Context, check Check) Result {
 	if ctx.Err() != nil {
 		return Result{Status: Fail, Summary: ctx.Err().Error()}
 	}
-	return Result{Status: Fail, Summary: fmt.Sprintf("timed out after %s", check.Timeout)}
+	return Result{Status: Fail, Summary: fmt.Sprintf(wording.DoctorRowTimedOutFormat, check.Timeout)}
 }
 
 // WriteText writes one row per check, `[STATUS] <id>: <summary>[; fix: <hint>]`, then the
@@ -202,12 +203,12 @@ func WriteText(writer io.Writer, report Report) error {
 	for _, row := range report.Rows {
 		fmt.Fprintf(&text, "%s %s: %s", row.Status.Tag(), row.ID, row.Summary)
 		if row.Hint != "" {
-			fmt.Fprintf(&text, "; fix: %s", row.Hint)
+			fmt.Fprintf(&text, wording.DoctorRowFixTailFormat, row.Hint)
 		}
 		text.WriteByte('\n')
 	}
 	summary := report.Summary()
-	fmt.Fprintf(&text, "doctor: %d passed, %d warnings, %d failed, %d skipped\n",
+	fmt.Fprintf(&text, wording.DoctorCountChecksFormat+"\n",
 		summary.Pass, summary.Warn, summary.Fail, summary.Skip)
 	_, err := io.WriteString(writer, text.String())
 	return err
@@ -272,7 +273,7 @@ func WriteTable(writer io.Writer, doctorReport Report, width int) error {
 	var text strings.Builder
 	text.WriteString(categoryTable(categories, skipReasons(doctorReport)).Render(width))
 	if items := whatToDo(doctorReport, width); len(items) > 0 {
-		text.WriteString("\nWhat to do\n")
+		text.WriteString("\n" + wording.DoctorHeadingWhatToDo + "\n")
 		for _, item := range items {
 			text.WriteString(item + "\n")
 		}
@@ -285,9 +286,9 @@ func WriteTable(writer io.Writer, doctorReport Report, width int) error {
 // categoryTable is one row per category: its title, its status and its Details paragraphs.
 func categoryTable(categories []CategoryReport, reasons map[string]string) report.Table {
 	table := report.Table{Columns: []report.Column{
-		{Title: "Category", Width: categoryColumnWidth},
-		{Title: "Status", Width: statusColumnWidth},
-		{Title: "Details", Flexible: true},
+		{Title: wording.DoctorHeadingCategory, Width: categoryColumnWidth},
+		{Title: wording.DoctorHeadingStatus, Width: statusColumnWidth},
+		{Title: wording.DoctorHeadingDetails, Flexible: true},
 	}}
 	for _, category := range categories {
 		table.Rows = append(table.Rows, []report.Cell{
@@ -323,7 +324,7 @@ func detailsParagraphs(rows []Row, reasons map[string]string) []string {
 	}
 	switch {
 	case len(paragraphs) > 0 && len(passed) > 0:
-		paragraphs = append(paragraphs, "also passed: "+strings.Join(passed, ", "))
+		paragraphs = append(paragraphs, wording.DoctorRowAlsoPassedLead+strings.Join(passed, ", "))
 	case len(passed) > 0:
 		paragraphs = append(paragraphs, strings.Join(passed, ", "))
 	}
@@ -348,7 +349,7 @@ func sharedReason(skipped []Row, reasons map[string]string) (string, bool) {
 
 // notChecked is "<title> not checked[: <reason>]"; an empty title or reason drops its part.
 func notChecked(title, reason string) string {
-	text := strings.TrimSpace(title + " not checked")
+	text := strings.TrimSpace(title + wording.DoctorRowNotCheckedTail)
 	if reason != "" {
 		text += ": " + reason
 	}
@@ -391,11 +392,11 @@ func rootReason(blocker string, rows map[string]Row, blockers map[string]string)
 			return ""
 		}
 		if root.Status == Fail {
-			return root.Title + " failed"
+			return root.Title + wording.DoctorRowFailedTail
 		}
 		next := blockers[root.ID]
 		if next == "" {
-			return "needs " + root.Title
+			return wording.DoctorRowNeedsLead + root.Title
 		}
 		blocker = next
 	}
@@ -424,18 +425,18 @@ func countLine(categories []CategoryReport) string {
 	for _, category := range categories {
 		counts[category.Status]++
 	}
-	parts := []string{fmt.Sprintf("doctor: %d of %d categories passed", counts[Pass], len(categories))}
+	parts := []string{fmt.Sprintf(wording.DoctorCountCategoriesPassedFormat, counts[Pass], len(categories))}
 	switch warnings := counts[Warn]; {
 	case warnings == 1:
-		parts = append(parts, "1 warning")
+		parts = append(parts, wording.DoctorCountOneWarning)
 	case warnings > 1:
-		parts = append(parts, fmt.Sprintf("%d warnings", warnings))
+		parts = append(parts, fmt.Sprintf(wording.DoctorCountWarningsFormat, warnings))
 	}
 	if counts[Fail] > 0 {
-		parts = append(parts, fmt.Sprintf("%d failed", counts[Fail]))
+		parts = append(parts, fmt.Sprintf(wording.DoctorCountFailedFormat, counts[Fail]))
 	}
 	if counts[Skip] > 0 {
-		parts = append(parts, fmt.Sprintf("%d not checked", counts[Skip]))
+		parts = append(parts, fmt.Sprintf(wording.DoctorCountNotCheckedFormat, counts[Skip]))
 	}
 	return strings.Join(parts, ", ")
 }
