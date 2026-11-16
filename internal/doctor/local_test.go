@@ -334,7 +334,7 @@ const (
 	returnedSessionARN = "arn:aws:devicefarm:us-west-2:111122223333:session:abc/def/00000"
 	// endedReason is the bridge's detach reason for an ended session.
 	endedReason = "remote access session " + testSessionARN + " has ended (COMPLETED); " +
-		"start a new session and run 'devicefarm-connect device add --session-arn <new ARN>'"
+		"start a new remote access session, then run 'devicefarm-connect device add --session-arn <new ARN>'"
 )
 
 // attachedReply is a status reply holding one device on sessionARN.

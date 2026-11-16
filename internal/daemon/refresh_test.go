@@ -74,7 +74,7 @@ func (s *refreshSuite) TestRefreshFailsTheDetachRecordsTheVerdictsReason() {
 		wantReason string
 	}{
 		{name: "a dead session", err: &session.SessionEndedError{SessionARN: "arn:1", Status: "COMPLETED"},
-			wantReason: "remote access session arn:1 has ended (COMPLETED); start a new session and run " +
+			wantReason: "remote access session arn:1 has ended (COMPLETED); start a new remote access session, then run " +
 				"'devicefarm-connect device add --session-arn <new ARN>'"},
 		{name: "a transient failure still detaches on the tick", err: errors.New("connection reset"),
 			wantReason: "the bridge could not look up remote access session arn:1: connection reset; " +

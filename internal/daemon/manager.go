@@ -516,7 +516,7 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 			// Validate first: a bad ARN gets the ARN error, not the attached
 			// refusal, and makes no service call.
 			if err := session.ValidateSessionARN(req.ARN); err != nil {
-				return refusedReply(err)
+				return refusedReply(failure.WithFix(err, m.addFix(err, req.ARN)))
 			}
 			// Enforce the one-device limit BEFORE resolving, so a re-add of the current
 			// device (an idempotent no-op) or a rejected different device never makes a
@@ -532,10 +532,7 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 				// The log names the step; the reply gets the session error alone.
 				m.logger.Warn("failed to attach the device on add",
 					"error", fmt.Errorf("resolve session: %w", err), "arn", req.ARN)
-				if fix := m.addFix(err, req.ARN); fix != "" {
-					err = failure.WithFix(err, fix)
-				}
-				return refusedReply(err)
+				return refusedReply(failure.WithFix(err, m.addFix(err, req.ARN)))
 			}
 			// Defense in depth, as the Set branch: an attach that landed during the
 			// resolve under storedARN is the same no-op, with no fetch.
@@ -547,7 +544,7 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 				// The log keeps the fetch's steps; the reply gets the sorted cause.
 				m.logger.Warn("failed to attach the device on add",
 					"error", fmt.Errorf("fetch the device serial: %w", err), "arn", storedARN)
-				return refusedReply(serialFetchFailure(err, storedARN))
+				return refusedReply(m.serialFetchFailure(err, storedARN))
 			}
 			startedAt, expiresAt := m.readSessionTimes(resolveCtx, dialer, resolved)
 			// Control commands are serialized on the inline accept loop and nothing
@@ -566,10 +563,10 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 		case control.OpRemove:
 			current, present := device.Current()
 			if !present {
-				return control.Response{OK: false, Error: wording.RefusalNoDevice}
+				return refusedReply(failure.WithFix(errors.New(wording.RefusalNoDevice), wording.FixSeeDeviceList))
 			}
 			if req.ARN != "" && req.ARN != current.ARN {
-				return control.Response{OK: false, Error: wording.RefusalDeviceMismatch}
+				return refusedReply(failure.WithFix(errors.New(wording.RefusalDeviceMismatch), wording.FixSeeAttachedARN))
 			}
 			// Before Clear: the server needs the notifier up to take the request. The control loop
 			// is inline, so the next attachment cannot install under the clear.
@@ -601,7 +598,8 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 			return control.Response{OK: true}
 
 		default:
-			return control.Response{OK: false, Error: fmt.Sprintf(wording.RefusalUnknownOpFormat, req.Op)}
+			// A command of another version sent it.
+			return refusedReply(failure.WithFix(fmt.Errorf(wording.RefusalUnknownOpFormat, req.Op), wording.FixOtherVersionBridge))
 		}
 	}
 }
@@ -629,7 +627,7 @@ func (m *DaemonManager) attachedAddReply(current bridge.DeviceInfo, arn string) 
 		m.logger.Info("device already attached; add is a no-op", "device", current.Label)
 		return control.Response{OK: true, DeviceLabel: current.Label, ARN: current.ARN, Port: m.config.ListenPort}
 	}
-	return refusedReply(differentDeviceAttached(current.Label))
+	return refusedReply(differentDeviceAttached(current.Label, arn))
 }
 
 // readSessionTimes reads the session's time left from the server's status route. The expiry is
@@ -681,62 +679,106 @@ func (m *DaemonManager) lookUpSession(ctx context.Context, sessionARN string) (b
 	defer cancel()
 	resolved, err := m.remoteAccessClient.GetSession(resolveCtx, sessionARN)
 	if err != nil {
-		reason, detach := detachReason(sessionARN, err)
+		reason, detach := m.detachReason(sessionARN, err)
 		return bridge.SessionVerdict{Detach: detach, Reason: reason}, err
 	}
 	return bridge.SessionVerdict{Endpoint: resolved.Endpoint, Label: resolved.Label}, nil
 }
 
-// refusedReply is the reply to a refused request: err's text in Error, its fixes in Fixes.
+// refusedReply is the reply to a refused request: err's text in Error, its fix in Fixes. Every
+// refusal carries one fix.
 func refusedReply(err error) control.Response {
 	cause, fixes := failure.Split(err)
 	return control.Response{OK: false, Error: cause, Fixes: fixes}
 }
 
-// differentDeviceAttached refuses an add while another session is attached.
-func differentDeviceAttached(label string) error {
-	return failure.WithFix(fmt.Errorf(wording.RefusalDifferentDeviceFormat, label), wording.FixRemoveDeviceFirst)
+// differentDeviceAttached refuses an add of sessionARN while another session is attached.
+func differentDeviceAttached(label, sessionARN string) error {
+	return failure.WithFix(fmt.Errorf(wording.RefusalDifferentDeviceFormat, label),
+		fmt.Sprintf(wording.FixRemoveOtherDeviceFormat, sessionARN))
 }
 
-// addFix is the fix for a failed add whose cause has one known remedy, else "". The bridge
-// reads AWS settings only from the shell that starts it, so a credential fix restarts it.
+// quotedRestart is the quoted start command that replaces this bridge and attaches sessionARN.
+// It never names --allow-adb-reverse, which needs its caveat: with reverse on it adds
+// FixOtherOptionsClause.
+func (manager *DaemonManager) quotedRestart(sessionARN string) string {
+	quoted := "'" + StartCommand(manager.config.ListenAddr, manager.config.ListenPort) + wording.DoctorRestartSessionFlagLead + sessionARN + "'"
+	if manager.config.ReverseEnabled {
+		quoted += wording.FixOtherOptionsClause
+	}
+	return quoted
+}
+
+// doctorCommand is the doctor run for sessionARN on this bridge's port and listen address.
+func (manager *DaemonManager) doctorCommand(sessionARN string) string {
+	return DoctorCommand(manager.config.ListenAddr, manager.config.ListenPort, sessionARN)
+}
+
+// addFix is the fix for an add whose ARN or session lookup failed, by the error's class. The
+// bridge reads AWS settings only from the shell that starts it, so a credential fix restarts it.
 func (m *DaemonManager) addFix(err error, sessionARN string) string {
-	restart := fmt.Sprintf(wording.FixRestartBridgeTailFormat, StartCommand(m.config.ListenAddr, m.config.ListenPort), sessionARN)
-	var rejected *session.RequestRejectedError
+	var noEndpoint *session.NoEndpointError
 	switch {
-	case errors.Is(err, session.ErrNoCredentials), errors.As(err, &rejected) && rejected.CredentialsExpired():
-		return wording.FixWorkingCredentialsLead + restart
-	case errors.Is(err, session.ErrAccessDenied):
-		return wording.FixAllowedCredentialsLead + restart
+	case errors.Is(err, session.ErrInvalidARN), errors.Is(err, session.ErrSessionNotFound):
+		return wording.FixPassRunningSessionARN
+	case errors.Is(err, session.ErrNoCredentials), errors.Is(err, session.ErrAccessDenied),
+		errors.Is(err, session.ErrRequestRejected):
+		return fmt.Sprintf(wording.FixBridgeCredentialsFormat, m.quotedRestart(sessionARN))
 	case errors.Is(err, session.ErrSessionEnded):
 		return wording.FixNewSession
 	case errors.Is(err, session.ErrUnsupportedDevice):
-		return wording.FixSupportedDevice
+		return fmt.Sprintf(wording.FixSupportedDeviceFormat, session.MinimumAndroidMajor)
+	case errors.As(err, &noEndpoint) && noEndpoint.Running():
+		return fmt.Sprintf(wording.FixDoctorThenSupportFormat, m.doctorCommand(sessionARN))
 	case errors.Is(err, session.ErrNoEndpointYet):
-		return wording.FixWaitForEndpoint
+		return fmt.Sprintf(wording.FixWaitForSessionFormat, sessionARN)
 	}
-	return ""
+	// A throttle, a server fault or no network: the doctor tells them apart.
+	return fmt.Sprintf(wording.FixDoctorThenRestartFormat, m.doctorCommand(sessionARN), m.quotedRestart(sessionARN))
 }
 
-// serialFetchFailure words a failed serial fetch for the add's reply. The session-stopping close
-// carries its fix.
-func serialFetchFailure(err error, sessionARN string) error {
+const (
+	// deviceNotServedCloseCode is the websocket relay's close for a device the service does not serve.
+	deviceNotServedCloseCode = 1008
+	// defaultWSSPort is the port of a session address that names none.
+	defaultWSSPort = "443"
+)
+
+// connectionFix is the fix for an add whose serial fetch failed, by the kind of the failure.
+func (manager *DaemonManager) connectionFix(failed bridge.ConnectionFailure, sessionARN string) string {
+	doctor := manager.doctorCommand(sessionARN)
+	switch failed.Kind {
+	case bridge.FailureSessionStopping:
+		return wording.FixNewSession
+	case bridge.FailureNoDevice, bridge.FailureNotWSS:
+		return fmt.Sprintf(wording.FixDoctorThenSupportFormat, doctor)
+	case bridge.FailureUnreachable:
+		host, port, err := net.SplitHostPort(failed.Host)
+		if err != nil {
+			host, port = failed.Host, defaultWSSPort
+		}
+		return fmt.Sprintf(wording.FixCheckReachFormat, host, port, sessionARN, doctor)
+	case bridge.FailureOtherProtocol:
+		return fmt.Sprintf(wording.FixInstallLatestFormat, manager.quotedRestart(sessionARN))
+	}
+	if failed.CloseCode == deviceNotServedCloseCode {
+		return wording.FixOtherDevice
+	}
+	// Any other kind: the next try may work.
+	return fmt.Sprintf(wording.FixRetryThenDoctorFormat, sessionARN, doctor)
+}
+
+// serialFetchFailure words a failed serial fetch for the add's reply: the sorted cause, with the
+// fix of its kind.
+func (manager *DaemonManager) serialFetchFailure(err error, sessionARN string) error {
 	failed := bridge.SortConnectionError(err, sessionARN)
-	if failed.Kind == bridge.FailureSessionStopping {
-		return sessionStoppingError(sessionARN)
-	}
-	return errors.New(failed.Cause)
-}
-
-// sessionStoppingError words the relay's session-stopping close. The fix is apart, for a refused add.
-func sessionStoppingError(sessionARN string) error {
-	return failure.WithFix(fmt.Errorf(wording.DetachSessionStoppingFormat, sessionARN), wording.DetachNewSessionFix)
+	return failure.WithFix(errors.New(failed.Cause), manager.connectionFix(failed, sessionARN))
 }
 
 // sessionStoppingReason is the detach reason for the relay's session-stopping close, which needs
-// no lookup: sessionStoppingError's cause and fix on one line.
+// no lookup: the words of a session that a lookup finds stopping.
 func sessionStoppingReason(sessionARN string) string {
-	return sessionStoppingError(sessionARN).Error()
+	return fmt.Sprintf(wording.DetachSessionEndedFormat, sessionARN, wording.DetachStoppingClause)
 }
 
 // classifiedFailures are the lookup failures that detach beside not found and ended: the daemon
@@ -747,7 +789,7 @@ var classifiedFailures = []error{session.ErrAccessDenied, session.ErrInvalidARN,
 // detachReason words one failed lookup for the user and says whether the device must go. Not
 // found, ended, expired credentials, or unreadable (classifiedFailures) detaches. Anything else
 // keeps the device: the next lookup may succeed.
-func detachReason(sessionARN string, err error) (reason string, detach bool) {
+func (manager *DaemonManager) detachReason(sessionARN string, err error) (reason string, detach bool) {
 	switch {
 	case errors.Is(err, session.ErrSessionNotFound):
 		return fmt.Sprintf(wording.DetachSessionGoneFormat, sessionARN), true
@@ -761,10 +803,26 @@ func detachReason(sessionARN string, err error) (reason string, detach bool) {
 	}
 	for _, class := range classifiedFailures {
 		if errors.Is(err, class) {
-			return fmt.Sprintf(wording.DetachSessionUnreadableFormat, sessionARN, classCause(class, err)), true
+			return manager.unreadableReason(sessionARN, class, err), true
 		}
 	}
 	return fmt.Sprintf(wording.DetachLookupFailedFormat, sessionARN, err, sessionARN), false
+}
+
+// unreadableReason words a classified failure with the advice of its class. Credentials are the
+// remedy only for a denied or rejected request.
+func (manager *DaemonManager) unreadableReason(sessionARN string, class, err error) string {
+	cause := classCause(class, err)
+	switch class {
+	case session.ErrInvalidARN:
+		return fmt.Sprintf(wording.DetachInvalidARNFormat, sessionARN, cause)
+	case session.ErrUnsupportedDevice:
+		return fmt.Sprintf(wording.DetachUnsupportedDeviceFormat, sessionARN, cause, session.MinimumAndroidMajor)
+	case session.ErrNoEndpointYet:
+		// An attached session was RUNNING, so a missing endpoint is the service's fault.
+		return fmt.Sprintf(wording.DetachNoEndpointFormat, sessionARN, cause, manager.doctorCommand(sessionARN))
+	}
+	return fmt.Sprintf(wording.DetachSessionUnreadableFormat, sessionARN, cause)
 }
 
 // classCause words a classified failure for the user: the class, plus the service's error code

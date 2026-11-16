@@ -19,7 +19,7 @@ import (
 const verdictARN = "arn:aws:devicefarm:us-west-2:123456789012:session:11111111-2222-3333-4444-555555555555"
 
 // recoveryCommand ends every detach reason that needs a new session.
-const recoveryCommand = "start a new session and run 'devicefarm-connect device add --session-arn <new ARN>'"
+const recoveryCommand = "start a new remote access session, then run 'devicefarm-connect device add --session-arn <new ARN>'"
 
 func TestGivenEachLookupFailureWhenWordedThenTheReasonNamesTheStateAndOnlyADeadSessionDetaches(t *testing.T) {
 	tests := []struct {
@@ -41,13 +41,15 @@ func TestGivenEachLookupFailureWhenWordedThenTheReasonNamesTheStateAndOnlyADeadS
 				": access denied; restart the bridge from a shell with working AWS credentials", wantDetach: true},
 		{name: "invalid ARN", err: fmt.Errorf("%w: parse", session.ErrInvalidARN),
 			wantReason: "the bridge can no longer read remote access session " + verdictARN +
-				": invalid session ARN; restart the bridge from a shell with working AWS credentials", wantDetach: true},
+				": invalid session ARN; " + recoveryCommand, wantDetach: true},
 		{name: "unsupported device", err: fmt.Errorf("%w", session.ErrUnsupportedDevice),
-			wantReason: "the bridge can no longer read remote access session " + verdictARN +
-				": unsupported device; restart the bridge from a shell with working AWS credentials", wantDetach: true},
-		{name: "no endpoint yet", err: fmt.Errorf("remote access session %q %w (status PREPARING)", verdictARN, session.ErrNoEndpointYet),
-			wantReason: "the bridge can no longer read remote access session " + verdictARN +
-				": has no interactive endpoint yet; restart the bridge from a shell with working AWS credentials", wantDetach: true},
+			wantReason: "the bridge can no longer read remote access session " + verdictARN + ": unsupported device; start a remote " +
+				"access session on an Android 9 or later device, then run 'devicefarm-connect device add --session-arn <new ARN>'",
+			wantDetach: true},
+		{name: "no endpoint", err: &session.NoEndpointError{SessionARN: verdictARN, Status: "RUNNING"},
+			wantReason: "the bridge can no longer read remote access session " + verdictARN + ": has no interactive endpoint yet; " +
+				"run 'devicefarm-connect doctor --session-arn " + verdictARN + " --port 5037'; if the doctor does not find the " +
+				"cause, contact AWS Support", wantDetach: true},
 		{name: "expired credentials", err: &session.RequestRejectedError{Code: "ExpiredTokenException", Cause: errors.New("api error")},
 			wantReason: "the AWS credentials the bridge started with have expired, so it can no longer read remote access session " +
 				verdictARN + "; refresh the credentials, run 'devicefarm-connect bridge stop', start the bridge again from that " +
@@ -62,9 +64,10 @@ func TestGivenEachLookupFailureWhenWordedThenTheReasonNamesTheStateAndOnlyADeadS
 				": api error ThrottlingException: slow down; run 'devicefarm-connect device add --session-arn " + verdictARN +
 				"' to attach it again"},
 	}
+	manager := newTestManagerWithClient(t, config.Default(), newFakeClient(testEndpoint, "Pixel 10 (OS 17)"))
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			reason, detach := detachReason(verdictARN, tc.err)
+			reason, detach := manager.detachReason(verdictARN, tc.err)
 
 			assert.Equal(t, tc.wantReason, reason)
 			assert.Equal(t, tc.wantDetach, detach)
@@ -73,7 +76,7 @@ func TestGivenEachLookupFailureWhenWordedThenTheReasonNamesTheStateAndOnlyADeadS
 	}
 }
 
-func TestGivenTheSessionStoppingCloseWhenItsDetachReasonIsWordedThenTheCauseAndTheFixAreOneLine(t *testing.T) {
+func TestGivenTheSessionStoppingCloseWhenItsDetachReasonIsWordedThenItReadsAsASessionFoundStopping(t *testing.T) {
 	reason := sessionStoppingReason(verdictARN)
 
 	assert.Equal(t, "remote access session "+verdictARN+" is stopping; "+recoveryCommand, reason)

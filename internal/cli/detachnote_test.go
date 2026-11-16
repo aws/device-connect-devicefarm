@@ -14,7 +14,7 @@ import (
 )
 
 const detachReason = "remote access session arn:aws:devicefarm:us-west-2:1:session:a/b/0 no longer exists; " +
-	"start a new session and run 'devicefarm-connect device add --session-arn <new ARN>'"
+	"start a new remote access session, then run 'devicefarm-connect device add --session-arn <new ARN>'"
 
 // detachedReply is a no-device reply carrying a detach three minutes old.
 func detachedReply() control.Response {

@@ -29,6 +29,26 @@ func addReq(arn string) control.Request {
 	return control.Request{Op: control.OpAdd, ARN: arn}
 }
 
+// Commands and fixes that a bridge on the default port sends for testSessionArnOne.
+const (
+	fixAddCommand     = "devicefarm-connect device add --session-arn " + testSessionArnOne
+	fixDoctorCommand  = "devicefarm-connect doctor --session-arn " + testSessionArnOne + " --port 5037"
+	fixRestartCommand = "devicefarm-connect bridge start --port 5037 --session-arn " + testSessionArnOne
+	fixNewSession     = "Start a new remote access session, then run 'devicefarm-connect device add --session-arn <new ARN>'."
+	fixOtherDevice    = "Start a remote access session on another device, then run 'devicefarm-connect device add " +
+		"--session-arn <new ARN>'. If the error remains, contact AWS Support."
+	fixPassRunningARN = "Pass the ARN of a running remote access session. To list your sessions, run " +
+		"'aws devicefarm list-remote-access-sessions --arn <project ARN> --region us-west-2'."
+	fixCredentials = "The bridge uses the AWS credentials of the shell that started it. From a shell with working AWS " +
+		"credentials that allow devicefarm:GetRemoteAccessSession, run '" + fixRestartCommand + "'."
+	fixDoctorThenSupport = "Run '" + fixDoctorCommand + "'. If the doctor does not find the cause, contact AWS Support."
+	fixRetryThenDoctor   = "Run '" + fixAddCommand + "' again. If the error remains, run '" + fixDoctorCommand +
+		"'. If the doctor does not find the cause, contact AWS Support."
+	fixOtherVersion = "The running bridge is another version of devicefarm-connect than this command. Restart it: run " +
+		"'devicefarm-connect bridge start' with the options that you started it with. If the error remains, install the " +
+		"latest devicefarm-connect, then run 'devicefarm-connect doctor'. If the doctor does not find the cause, contact AWS Support."
+)
+
 // controlHandlerSuite exercises the daemon's control handler. SetupTest builds the shared
 // fixture: a mock endpoint that answers the add's serial fetch, a fake remote-access client
 // resolving to it, a DaemonManager on that client, an empty device, a dialer, and a handler
@@ -96,15 +116,18 @@ func (s *controlHandlerSuite) TestSerialFetchFailsTheReplyNamesWhatFailedAndTheL
 		name     string
 		endpoint string
 		cause    string
+		fix      string
 		logged   string
 	}{
 		{name: "nothing listens at the endpoint", endpoint: testsupport.PresignedUnreachableEndpoint,
-			cause:  "cannot connect to Device Farm at 127.0.0.1:1: dial tcp 127.0.0.1:1: connect: connection refused",
+			cause: "cannot connect to Device Farm at 127.0.0.1:1: dial tcp 127.0.0.1:1: connect: connection refused",
+			fix: "Check that this machine can reach 127.0.0.1 on port 1, then run '" + fixAddCommand + "' again. '" +
+				fixDoctorCommand + "' tests the connection.",
 			logged: "fetch the device serial: " + testsupport.ScrubbedDialText + "adb: dial tcp 127.0.0.1:1"},
-		{name: "the service closes with a reason", endpoint: closing.URL,
+		{name: "the service closes with a reason", endpoint: closing.URL, fix: fixOtherDevice,
 			cause:  "Device Farm refused the connection to the device: Device Connect is not supported on this device (close code 1008)",
 			logged: "fetch the device serial: read the devices reply: websocket closed by the peer: code 1008"},
-		{name: "the server refuses the session", endpoint: refusing.URL,
+		{name: "the server refuses the session", endpoint: refusing.URL, fix: fixRetryThenDoctor,
 			cause:  "Device Farm refused the connection to the device: " + testsupport.NewSessionRefusalReason,
 			logged: "fetch the device serial: the remote access service refused the session: " + testsupport.NewSessionRefusalReason},
 	}
@@ -118,7 +141,7 @@ func (s *controlHandlerSuite) TestSerialFetchFailsTheReplyNamesWhatFailedAndTheL
 
 			s.False(resp.OK, "a failed serial fetch must fail the add")
 			s.Equal(testCase.cause, resp.Error)
-			s.Empty(resp.Fixes)
+			s.Equal([]string{testCase.fix}, resp.Fixes)
 			s.Contains(logs.String(), testCase.logged)
 			s.Contains(logs.String(), "arn="+testSessionArnOne)
 			for _, sink := range []string{resp.Error, logs.String()} {
@@ -141,7 +164,7 @@ func (s *controlHandlerSuite) TestSerialFetchMeetsTheSessionStoppingCloseAddFail
 
 	s.False(resp.OK)
 	s.Equal("remote access session "+testSessionArnOne+" is stopping", resp.Error, "the cause carries no fix text")
-	s.Equal([]string{"start a new session and run '" + config.BinaryName + " device add --session-arn <new ARN>'"}, resp.Fixes)
+	s.Equal([]string{fixNewSession}, resp.Fixes, "the fix of an ended session")
 	s.Contains(logs.String(), "fetch the device serial: read the devices reply: websocket closed by the peer: code 4001",
 		"the log keeps the close as the fetch read it")
 	_, present := s.device.Current()
@@ -176,6 +199,7 @@ func (s *controlHandlerSuite) TestSerialFetchHangsAddFailsAtTheResolveTimeoutAnd
 
 	s.False(resp.OK, "a hung fetch must fail the add")
 	s.Equal("the attach ran out of time before the device answered", resp.Error)
+	s.Equal([]string{fixRetryThenDoctor}, resp.Fixes)
 	s.Less(time.Since(started), 2*time.Second, "the add must end at resolveTimeout, not at the reply timeout")
 	_, present := s.device.Current()
 	s.False(present)
@@ -190,7 +214,8 @@ func (s *controlHandlerSuite) TestDeviceListNamesNoDeviceAddRejectedAndNothingAt
 	resp := s.handler(addReq(testSessionArnOne))
 
 	s.False(resp.OK, "a device list naming no device must fail the add")
-	s.Contains(resp.Error, "lists no device")
+	s.Equal("the remote adb server lists no device", resp.Error)
+	s.Equal([]string{fixDoctorThenSupport}, resp.Fixes)
 	_, present := s.device.Current()
 	s.False(present, "nothing must be attached without a serial")
 }
@@ -242,7 +267,8 @@ func (s *controlHandlerSuite) TestDifferentDeviceAlreadyAttachedAddRejectedWitho
 
 	s.False(resp.OK, "the one-device limit must reject adding a different device")
 	s.Equal("a different device is already attached (Pixel 10 (OS 17))", resp.Error)
-	s.Equal([]string{"run '" + config.BinaryName + " device remove' first"}, resp.Fixes)
+	s.Equal([]string{"Remove that device with 'devicefarm-connect device remove', then run 'devicefarm-connect device add " +
+		"--session-arn " + testSessionArnTwo + "' again."}, resp.Fixes)
 	current, _ := s.device.Current()
 	s.Equal(testSessionArnOne, current.ARN, "the first device must stay attached")
 	s.Equal([]string{testSessionArnOne}, s.client.resolvedARNs(), "a rejected different device must not trigger a resolve")
@@ -269,6 +295,7 @@ func (s *controlHandlerSuite) TestMalformedArnAddRefusedWithNoLookup() {
 
 	s.False(resp.OK)
 	s.Contains(resp.Error, "invalid session ARN")
+	s.Equal([]string{fixPassRunningARN}, resp.Fixes)
 	s.Empty(s.client.resolvedARNs(), "a refused ARN must make no service call")
 	_, present := s.device.Current()
 	s.False(present)
@@ -390,26 +417,27 @@ func (s *controlHandlerSuite) TestAnAttachUnderAReturnedArnRefreshesByTheReturne
 	s.Equal(testSessionArnTwo, resolved[len(resolved)-1], "the refresh looks the stored ARN up")
 }
 
-func (s *controlHandlerSuite) TestFailedResolveWithAKnownRemedyCarriesItsFixApartFromTheCause() {
-	restart := "then run '" + config.BinaryName + " bridge start --port 5037 --session-arn " + testSessionArnOne +
-		"' with any other option the bridge started with; the bridge reads AWS settings only from the shell that starts it"
+func (s *controlHandlerSuite) TestEveryFailedLookupIsRefusedWithItsCauseAloneAndExactlyTheOneFixOfItsClass() {
 	cases := []struct {
 		name    string
 		failure error
 		fix     string
 	}{
-		{"no credentials", fmt.Errorf("get identity: %w", session.ErrNoCredentials),
-			"get working AWS credentials in this shell, " + restart},
-		{"expired credentials", &session.RequestRejectedError{Code: "ExpiredTokenException", Cause: errors.New("expired")},
-			"get working AWS credentials in this shell, " + restart},
-		{"access denied", fmt.Errorf("%w: not allowed", session.ErrAccessDenied),
-			"get AWS credentials allowed 'devicefarm:GetRemoteAccessSession' on this session in this shell, " + restart},
-		{"ended", fmt.Errorf("session %w", session.ErrSessionEnded),
-			"start a new remote access session, then run '" + config.BinaryName + " device add --session-arn <new ARN>'"},
-		{"unsupported device", fmt.Errorf("session on Android 8: %w", session.ErrUnsupportedDevice),
-			"start a remote access session on a supported Android device, then run '" + config.BinaryName +
-				" device add --session-arn <its ARN>'"},
-		{"not RUNNING", fmt.Errorf("session %w", session.ErrNoEndpointYet), "wait until the session is RUNNING with an endpoint, then try again"},
+		{"no credentials", fmt.Errorf("get identity: %w", session.ErrNoCredentials), fixCredentials},
+		{"expired credentials", &session.RequestRejectedError{Code: "ExpiredTokenException", Cause: errors.New("expired")}, fixCredentials},
+		{"access denied", fmt.Errorf("%w: not allowed", session.ErrAccessDenied), fixCredentials},
+		{"another rejected request", &session.RequestRejectedError{Code: "InvalidSignatureException", Cause: errors.New("signature expired")},
+			fixCredentials},
+		{"not found", fmt.Errorf("session %w", session.ErrSessionNotFound), fixPassRunningARN},
+		{"an ARN the service rejects", fmt.Errorf("%w: api error", session.ErrInvalidARN), fixPassRunningARN},
+		{"ended", &session.SessionEndedError{SessionARN: testSessionArnOne, Status: "COMPLETED"}, fixNewSession},
+		{"unsupported device", session.UnsupportedDeviceError{SessionARN: testSessionArnOne, Platform: "iOS"},
+			"Start a remote access session on an Android 9 or later device, then run 'devicefarm-connect device add --session-arn <new ARN>'."},
+		{"not running yet", &session.NoEndpointError{SessionARN: testSessionArnOne, Status: "PREPARING"},
+			"Wait for the session to begin running, then run '" + fixAddCommand + "' again."},
+		{"running with no endpoint", &session.NoEndpointError{SessionARN: testSessionArnOne, Status: "RUNNING"}, fixDoctorThenSupport},
+		{"a failure with no class", errors.New("connection reset"),
+			"Run '" + fixDoctorCommand + "'. If its AWS and Network rows pass, restart the bridge from this shell with '" + fixRestartCommand + "'."},
 	}
 	for _, testCase := range cases {
 		s.Run(testCase.name, func() {
@@ -424,18 +452,57 @@ func (s *controlHandlerSuite) TestFailedResolveWithAKnownRemedyCarriesItsFixApar
 	}
 }
 
-func (s *controlHandlerSuite) TestFailedResolveWithNoKnownRemedyCarriesNoFix() {
-	for _, failure := range []error{
-		fmt.Errorf("session %w", session.ErrSessionNotFound),
-		&session.RequestRejectedError{Code: "InvalidSignatureException", Cause: errors.New("signature expired")},
-		errors.New("connection reset"),
-	} {
-		s.client.set("", failure)
+func (s *controlHandlerSuite) TestBridgeOffTheDefaultsWithReverseOnItsFixQuotesItsPortAndAddressAndNamesNoReverseFlag() {
+	cfg := config.Default()
+	cfg.ListenAddr, cfg.ListenPort, cfg.ReverseEnabled = "0.0.0.0", 6000, true
+	s.client.set("", errors.New("connection reset"))
+	handler := newTestManagerWithClient(s.T(), cfg, s.client).controlHandler(context.Background(), s.device, s.dialer, func() {})
 
-		resp := s.handler(addReq(testSessionArnOne))
+	resp := handler(addReq(testSessionArnOne))
 
-		s.False(resp.OK)
-		s.Empty(resp.Fixes, failure.Error())
+	s.Equal([]string{"Run 'devicefarm-connect doctor --session-arn " + testSessionArnOne + " --port 6000 --listen-addr 0.0.0.0'. " +
+		"If its AWS and Network rows pass, restart the bridge from this shell with 'devicefarm-connect bridge start --port 6000 " +
+		"--listen-addr 0.0.0.0 --session-arn " + testSessionArnOne + "' with any other option the bridge started with."}, resp.Fixes)
+}
+
+func TestGivenEachKindOfFailedConnectionWhenItsFixIsPickedThenItIsTheFixOfItsClass(t *testing.T) {
+	manager := newTestManagerWithClient(t, config.Default(), newFakeClient(testEndpoint, "Pixel 10 (OS 17)"))
+	tests := []struct {
+		name   string
+		failed bridge.ConnectionFailure
+		fix    string
+	}{
+		{"a close with a reason", bridge.ConnectionFailure{Kind: bridge.FailureServiceRefused, CloseCode: 1013}, fixRetryThenDoctor},
+		{"the close for a device the service does not serve", bridge.ConnectionFailure{Kind: bridge.FailureServiceRefused, CloseCode: 1008},
+			fixOtherDevice},
+		{"that close with no reason", bridge.ConnectionFailure{Kind: bridge.FailureServiceClosed, CloseCode: 1008}, fixOtherDevice},
+		{"the catch-all close", bridge.ConnectionFailure{Kind: bridge.FailureServiceClosed, CloseCode: 1011}, fixRetryThenDoctor},
+		{"a rejected upgrade", bridge.ConnectionFailure{Kind: bridge.FailureUpgradeRefused, Host: "device.example"}, fixRetryThenDoctor},
+		{"no device listed", bridge.ConnectionFailure{Kind: bridge.FailureNoDevice}, fixDoctorThenSupport},
+		{"an address that is not wss", bridge.ConnectionFailure{Kind: bridge.FailureNotWSS}, fixDoctorThenSupport},
+		{"an unreachable host", bridge.ConnectionFailure{Kind: bridge.FailureUnreachable, Host: "device.example"},
+			"Check that this machine can reach device.example on port 443, then run '" + fixAddCommand + "' again. '" +
+				fixDoctorCommand + "' tests the connection."},
+		{"an unreachable host that names its port", bridge.ConnectionFailure{Kind: bridge.FailureUnreachable, Host: "device.example:8443"},
+			"Check that this machine can reach device.example on port 8443, then run '" + fixAddCommand + "' again. '" +
+				fixDoctorCommand + "' tests the connection."},
+		{"another wire protocol", bridge.ConnectionFailure{Kind: bridge.FailureOtherProtocol},
+			"Install the latest devicefarm-connect, then run '" + fixRestartCommand + "'."},
+		{"the session-stopping close", bridge.ConnectionFailure{Kind: bridge.FailureSessionStopping}, fixNewSession},
+	}
+	// The next try may work: the refused session, the drop, the timers and a failure no kind names.
+	for _, kind := range []bridge.FailureKind{bridge.FailureSessionRefused, bridge.FailureDropped, bridge.FailureReplyTimeout,
+		bridge.FailureAttachDeadline, bridge.FailureOther} {
+		tests = append(tests, struct {
+			name   string
+			failed bridge.ConnectionFailure
+			fix    string
+		}{fmt.Sprintf("kind %d", kind), bridge.ConnectionFailure{Kind: kind}, fixRetryThenDoctor})
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.fix, manager.connectionFix(tc.failed, testSessionArnOne))
+		})
 	}
 }
 
@@ -465,7 +532,9 @@ func (s *controlHandlerSuite) TestRemoveWithMismatchedARNRejectedAndKept() {
 
 	resp := s.handler(control.Request{Op: control.OpRemove, ARN: testSessionArnOther})
 
-	s.False(resp.OK, "a mismatched ARN must not remove the attached device")
+	s.Equal(control.Response{Error: "the attached device does not match the requested session", Fixes: []string{
+		"Run 'devicefarm-connect device list --list' to see the ARN of the attached session. To detach that device, run " +
+			"'devicefarm-connect device remove'."}}, resp, "a mismatched ARN must not remove the attached device")
 	_, present := s.device.Current()
 	s.True(present)
 }
@@ -473,7 +542,8 @@ func (s *controlHandlerSuite) TestRemoveWithMismatchedARNRejectedAndKept() {
 func (s *controlHandlerSuite) TestRemoveWithNoDeviceRejected() {
 	resp := s.handler(control.Request{Op: control.OpRemove, ARN: testSessionArnOne})
 
-	s.False(resp.OK)
+	s.Equal(control.Response{Error: "no device is attached", Fixes: []string{
+		"Run 'devicefarm-connect device list' to see what the bridge holds and why the last device detached."}}, resp)
 }
 
 func (s *controlHandlerSuite) TestShutdownInvokesCancelAndAcks() {
@@ -489,7 +559,7 @@ func (s *controlHandlerSuite) TestShutdownInvokesCancelAndAcks() {
 func (s *controlHandlerSuite) TestUnknownOpRejected() {
 	resp := s.handler(control.Request{Op: "bogus"})
 
-	s.False(resp.OK)
+	s.Equal(control.Response{Error: `unknown control operation "bogus"`, Fixes: []string{fixOtherVersion}}, resp)
 }
 
 func (s *controlHandlerSuite) TestListReportsEachAttachedDeviceWithItsSessionARNSerialAndTimes() {

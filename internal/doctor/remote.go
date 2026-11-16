@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/aws/device-connect-devicefarm/internal/bridge"
-	"github.com/aws/device-connect-devicefarm/internal/config"
+	"github.com/aws/device-connect-devicefarm/internal/daemon"
 	"github.com/aws/device-connect-devicefarm/internal/session"
 	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
@@ -53,11 +53,7 @@ var errNoAdbVersionLine = errors.New(wording.DoctorDetailAdbNoVersionLine)
 
 // doctorRerun quotes the doctor rerun with the flags this run used.
 func doctorRerun(inputs Inputs) string {
-	command := fmt.Sprintf(wording.DoctorRerunCommandFormat, safeValue(inputs.SessionARN), inputs.Config.ListenPort)
-	if inputs.Config.ListenAddr != config.DefaultListenAddr {
-		command += wording.ListenAddrFlagLead + safeValue(inputs.Config.ListenAddr)
-	}
-	return "'" + command + "'"
+	return "'" + daemon.DoctorCommand(safeValue(inputs.Config.ListenAddr), inputs.Config.ListenPort, safeValue(inputs.SessionARN)) + "'"
 }
 
 // Session hints. Each quotes the passed ARN.
@@ -89,6 +85,11 @@ func sessionEndedHint(inputs Inputs) string {
 
 func notRunningHint(inputs Inputs) string {
 	return fmt.Sprintf(wording.DoctorHintSessionNotReadyFormat, safeValue(inputs.SessionARN), doctorRerun(inputs))
+}
+
+// noEndpointHint: the service says RUNNING but gives no endpoint, so a wait does not help.
+func noEndpointHint(inputs Inputs) string {
+	return fmt.Sprintf(wording.DoctorHintSessionNoEndpointFormat, safeValue(inputs.SessionARN), doctorRerun(inputs))
 }
 
 func requestRejectedHint(inputs Inputs) string {
@@ -212,6 +213,7 @@ func checkSessionRunning(ctx context.Context, inputs Inputs, state *runState) Re
 // sessionHint picks the fix by the error's class.
 func sessionHint(err error, inputs Inputs) string {
 	var refusal session.UnsupportedDeviceError
+	var noEndpoint *session.NoEndpointError
 	switch {
 	case errors.Is(err, session.ErrInvalidARN):
 		return invalidArnHint(inputs)
@@ -225,6 +227,8 @@ func sessionHint(err error, inputs Inputs) string {
 		return unsupportedDeviceHint(inputs)
 	case errors.Is(err, session.ErrSessionEnded):
 		return sessionEndedHint(inputs)
+	case errors.As(err, &noEndpoint) && noEndpoint.Running():
+		return noEndpointHint(inputs)
 	case errors.Is(err, session.ErrNoEndpointYet):
 		return notRunningHint(inputs)
 	case errors.Is(err, session.ErrRequestRejected):

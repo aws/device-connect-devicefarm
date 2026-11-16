@@ -128,7 +128,8 @@ func (s *LocalSocketServer) handleConn(conn net.Conn, handler Handler) {
 	var req Request
 	if err := json.NewDecoder(conn).Decode(&req); err != nil {
 		s.logger.Warn("malformed control request", "error", err)
-		_ = json.NewEncoder(conn).Encode(Response{OK: false, Error: wording.RefusalMalformedRequest})
+		_ = json.NewEncoder(conn).Encode(Response{OK: false, Error: wording.RefusalMalformedRequest,
+			Fixes: []string{wording.FixMalformedRequest}})
 		return
 	}
 
