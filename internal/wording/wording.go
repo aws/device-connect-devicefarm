@@ -20,6 +20,8 @@ const (
 	BridgeStartCommand = BinaryName + " bridge start"
 	BridgeStopCommand  = BinaryName + " bridge stop"
 	DoctorCommand      = BinaryName + " doctor"
+	// The restart, quoted, for a text that cannot read the bridge's flags.
+	StartWithYourOptionsClause = "'" + BridgeStartCommand + "' with the options that you started it with"
 	// The address follows. A quoted command names it only off the default address.
 	ListenAddrFlagLead = " --listen-addr "
 )
@@ -127,7 +129,8 @@ const (
 	// bridge start over a running bridge: "* a bridge was running (PID 42) and was stopped; its attached devices, ...".
 	OutputRestartStoppedFormat = "* a bridge was running (PID %d) and was stopped"
 	OutputRestartKilledFormat  = "* a bridge was running (PID %d), did not stop cleanly, and was killed"
-	OutputRestartDroppedTail   = "; its attached devices, forward rules, and reverse rules were dropped"
+	// The device keeps a reverse rule until the next attach with reverse on clears it; it reaches no bridge meanwhile.
+	OutputRestartDroppedTail = "; its attached devices and forward rules were dropped, and its reverse rules no longer reach this machine"
 	// Verb: the address of the adb server that the start stopped.
 	OutputAdbServerStoppedFormat = "* stopped the adb server on %s (via 'adb kill-server')"
 	// Verbs: PID, log file path.
@@ -191,7 +194,6 @@ const (
 	ProblemBridgeNotListening       = "the bridge is not listening"
 	ProblemBridgeNoAnswer           = "the bridge did not answer"
 	ProblemStartedButNotAttached    = "the bridge started but could not attach the device"
-	FixRetryBridgeStart             = "fix the issue, then run this command again; 'bridge start' restarts the bridge, so it reads this shell's AWS settings"
 	ProblemAttachFailed             = "could not attach the device"
 	ProblemListFailed               = "could not list the devices"
 	ProblemDetachFailed             = "could not detach the device"
@@ -202,14 +204,14 @@ const (
 	ProblemDoctorOneCheckFailed     = "doctor: 1 check failed"
 	ProblemDoctorChecksFailedFormat = "doctor: %d checks failed"
 	FixRunHelpFormat                = "run '%s --help' for usage"
-	CauseRuntimeDirOwnerFormat      = "runtime dir %q is owned by UID %d, not %d"
+	CauseRuntimeDirOwnerFormat      = "working directory %q is owned by UID %d, not %d"
 	FixRuntimeDirEnvVarFormat       = "set %s to a private directory"
 )
 
 // Control refusals: the bridge's reply, printed as the command's cause.
 const (
 	RefusalMalformedRequest      = "malformed request"
-	RefusalUnknownOpFormat       = "unknown control op %q"
+	RefusalUnknownOpFormat       = "unknown control operation %q"
 	RefusalDifferentDeviceFormat = "a different device is already attached (%s)"
 	RefusalNoDevice              = "no device is attached"
 	RefusalDeviceMismatch        = "the attached device does not match the requested session"
@@ -245,17 +247,46 @@ const (
 		"wire protocol 0x%02x, this client speaks 0x%02x"
 )
 
-// Fixes the bridge sends with a refused add; the command prints each as a fix line.
+// Fixes the bridge sends with a refused request, one each: whole sentences that name the command
+// to run. The restart verb: the quoted start command, then FixOtherOptionsClause for a bridge with
+// reverse on.
 const (
-	FixRemoveDeviceFirst = "run '" + BinaryName + " device remove' first"
-	// The credential fixes: a lead, then the restart. Verbs: the start command, the session ARN.
-	FixWorkingCredentialsLead  = "get working AWS credentials in this shell, "
-	FixAllowedCredentialsLead  = "get AWS credentials allowed 'devicefarm:GetRemoteAccessSession' on this session in this shell, "
-	FixRestartBridgeTailFormat = "then run '%s --session-arn %s' with any other option the bridge started with; " +
-		"the bridge reads AWS settings only from the shell that starts it"
-	FixNewSession      = "start a new remote access session, then " + DetachReattachLead + " <new ARN>'"
-	FixSupportedDevice = "start a remote access session on a supported Android device, then " + DetachReattachLead + " <its ARN>'"
-	FixWaitForEndpoint = "wait until the session is RUNNING with an endpoint, then try again"
+	// Verb: the refused session's ARN.
+	FixRemoveOtherDeviceFormat = "Remove that device with '" + BinaryName + " device remove', then " + DetachReattachLead + " %s' again."
+	FixPassRunningSessionARN   = "Pass the ARN of a running remote access session. To list your sessions, run " +
+		"'aws devicefarm list-remote-access-sessions --arn <project ARN> --region us-west-2'."
+	FixOtherOptionsClause = " with any other option the bridge started with"
+	// Verb: the restart.
+	FixBridgeCredentialsFormat = "The bridge uses the AWS credentials of the shell that started it. From a shell with working " +
+		"AWS credentials that allow devicefarm:GetRemoteAccessSession, run %s."
+	// Verbs: the doctor command, the restart.
+	FixDoctorThenRestartFormat = "Run '%s'. If its AWS and Network rows pass, restart the bridge from this shell with %s."
+	// A session that is gone, ended or stopping. Shared with DetachNewSessionFix.
+	FixNewSessionClause = "a new remote access session, then " + DetachReattachLead + " <new ARN>'"
+	FixNewSession       = "Start " + FixNewSessionClause + "."
+	// Verb: the refused session's ARN.
+	FixWaitForSessionFormat = "Wait for the session to begin running, then " + DetachReattachLead + " %s' again."
+	// Verb: the doctor command.
+	FixDoctorThenSupportFormat = "Run '%s'. If the doctor does not find the cause, contact AWS Support."
+	// Verb: the oldest Android release this program serves.
+	FixSupportedDeviceFormat = "Start a remote access session on an Android %d or later device, then " + DetachReattachLead + " <new ARN>'."
+	FixOtherDevice           = "Start a remote access session on another device, then " + DetachReattachLead + " <new ARN>'. " +
+		"If the error remains, contact AWS Support."
+	// Verbs: the session ARN, the doctor command.
+	FixRetryThenDoctorFormat = "Run " + DoctorDeviceAddCommandFormat + " again. If the error remains, run '%s'. " +
+		"If the doctor does not find the cause, contact AWS Support."
+	// Verbs: the host and port of the session's address, the session ARN, the doctor command.
+	FixCheckReachFormat = "Check that this machine can reach %s on port %s, then " + DetachReattachLead + " %s' again. '%s' tests the connection."
+	// Verb: the restart.
+	FixInstallLatestFormat = "Install the latest " + BinaryName + ", then run %s."
+	FixMalformedRequest    = "Restart the bridge: run " + StartWithYourOptionsClause + ". If the error remains, install the latest " + BinaryName + "."
+	// Also the command's own fix for a refusal with none, which an older bridge sends.
+	FixOtherVersionBridge = "The running bridge is another version of " + BinaryName + " than this command. Restart it: run " +
+		StartWithYourOptionsClause + ". If the error remains, install the latest " + BinaryName + ", then run '" + DoctorCommand +
+		"'. If the doctor does not find the cause, contact AWS Support."
+	FixSeeDeviceList  = "Run '" + BinaryName + " device list' to see what the bridge holds and why the last device detached."
+	FixSeeAttachedARN = "Run '" + BinaryName + " device list --list' to see the ARN of the attached session. " +
+		"To detach that device, run '" + BinaryName + " device remove'."
 )
 
 // Detach reasons, as bridge status, device list and adb show them.
@@ -263,17 +294,25 @@ const (
 	// Open quote; each format closes it: "run 'devicefarm-connect device add --session-arn <new ARN>'".
 	DetachReattachLead = "run '" + BinaryName + " device add --session-arn"
 	// Fix for a session that is gone, ended or stopping. A detach reason joins it after "; ".
-	DetachNewSessionFix      = "start a new session and " + DetachReattachLead + " <new ARN>'"
+	DetachNewSessionFix      = "start " + FixNewSessionClause
 	DetachSessionGoneFormat  = "remote access session %s no longer exists; " + DetachNewSessionFix
 	DetachSessionEndedFormat = "remote access session %s %s; " + DetachNewSessionFix
-	// The websocket relay's session-stopping close. Cause of a refused add; with "; " and DetachNewSessionFix, the detach reason.
+	// The websocket relay's session-stopping close: the cause of a refused add. DetachSessionEndedFormat is its detach reason.
 	DetachSessionStoppingFormat = "remote access session %s " + DetachStoppingClause
 	// Verbs: the session ARN, both times.
 	DetachCredentialsExpiredFormat = "the AWS credentials the bridge started with have expired, so it can no longer read remote access " +
 		"session %s; refresh the credentials, run '" + BridgeStopCommand + "', start the bridge again from that shell with the same " +
 		"options, then " + DetachReattachLead + " %s'"
-	DetachSessionUnreadableFormat = "the bridge can no longer read remote access session %s: %s; restart the bridge from a shell with working AWS credentials"
+	// A session the bridge can no longer read. Verbs: the session ARN, the failure's class. Each format adds its class's advice.
+	DetachUnreadableLeadFormat    = "the bridge can no longer read remote access session %s: %s; "
+	DetachSessionUnreadableFormat = DetachUnreadableLeadFormat + "restart the bridge from a shell with working AWS credentials"
 	DetachLookupFailedFormat      = "the bridge could not look up remote access session %s: %v; " + DetachReattachLead + " %s' to attach it again"
+	DetachInvalidARNFormat        = DetachUnreadableLeadFormat + DetachNewSessionFix
+	// Last verb: the oldest Android release this program serves.
+	DetachUnsupportedDeviceFormat = DetachUnreadableLeadFormat + "start a remote access session on an Android %d or later device, then " +
+		DetachReattachLead + " <new ARN>'"
+	// Last verb: the doctor command.
+	DetachNoEndpointFormat = DetachUnreadableLeadFormat + "run '%s'; if the doctor does not find the cause, contact AWS Support"
 	// Fills DetachSessionEndedFormat, as SessionEnded does, and ends DetachSessionStoppingFormat:
 	// "remote access session <ARN> is stopping; start ...".
 	DetachStoppingClause              = "is stopping"
@@ -303,7 +342,8 @@ const (
 	SessionNotFoundCauseFormat   = "session %w: %w"
 	SessionNotFoundFormat        = "remote access session %q %w"
 	SessionEndedWithStatusFormat = "remote access session %q " + SessionEnded + " (status %s)"
-	SessionNoEndpointFormat      = "remote access session %q %w (status %s); is it RUNNING?"
+	SessionNotRunningFormat      = "remote access session %q is not running yet (status %s)"
+	SessionNoEndpointFormat      = "remote access session %q is running, but Device Farm returned no interactive endpoint for it"
 	SessionNotAndroidFormat      = "remote access session %q is on an %s device, but this client only supports Android devices"
 	SessionAndroidTooOldFormat   = "remote access session %q is on an Android %s device, but this client only supports Android %d and above"
 	// "Google Pixel 9 (OS 16)"
@@ -607,6 +647,9 @@ const (
 	DoctorHintSessionNotReadyFormat = "this session has no interactive endpoint yet (it is still starting, or not RUNNING), so the bridge " +
 		"cannot attach it. Wait until 'aws devicefarm get-remote-access-session --arn %s --region us-west-2' reports status " +
 		"RUNNING with an endpoint, then rerun %s."
+	// Second verb: the quoted rerun.
+	DoctorHintSessionNoEndpointFormat = "Device Farm reports session '%s' RUNNING but returned no interactive endpoint for it, so the " +
+		"bridge cannot attach it. Rerun %s once. If the endpoint stays missing, contact AWS Support."
 	// Second verb: the quoted rerun.
 	DoctorHintRequestRejectedFormat = "Device Farm rejected the request for session '%s' (the summary names the code), so the request itself " +
 		"is at fault: expired or wrong credentials, a bad signature, or a clock that is off, not the network. Run " +

@@ -404,7 +404,7 @@ Run `devicefarm-connect <command> --help` to see the flags of a command.
 - `device add` and `device list` start the bridge with the default settings when none runs. They take no
   listener flags, so to pick a port or turn reverse on, run `bridge start` first. `bridge start` stops a
   running bridge in this runtime directory, says so, and starts a new one with the given flags. The restart
-  drops attached devices and forward and reverse rules.
+  drops attached devices and forward rules, and reverse rules no longer reach your computer.
 - `doctor` takes `--port` and `--listen-addr` too: it checks the address the bridge would bind.
 - Without `--allow-adb-reverse`, `adb reverse` prints:
 

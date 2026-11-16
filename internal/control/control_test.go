@@ -133,8 +133,9 @@ func TestGivenMalformedRequestWhenServedThenErrorResponseAndLoopSurvives(t *test
 	require.NoError(t, err)
 	var resp Response
 	require.NoError(t, json.NewDecoder(bad).Decode(&resp))
-	assert.False(t, resp.OK)
-	assert.NotEmpty(t, resp.Error)
+	assert.Equal(t, Response{OK: false, Error: "malformed request", Fixes: []string{"Restart the bridge: run " +
+		"'devicefarm-connect bridge start' with the options that you started it with. If the error remains, " +
+		"install the latest devicefarm-connect."}}, resp)
 
 	// And the loop must still serve a well-formed follow-up command.
 	ok, err := NewDaemonClient(socketPath).Send(Request{Op: OpStatus})

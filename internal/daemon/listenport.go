@@ -206,6 +206,19 @@ func StartCommand(listenAddr string, port int) string {
 	return command
 }
 
+// DoctorCommand is the doctor run on port, for sessionARN when it is not empty. --listen-addr as
+// in StartCommand.
+func DoctorCommand(listenAddr string, port int, sessionARN string) string {
+	command := fmt.Sprintf(wording.DoctorRerunCommandFormat, sessionARN, port)
+	if sessionARN == "" {
+		command = fmt.Sprintf(wording.PortDoctorCommandFormat, port)
+	}
+	if listenAddr != config.DefaultListenAddr {
+		command += wording.ListenAddrFlagLead + listenAddr
+	}
+	return command
+}
+
 // KeptPortLead: what the text before AdbServerKeepsPortFix already told the user.
 type KeptPortLead int
 
@@ -355,9 +368,5 @@ func portError(occupant portOccupant, bindErr error, listenAddr string, port, pi
 	case portHeld:
 		return errors.New(HeldPortText(listenAddr, port))
 	}
-	doctorCommand := fmt.Sprintf(wording.PortDoctorCommandFormat, port)
-	if listenAddr != config.DefaultListenAddr {
-		doctorCommand += wording.ListenAddrFlagLead + listenAddr
-	}
-	return fmt.Errorf(wording.PortUnbindableFormat, address, bindErr, doctorCommand)
+	return fmt.Errorf(wording.PortUnbindableFormat, address, bindErr, DoctorCommand(listenAddr, port, ""))
 }

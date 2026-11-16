@@ -113,18 +113,48 @@ func TestGivenCommandLineMistakesWhenExecutedThenEachNamesTheCommandsHelp(t *tes
 	}
 }
 
-func TestGivenDaemonRefusesAddWithNoFixWhenDeviceAddExecutedThenPrintsProblemAndCauseOnly(t *testing.T) {
-	fakeDaemon(t, func(control.Request) control.Response {
-		return control.Response{OK: false, Error: "session not found"}
-	})
+// otherVersionFix is the command's own fix for a refusal that carries none.
+const otherVersionFix = "The running bridge is another version of devicefarm-connect than this command. Restart it: run " +
+	"'devicefarm-connect bridge start' with the options that you started it with. If the error remains, install the latest " +
+	"devicefarm-connect, then run 'devicefarm-connect doctor'. If the doctor does not find the cause, contact AWS Support."
 
-	code, out := runExecute(t, "device", "add", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
+func TestGivenTheBridgeRefusesWhenEachCommandExecutesThenItPrintsTheBridgesFixOrTheRestartFixForAReplyWithNone(t *testing.T) {
+	const sessionARN = "arn:aws:devicefarm:us-west-2:1:session:a/b/0"
+	commands := []struct {
+		args    []string
+		problem string
+	}{
+		{[]string{"device", "add", "--session-arn", sessionARN}, "could not attach the device"},
+		{[]string{"bridge", "start", "--session-arn", sessionARN}, "the bridge started but could not attach the device"},
+		{[]string{"device", "list"}, "could not list the devices"},
+		{[]string{"device", "remove"}, "could not detach the device"},
+	}
+	replies := []struct {
+		name    string
+		fixes   []string
+		fixLine string
+	}{
+		{"a reply with a fix", []string{"Run this."}, "Run this."},
+		{"a reply with no fix, as an older bridge sends", nil, otherVersionFix},
+	}
+	for _, command := range commands {
+		for _, reply := range replies {
+			t.Run(strings.Join(command.args[:2], " ")+", "+reply.name, func(t *testing.T) {
+				fakeRestart(t, func(control.Request) control.Response {
+					return control.Response{OK: false, Error: "refused", Fixes: reply.fixes}
+				}, daemon.StopResult{})
 
-	assert.Equal(t, 1, code)
-	assert.Equal(t,
-		config.BinaryName+": error: could not attach the device\n"+
-			"  cause: session not found\n",
-		out)
+				code, out := runExecute(t, command.args...)
+
+				assert.Equal(t, 1, code)
+				// bridge start prints its start line first.
+				assert.True(t, strings.HasSuffix(out, config.BinaryName+": error: "+command.problem+"\n"+
+					"  cause: refused\n"+
+					"  fix:   "+reply.fixLine+"\n"), out)
+				assert.Equal(t, 1, strings.Count(out, "  fix:   "), out)
+			})
+		}
+	}
 }
 
 func TestGivenDaemonRefusesAddWithFixesWhenDeviceAddExecutedThenEachFixIsAFixLineInTheDaemonsOrder(t *testing.T) {
@@ -141,25 +171,6 @@ func TestGivenDaemonRefusesAddWithFixesWhenDeviceAddExecutedThenEachFixIsAFixLin
 			"  cause: a different device is already attached (Other)\n"+
 			"  fix:   run '"+config.BinaryName+" device remove' first\n"+
 			"  fix:   then add this device\n",
-		out)
-}
-
-func TestGivenDaemonRefusesAddWhenBridgeStartExecutedWithARNThenPrintsProblemCauseAndFix(t *testing.T) {
-	fakeDaemon(t, func(control.Request) control.Response {
-		return control.Response{OK: false, Error: "session not RUNNING"}
-	})
-	fakeBridgeStop(t, daemon.StopResult{PID: 4242, WasRunning: true}, nil)
-	countingBridgeStart(t)
-
-	code, out := runExecute(t, "bridge", "start", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
-
-	assert.Equal(t, 1, code)
-	assert.Equal(t,
-		"* a bridge was running (PID 4242) and was stopped; its attached devices, forward rules, and reverse rules were dropped\n"+
-			"* bridge started (PID 4343); log file: /tmp/d.log\n"+
-			config.BinaryName+": error: the bridge started but could not attach the device\n"+
-			"  cause: session not RUNNING\n"+
-			"  fix:   fix the issue, then run this command again; 'bridge start' restarts the bridge, so it reads this shell's AWS settings\n",
 		out)
 }
 
@@ -239,20 +250,7 @@ func TestGivenCommandSucceedsWhenExecutedThenReturnsZero(t *testing.T) {
 	assert.Equal(t, config.BinaryName+" bridge is not running\n", out)
 }
 
-func TestGivenDaemonRefusesAddWithAFixWhenBridgeStartExecutedWithARNThenOnlyTheDaemonsFixPrints(t *testing.T) {
-	fakeRestart(t, func(control.Request) control.Response {
-		return control.Response{OK: false, Error: "session has ended",
-			Fixes: []string{"start a new remote access session"}}
-	}, daemon.StopResult{})
-
-	code, out := runExecute(t, "bridge", "start", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
-
-	assert.Equal(t, 1, code)
-	assert.Contains(t, out, "  cause: session has ended\n  fix:   start a new remote access session\n")
-	assert.NotContains(t, out, "fix the issue, then run this command again", "the daemon's fix replaces the generic one")
-}
-
-func TestGivenARunningBridgeWhenBridgeStartGetsAMalformedSessionArnThenAUsageErrorAndTheBridgeKeepsRunning(t *testing.T) {
+func TestGivenARunningBridgeWhenBridgeStartGetsAMalformedSessionArnThenItPrintsTheArnFixAndTheBridgeKeepsRunning(t *testing.T) {
 	for _, malformedArn := range []string{"not-an-arn", "arn::devicefarm:us-west-2:1:session:a/b/0"} {
 		t.Run(malformedArn, func(t *testing.T) {
 			stops, starts := fakeRestart(t, func(req control.Request) control.Response {
@@ -264,7 +262,9 @@ func TestGivenARunningBridgeWhenBridgeStartGetsAMalformedSessionArnThenAUsageErr
 
 			assert.Equal(t, 1, code)
 			assert.Contains(t, out, config.BinaryName+": error: invalid session ARN: ")
-			assert.Contains(t, out, "  fix:   run '"+config.BinaryName+" bridge start --help' for usage\n")
+			assert.True(t, strings.HasSuffix(out, "\n  fix:   Pass the ARN of a running remote access session. To list your sessions, "+
+				"run 'aws devicefarm list-remote-access-sessions --arn <project ARN> --region us-west-2'.\n"), out)
+			assert.NotContains(t, out, "--help", "the fix is the ARN's, not the usage one")
 			assert.Zero(t, *stops, "a malformed ARN must not stop the running bridge")
 			assert.Zero(t, *starts)
 		})
