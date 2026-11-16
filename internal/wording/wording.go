@@ -20,6 +20,9 @@ const (
 	BridgeStartCommand = BinaryName + " bridge start"
 	BridgeStopCommand  = BinaryName + " bridge stop"
 	DoctorCommand      = BinaryName + " doctor"
+	// Flags RestartCommand appends. The reverse flag needs DoctorHintReverseCaveat beside it.
+	RestartReverseFlag     = " --allow-adb-reverse"
+	RestartSessionFlagLead = " --session-arn "
 	// The restart, quoted, for a text that cannot read the bridge's flags.
 	StartWithYourOptionsClause = "'" + BridgeStartCommand + "' with the options that you started it with"
 	// The address follows. A quoted command names it only off the default address.
@@ -299,10 +302,9 @@ const (
 	DetachSessionEndedFormat = "remote access session %s %s; " + DetachNewSessionFix
 	// The websocket relay's session-stopping close: the cause of a refused add. DetachSessionEndedFormat is its detach reason.
 	DetachSessionStoppingFormat = "remote access session %s " + DetachStoppingClause
-	// Verbs: the session ARN, both times.
+	// Verbs: the session ARN, the restart as the fixes quote it.
 	DetachCredentialsExpiredFormat = "the AWS credentials the bridge started with have expired, so it can no longer read remote access " +
-		"session %s; refresh the credentials, run '" + BridgeStopCommand + "', start the bridge again from that shell with the same " +
-		"options, then " + DetachReattachLead + " %s'"
+		"session %s; refresh the credentials, then from that shell run %s"
 	// A session the bridge can no longer read. Verbs: the session ARN, the failure's class. Each format adds its class's advice.
 	DetachUnreadableLeadFormat    = "the bridge can no longer read remote access session %s: %s; "
 	DetachSessionUnreadableFormat = DetachUnreadableLeadFormat + "restart the bridge from a shell with working AWS credentials"
@@ -483,14 +485,8 @@ const (
 		"'. Every " + BinaryName + " command reads that variable, so 'bridge start' and the bridge it launches use the new directory too."
 )
 
-// Restart command that hints quote, and the caveat for its reverse flag.
+// The reverse flag's caveat.
 const (
-	// "<stop> && <start> --port 5037 --allow-adb-reverse --session-arn <ARN>"
-	DoctorRestartCommand         = BridgeStopCommand + " && " + BridgeStartCommand
-	DoctorRestartPortFlagFormat  = "--port %d"
-	DoctorRestartReverseFlag     = " --allow-adb-reverse"
-	DoctorRestartSessionFlagLead = " --session-arn "
-
 	// Follows every mention of --allow-adb-reverse.
 	DoctorHintReverseCaveat = "'--allow-adb-reverse' lets the device open connections to this machine, so use it only with a " +
 		"device you trust; a public physical device can run software you do not control."
@@ -517,8 +513,8 @@ const (
 	DoctorDetailDaemonNoStatusFormat      = "a bridge (PID %d) is registered but did not report its status: %s"
 	DoctorDetailDaemonStatusRefusedFormat = "a bridge (PID %d) is registered but refused to report its status: %s"
 
-	DoctorHintDaemonNoStatus = "a bridge is registered but did not report its status. Run '" + DoctorRestartCommand +
-		"'. The stop ends that bridge and the start launches a new one."
+	DoctorHintDaemonNoStatus = "a bridge is registered but did not report its status. Run " + StartWithYourOptionsClause +
+		". The start ends that bridge and launches a new one."
 	// Verb: the restart with the reverse flag.
 	DoctorHintDaemonReverseOffFormat = "the bridge runs with adb reverse off, so every 'adb reverse' fails. Run '%s' to start it again " +
 		"with reverse on."

@@ -48,23 +48,10 @@ const (
 	maxControlSocketPath = 103
 )
 
-// daemonFlags renders the listener flags a restart keeps.
-func daemonFlags(port int, reverse bool) string {
-	flags := fmt.Sprintf(wording.DoctorRestartPortFlagFormat, port)
-	if reverse {
-		flags += wording.DoctorRestartReverseFlag
-	}
-	return flags
-}
-
-// restartWith renders the restart command: stop, then start on port with reverse as asked and the
-// session the daemon reported.
+// restartWith renders the restart command on port, with reverse as asked and the session the
+// daemon reported. The status reply names no listen address, so the command names none.
 func restartWith(reply control.Response, port int, reverse bool) string {
-	command := wording.DoctorRestartCommand + " " + daemonFlags(port, reverse)
-	if reply.ARN != "" {
-		command += wording.DoctorRestartSessionFlagLead + reply.ARN
-	}
-	return command
+	return daemon.RestartCommand(config.DefaultListenAddr, port, reverse, reply.ARN)
 }
 
 // caveatIf appends the reverse caveat when the quoted command carries --allow-adb-reverse.
