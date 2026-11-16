@@ -1379,7 +1379,7 @@ func TestGivenAPlaintextInteractiveEndpointWhenAddIsSentThenTheAddFailsAndNoDial
 	addResp, err := client.Send(control.Request{Op: control.OpAdd, ARN: testSessionArnOne})
 	require.NoError(t, err)
 	require.False(t, addResp.OK, "the serial fetch's refused dial must fail the add")
-	assert.Contains(t, addResp.Error, "refused scheme")
+	assert.Equal(t, `only wss endpoints are supported for connections to devices: "ws"`, addResp.Error)
 
 	statusResp, err := client.Send(control.Request{Op: control.OpStatus})
 	require.NoError(t, err)

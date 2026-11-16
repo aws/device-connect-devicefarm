@@ -173,7 +173,7 @@ func TestGivenDaemonCannotResolveWhenAddDeviceInvokedThenSurfacesResolveError(t 
 	// Resolution now happens in the daemon, so a bad session surfaces as the add
 	// response error rather than a pre-spawn CLI failure.
 	fakeDaemon(t, func(control.Request) control.Response {
-		return control.Response{OK: false, Error: "resolve session: session not RUNNING"}
+		return control.Response{OK: false, Error: "session not RUNNING"}
 	})
 
 	_, err := execRoot(t, "device", "add", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
@@ -782,7 +782,7 @@ func TestGivenSessionARNButDaemonCannotResolveWhenStartBridgeInvokedThenErrorsBu
 	// The daemon resolves the ARN, so a session that does not resolve fails after the
 	// start. The error says the daemon is up, so the user runs bridge start again.
 	fakeRestart(t, func(control.Request) control.Response {
-		return control.Response{OK: false, Error: "resolve session: session not RUNNING"}
+		return control.Response{OK: false, Error: "session not RUNNING"}
 	}, daemon.StopResult{PID: 4242, WasRunning: true})
 
 	_, err := execRoot(t, "bridge", "start", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")

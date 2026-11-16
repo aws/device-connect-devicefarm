@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/aws/device-connect-devicefarm/internal/wireschema"
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // JSON control frame: controlFrameMagic, then one compact JSON object with one key, the
@@ -25,6 +26,9 @@ const (
 	// schema-valid frame is far below it.
 	maxControlFrameBytes = 32768
 )
+
+// controlFrameVersion is the magic's last byte: the wire version this client speaks.
+var controlFrameVersion = controlFrameMagic[len(controlFrameMagic)-1]
 
 // controlArm is the one key of a JSON control frame. Zero names no arm.
 type controlArm uint8
@@ -132,6 +136,16 @@ func unmarshalControlFrame(message []byte) (controlFrame, error) {
 	return mapControlFrame(body)
 }
 
+// wireVersionError is a message whose magic differs from this client's only in the version
+// byte. It matches errNotControlFrame.
+type wireVersionError struct{ version byte }
+
+func (versionErr *wireVersionError) Error() string {
+	return fmt.Sprintf(wording.RefusalOtherProtocolFormat, versionErr.version, controlFrameVersion)
+}
+
+func (*wireVersionError) Is(target error) bool { return target == errNotControlFrame }
+
 // requireControlFrameMagic is law 1. When only the version byte differs, the error
 // names it, so a peer on another wire version is visible.
 func requireControlFrameMagic(message []byte) error {
@@ -143,7 +157,7 @@ func requireControlFrameMagic(message []byte) error {
 	}
 	versionAt := len(controlFrameMagic) - 1
 	if string(message[:versionAt]) == controlFrameMagic[:versionAt] {
-		return fmt.Errorf("%w: wire version 0x%02x, this client speaks 0x01", errNotControlFrame, message[versionAt])
+		return &wireVersionError{version: message[versionAt]}
 	}
 	return errNotControlFrame
 }

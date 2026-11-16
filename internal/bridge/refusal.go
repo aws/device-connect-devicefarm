@@ -96,7 +96,7 @@ type sessionOpener func(endpoint string, useParked bool) (*adbConn, error)
 // openSession opens a fresh session at the device's current endpoint. A refusal that leaves the
 // device attached earns one more dial, a fresh one: a socket parked during the lookup was dialed
 // at the old endpoint. clientReason is the adb client's one line: the detach reason, else the
-// second refusal's text, else a coded close's text, else empty. A canceled ctx asks nothing.
+// second refusal's text, else a coded close's cause, else empty. A canceled ctx asks nothing.
 func openSession(ctx context.Context, device *ActiveDevice, arn string, gate *refusalGate, open sessionOpener,
 	logger *slog.Logger) (conn *adbConn, clientReason string, err error) {
 	for attempt := 1; ; attempt++ {
@@ -116,15 +116,15 @@ func openSession(ctx context.Context, device *ActiveDevice, arn string, gate *re
 			return nil, "", err
 		}
 		if !isRefusedOpening(err) {
-			// Any other coded close before the first reply: adb reads the code, the device stays.
-			var closed *wsCloseError
-			if errors.As(err, &closed) {
-				return nil, closedOpeningText(closed), err
+			// Any other coded close before the first reply: adb reads its cause, the device stays.
+			failed := SortConnectionError(err, arn)
+			if failed.Kind == FailureServiceRefused || failed.Kind == FailureServiceClosed {
+				return nil, failed.Cause, err
 			}
 			return nil, "", err
 		}
 		if attempt > 1 {
-			return nil, refusalText(err), err
+			return nil, SortConnectionError(err, arn).refusalText(), err
 		}
 		retry, reason := gate.consult(arn)
 		if !retry {
@@ -134,32 +134,11 @@ func openSession(ctx context.Context, device *ActiveDevice, arn string, gate *re
 	}
 }
 
-// closedOpeningText is the adb client's line when the server closes a new connection with a code
-// before its first reply. The reason keeps printable ASCII bytes; every other byte becomes '?'.
-func closedOpeningText(closed *wsCloseError) string {
-	reason := []byte(closed.reason)
-	for index, value := range reason {
-		if value < ' ' || value > '~' {
-			reason[index] = '?'
-		}
-	}
-	return fmt.Sprintf(wording.AdbFailClosedOpeningFormat, closed.code, reason)
-}
-
 // refusalText is what an adb client reads after a refused opening: the server's own reason, or
-// the dial's cause. Dial wraps that cause with the route and host; the cause alone is the user's
-// part, and the dialer scrubbed it.
-func refusalText(err error) string {
-	var refusal *sessionRefusal
-	if errors.As(err, &refusal) {
-		return wording.AdbFailRefusedLead + refusal.reason
+// the dial's cause without the route and host that Dial names.
+func (failed ConnectionFailure) refusalText() string {
+	if failed.Kind == FailureSessionRefused {
+		return wording.AdbFailRefusedLead + failed.detail
 	}
-	var failure *dialFailure
-	if errors.As(err, &failure) {
-		if cause := errors.Unwrap(failure.cause); cause != nil {
-			return wording.AdbFailUnreachableLead + cause.Error()
-		}
-		err = failure.cause
-	}
-	return wording.AdbFailUnreachableLead + err.Error()
+	return wording.AdbFailUnreachableLead + failed.detail
 }

@@ -4,7 +4,6 @@
 package bridge
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -13,17 +12,22 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/testsupport"
 )
 
-func TestGivenACodedCloseAtTheOpeningWhenAnAdbConnectionOpensThenTheClientReadsTheCodeAndReasonAndTheDeviceStays(t *testing.T) {
+func TestGivenACodedCloseAtTheOpeningWhenAnAdbConnectionOpensThenTheClientReadsTheReasonAndCodeAndTheDeviceStays(t *testing.T) {
 	tests := []struct {
 		closeCode int
 		reason    string
+		want      string
 	}{
-		{closeCode: 1011, reason: "device host error"},
-		{closeCode: 1008, reason: "adb is not supported on this device host"},
-		{closeCode: sessionEndedCloseCode, reason: "session terminating"},
+		{closeCode: 1011, reason: "An internal error has occurred",
+			want: "Device Farm closed the connection to the device: An internal error has occurred (close code 1011)"},
+		{closeCode: 1008, reason: "Device Connect is not supported on this device",
+			want: "Device Farm refused the connection to the device: Device Connect is not supported on this device (close code 1008)"},
+		{closeCode: sessionEndedCloseCode, reason: "session terminating",
+			want: "Device Farm refused the connection to the device: session terminating (close code 4000)"},
+		{closeCode: 1008, reason: "", want: "Device Farm closed the connection to the device (close code 1008)"},
 	}
 	for _, testCase := range tests {
-		t.Run(fmt.Sprint(testCase.closeCode), func(t *testing.T) {
+		t.Run(testCase.want, func(t *testing.T) {
 			mock := testsupport.NewSessionEchoWSS(t)
 			mock.CloseNewConnections(testCase.closeCode, testCase.reason)
 			lookup := &fakeLookup{}
@@ -31,27 +35,11 @@ func TestGivenACodedCloseAtTheOpeningWhenAnAdbConnectionOpensThenTheClientReadsT
 
 			reply := askHost(t, proxyAddress, string(framed("host:get-state")))
 
-			want := fmt.Sprintf("the server closed the connection: code %d, reason \"%s\"", testCase.closeCode, testCase.reason)
-			assert.Equal(t, "FAIL"+string(framed(want)), reply)
+			assert.Equal(t, "FAIL"+string(framed(testCase.want)), reply)
 			_, present := device.Current()
 			assert.True(t, present, "a coded close is no verdict on the session; the next command may work")
 			assert.Empty(t, lookup.calls(), "no lookup")
 			assert.Equal(t, 1, mock.ConnectionsAccepted(), "no second dial")
-		})
-	}
-}
-
-func TestGivenACloseReasonWithOtherBytesWhenWordedThenEachBecomesAQuestionMark(t *testing.T) {
-	tests := map[string]struct{ reason, want string }{
-		"a control byte":  {reason: "bad\nline", want: `reason "bad?line"`},
-		"a UTF-8 pair":    {reason: "café", want: `reason "caf??"`},
-		"an empty reason": {reason: "", want: `reason ""`},
-	}
-	for name, testCase := range tests {
-		t.Run(name, func(t *testing.T) {
-			text := closedOpeningText(&wsCloseError{code: 1011, reason: testCase.reason})
-
-			assert.Equal(t, "the server closed the connection: code 1011, "+testCase.want, text)
 		})
 	}
 }

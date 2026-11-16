@@ -39,7 +39,11 @@ const hostReplyHeaderLen = statusWordLen + replyLengthDigits
 
 // hostReplyError is a fetch whose reply was refused, malformed or cut short, or did not come
 // within hostReplyTimeout. The reply cache relays such a request; see hostReplyFetcher.
-type hostReplyError struct{ cause error }
+type hostReplyError struct {
+	cause error
+	// timedOutAfter is the reply timer that ended the wait. Zero: another failure.
+	timedOutAfter time.Duration
+}
 
 func (replyErr *hostReplyError) Error() string { return replyErr.cause.Error() }
 
@@ -89,7 +93,8 @@ func (dialer *WSDialer) fetchHostReply(ctx context.Context, endpoint, request st
 		return result.reply, result.err
 	case <-timer.C:
 		go closeWS()
-		return nil, &hostReplyError{cause: fmt.Errorf("await the %s reply: %w", replyName, context.DeadlineExceeded)}
+		return nil, &hostReplyError{cause: fmt.Errorf("await the %s reply: %w", replyName, context.DeadlineExceeded),
+			timedOutAfter: dialer.hostReplyTimeout}
 	case <-ctx.Done():
 		go closeWS()
 		return nil, ctx.Err()
@@ -98,9 +103,9 @@ func (dialer *WSDialer) fetchHostReply(ctx context.Context, endpoint, request st
 
 // readHostReply consumes the fetch connection until the host reply is whole or the connection
 // ends. The first message is the server's session control frame and is skipped when present;
-// the adb reply behind it may arrive split across messages. A first message that is a control
-// frame this client cannot read, such as another wire version's, fails the fetch with the
-// decoder's reason.
+// the adb reply behind it may arrive split across messages. An ERROR frame there refuses the
+// session: its reason fails the fetch. A first message that is a control frame this client
+// cannot read, such as another wire version's, fails the fetch with the decoder's reason.
 func readHostReply(ws WSConn, replyName string) ([]byte, error) {
 	var reply []byte
 	firstMessage := true
@@ -111,12 +116,14 @@ func readHostReply(ws WSConn, replyName string) ([]byte, error) {
 		}
 		if firstMessage {
 			firstMessage = false
-			_, decodeErr := unmarshalControlFrame(message)
-			if decodeErr == nil {
+			frame, decodeErr := unmarshalControlFrame(message)
+			switch {
+			case decodeErr == nil && frame.arm == armError:
+				return nil, &sessionRefusal{reason: frame.payload}
+			case decodeErr == nil:
 				continue
-			}
 			// Law 1 returns the bare sentinel for adb bytes with no magic: the reply itself.
-			if decodeErr != errNotControlFrame {
+			case decodeErr != errNotControlFrame:
 				return nil, fmt.Errorf("read the session control frame: %w", decodeErr)
 			}
 		}

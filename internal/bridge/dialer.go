@@ -47,9 +47,13 @@ const (
 // before any connection is attempted.
 var errNoRoute = errors.New("no route named for the websocket dial")
 
-// errSchemeNotWSS means the endpoint is not wss://, refused before dialing so the presigned
+// schemeError means the endpoint is not wss://, refused before dialing so the presigned
 // query never travels in the clear. The error names the scheme, never the URL.
-var errSchemeNotWSS = errors.New(wording.RefusalEndpointNotWSS)
+type schemeError struct{ scheme string }
+
+func (schemeErr *schemeError) Error() string {
+	return fmt.Sprintf(wording.RefusalEndpointNotWSSFormat, schemeErr.scheme)
+}
 
 // endpointWithRoute returns endpoint with its "path" query parameter set to route, and
 // refuses any scheme but wss. url.Values keeps the result correct whether or not the
@@ -64,7 +68,7 @@ func endpointWithRoute(endpoint string, route Route) (string, error) {
 		return "", fmt.Errorf("parse endpoint: %w", withoutEndpoint(err))
 	}
 	if parsed.Scheme != "wss" {
-		return "", fmt.Errorf("%w: refused scheme %q", errSchemeNotWSS, parsed.Scheme)
+		return "", &schemeError{scheme: parsed.Scheme}
 	}
 	query := parsed.Query()
 	query.Set("path", string(route))
@@ -316,6 +320,20 @@ func withoutEndpoint(err error) error {
 // possible causes instead.
 var ErrUpgradeRefused = errors.New(wording.RefusalUpgradeRefused)
 
+// dialError is a dial that failed after the endpoint checks. cause is scrubbed of the endpoint.
+type dialError struct {
+	host  string
+	route Route
+	cause error
+}
+
+func (dialErr *dialError) Error() string {
+	// endpointWithRoute let only wss through.
+	return fmt.Sprintf("websocket dial wss://%s route %s: %v", dialErr.host, dialErr.route, dialErr.cause)
+}
+
+func (dialErr *dialError) Unwrap() error { return dialErr.cause }
+
 // Dial opens one websocket to endpoint on route, with its inbound per-message cap
 // armed. The caller owns closing it.
 func (d *WSDialer) Dial(ctx context.Context, endpoint string, route Route) (WSConn, error) {
@@ -346,8 +364,7 @@ func (d *WSDialer) Dial(ctx context.Context, endpoint string, route Route) (WSCo
 			// "bad status" reaches no user; the sentinel names the causes instead.
 			cause = ErrUpgradeRefused
 		}
-		return nil, fmt.Errorf("websocket dial %s://%s route %s: %w",
-			cfg.Location.Scheme, cfg.Location.Host, route, cause)
+		return nil, &dialError{host: cfg.Location.Host, route: route, cause: cause}
 	}
 	ws.MaxPayloadBytes = maxInboundMessageBytes
 	return &wsConn{conn: ws, writeDeadline: d.writeDeadline}, nil
