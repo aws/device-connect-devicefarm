@@ -33,7 +33,7 @@ func TestGivenEachLookupFailureWhenWordedThenTheReasonNamesTheStateAndOnlyADeadS
 		{name: "completed", err: &session.SessionEndedError{SessionARN: verdictARN, Status: "COMPLETED"},
 			wantReason: "remote access session " + verdictARN + " has ended (COMPLETED); " + recoveryCommand, wantDetach: true},
 		{name: "stopping", err: &session.SessionEndedError{SessionARN: verdictARN, Status: "STOPPING"},
-			wantReason: "remote access session " + verdictARN + " is stopping (STOPPING); " + recoveryCommand, wantDetach: true},
+			wantReason: "remote access session " + verdictARN + " is stopping; " + recoveryCommand, wantDetach: true},
 		{name: "ended without a status word", err: fmt.Errorf("lookup: %w", session.ErrSessionEnded),
 			wantReason: "remote access session " + verdictARN + " has ended; " + recoveryCommand, wantDetach: true},
 		{name: "access denied", err: fmt.Errorf("GetRemoteAccessSession: %w: api error", session.ErrAccessDenied),

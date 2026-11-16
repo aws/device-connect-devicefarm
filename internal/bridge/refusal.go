@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // A refused fresh session or a failed dial asks the daemon about the session before the client
@@ -141,7 +143,7 @@ func closedOpeningText(closed *wsCloseError) string {
 			reason[index] = '?'
 		}
 	}
-	return fmt.Sprintf("the server closed the connection: code %d, reason \"%s\"", closed.code, reason)
+	return fmt.Sprintf(wording.AdbFailClosedOpeningFormat, closed.code, reason)
 }
 
 // refusalText is what an adb client reads after a refused opening: the server's own reason, or
@@ -150,14 +152,14 @@ func closedOpeningText(closed *wsCloseError) string {
 func refusalText(err error) string {
 	var refusal *sessionRefusal
 	if errors.As(err, &refusal) {
-		return "the device connection was refused: " + refusal.reason
+		return wording.AdbFailRefusedLead + refusal.reason
 	}
 	var failure *dialFailure
 	if errors.As(err, &failure) {
 		if cause := errors.Unwrap(failure.cause); cause != nil {
-			return "the bridge could not reach the device: " + cause.Error()
+			return wording.AdbFailUnreachableLead + cause.Error()
 		}
 		err = failure.cause
 	}
-	return "the bridge could not reach the device: " + err.Error()
+	return wording.AdbFailUnreachableLead + err.Error()
 }

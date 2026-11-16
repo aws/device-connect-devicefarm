@@ -16,6 +16,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/failure"
 	"github.com/aws/device-connect-devicefarm/internal/session"
 	"github.com/aws/device-connect-devicefarm/internal/version"
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // rootState holds the flag-bound configuration and the resolved runtime paths
@@ -53,9 +54,9 @@ func execute(root *cobra.Command, state *rootState) int {
 		err = usageError(cmd, err)
 	}
 	if cmd.Name() == daemon.DaemonSubcommand {
-		slog.Error(config.BinaryName+" daemon failed", "error", err)
+		slog.Error(wording.BinaryName+" daemon failed", "error", err)
 	} else {
-		failure.Write(root.ErrOrStderr(), config.BinaryName, err)
+		failure.Write(root.ErrOrStderr(), wording.BinaryName, err)
 	}
 	return 1
 }
@@ -66,7 +67,7 @@ func usageError(cmd *cobra.Command, err error) error {
 	if cmd.Hidden {
 		cmd = cmd.Root()
 	}
-	return failure.WithFix(err, fmt.Sprintf("run '%s --help' for usage", cmd.CommandPath()))
+	return failure.WithFix(err, fmt.Sprintf(wording.FixRunHelpFormat, cmd.CommandPath()))
 }
 
 // newRootCommandWithState assembles the cobra command tree over state: a root that
@@ -75,21 +76,10 @@ func usageError(cmd *cobra.Command, err error) error {
 // passes state to read what the flags parsed.
 func newRootCommandWithState(state *rootState) *cobra.Command {
 	root := &cobra.Command{
-		Use:     config.BinaryName,
-		Version: version.String(), // root only; cobra answers it before PersistentPreRunE
-		Short:   fmt.Sprintf("Bridge a local adb client to an %s %s remote access device", awsName, productName),
-		Long: fmt.Sprintf("%s connects a local adb client to a device in an\n"+
-			"%s %s remote access session. A background bridge listens on a\n"+
-			"local TCP port in place of the adb server and carries each adb connection\n"+
-			"over the session's websocket to the device.\n"+
-			"\n"+
-			"  device add      Attach a device. Starts the bridge when none runs.\n"+
-			"  device list     Show the attached device. Starts the bridge when none runs.\n"+
-			"  device remove   Detach the attached device.\n"+
-			"  bridge start    Start the bridge with custom options, such as --port.\n"+
-			"  bridge stop     Stop the bridge.\n"+
-			"  doctor          Check this machine, the AWS credentials and a session.",
-			config.BinaryName, awsName, productName),
+		Use:           wording.BinaryName,
+		Version:       version.String(), // root only; cobra answers it before PersistentPreRunE
+		Short:         wording.HelpRoot,
+		Long:          wording.HelpRootLong,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		// The generated `completion` command is noise for this tool's small,
@@ -102,7 +92,7 @@ func newRootCommandWithState(state *rootState) *cobra.Command {
 			initLogging(cmd, state.cfg.Debug)
 			paths, err := daemon.DefaultPaths()
 			if err != nil {
-				return &failure.Explained{Problem: "cannot use the working directory", Cause: err}
+				return &failure.Explained{Problem: wording.ProblemWorkingDirectory, Cause: err}
 			}
 			// Resolve the effective logfile once: an explicit --log overrides the
 			// default runtime-dir logfile. Done here so newManager stays a pure
@@ -133,7 +123,7 @@ func hiddenHelpCommand(root *cobra.Command) *cobra.Command {
 	return &cobra.Command{
 		Use:     "usage [command]",
 		Aliases: []string{"help"},
-		Short:   "Help about any command",
+		Short:   wording.HelpUsage,
 		Hidden:  true,
 		RunE: func(_ *cobra.Command, args []string) error {
 			target, _, err := root.Find(args)
@@ -157,8 +147,7 @@ func hiddenHelpCommand(root *cobra.Command) *cobra.Command {
 // are intentionally not exposed: they are fixed runtime constants (see
 // config.Default) to keep the command surface small.
 func bindPersistentFlags(cmd *cobra.Command, cfg *config.ProxyConfig) {
-	cmd.PersistentFlags().BoolVar(&cfg.Debug, "debug", cfg.Debug,
-		"print this command's log records on stderr; a bridge it starts also logs at debug level")
+	cmd.PersistentFlags().BoolVar(&cfg.Debug, "debug", cfg.Debug, wording.FlagDebugUsage)
 }
 
 // bindListenerFlags wires the daemon's listener flags (--port, --listen-addr) to
@@ -171,16 +160,15 @@ func bindListenerFlags(cmd *cobra.Command, cfg *config.ProxyConfig) {
 	flags := cmd.Flags()
 	// WARNING: --listen-addr is not recommended: the listener has no authentication.
 	// Read "Security notes" in the README first. Hidden from help; still parses.
-	flags.StringVar(&cfg.ListenAddr, "listen-addr", cfg.ListenAddr, "address to listen on")
+	flags.StringVar(&cfg.ListenAddr, "listen-addr", cfg.ListenAddr, wording.FlagListenAddrUsage)
 	flags.Lookup("listen-addr").Hidden = true
-	flags.IntVar(&cfg.ListenPort, "port", cfg.ListenPort, "local TCP port to listen on for adb clients")
+	flags.IntVar(&cfg.ListenPort, "port", cfg.ListenPort, wording.FlagPortUsage)
 }
 
 // bindReverseFlag binds --allow-adb-reverse to cfg. Scoped like the listener flags, for
 // the same reason: every other command talks to a daemon that already decided.
 func bindReverseFlag(cmd *cobra.Command, cfg *config.ProxyConfig) {
-	cmd.Flags().BoolVar(&cfg.ReverseEnabled, "allow-adb-reverse", cfg.ReverseEnabled,
-		"allow device-originated reverse connections ('adb reverse'); off by default")
+	cmd.Flags().BoolVar(&cfg.ReverseEnabled, "allow-adb-reverse", cfg.ReverseEnabled, wording.FlagAllowAdbReverseUsage)
 }
 
 // initLogging installs the process-wide slog handler for cmd. The daemon body's

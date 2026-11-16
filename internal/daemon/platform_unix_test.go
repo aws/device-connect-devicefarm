@@ -90,7 +90,7 @@ func TestGivenRuntimeDirOwnedByAnotherUidWhenEnsuredThenErrors(t *testing.T) {
 
 	err := ensureRuntimeDir(dir, os.Getuid()+1)
 
-	require.ErrorContains(t, err, "owned by uid")
+	require.ErrorContains(t, err, "owned by UID")
 	assert.ErrorContains(t, err, "set XDG_RUNTIME_DIR")
 }
 

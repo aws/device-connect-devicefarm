@@ -13,6 +13,7 @@ import (
 
 	"github.com/aws/device-connect-devicefarm/internal/config"
 	"github.com/aws/device-connect-devicefarm/internal/failure"
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // detachedProcessAttributes puts the daemon child in its own session; a hangup
@@ -60,8 +61,8 @@ func ensureRuntimeDir(dir string, uid int) error {
 	owner := int(info.Sys().(*syscall.Stat_t).Uid)
 	if owner != uid {
 		return failure.WithFix(
-			fmt.Errorf("runtime dir %q is owned by uid %d, not %d", dir, owner, uid),
-			"set "+RuntimeDirEnvVar+" to a private directory",
+			fmt.Errorf(wording.CauseRuntimeDirOwnerFormat, dir, owner, uid),
+			fmt.Sprintf(wording.FixRuntimeDirEnvVarFormat, RuntimeDirEnvVar),
 		)
 	}
 	return nil

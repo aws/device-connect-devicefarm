@@ -332,14 +332,14 @@ func TestGivenAnAdbServerThatKeepsThePortWhenTheFixIsWordedThenTheDefaultPortQui
 			lead: LeadNamesNothing, want: "Quit the program that started adb, such as Android Studio, run 'devicefarm-connect bridge " +
 				"start --port 5037', then open that program again: it then uses the bridge as its adb server on port 5037."},
 		{name: "the default port, the program named", listenAddr: config.DefaultListenAddr, port: config.DefaultListenPort,
-			lead: LeadNamesProgram, want: "Quit that program, run 'devicefarm-connect bridge start --port 5037', then open it again: it " +
-				"then uses the bridge as its adb server on port 5037."},
+			lead: LeadNamesProgram, want: "Quit the program that restarted adb, run 'devicefarm-connect bridge start --port 5037', then open " +
+				"it again: it then uses the bridge as its adb server on port 5037."},
 		{name: "the default port, the start command quoted", listenAddr: config.DefaultListenAddr, port: config.DefaultListenPort,
 			lead: LeadQuotesStart, want: "quit that program, run 'devicefarm-connect bridge start --port 5037' again, then open it: it " +
 				"then uses the bridge as its adb server on port 5037."},
 		{name: "the default port off the default address", listenAddr: "0.0.0.0", port: config.DefaultListenPort,
-			lead: LeadNamesProgram, want: "Quit that program, run 'devicefarm-connect bridge start --port 5037 --listen-addr 0.0.0.0', " +
-				"then open it again: it then uses the bridge as its adb server on port 5037."},
+			lead: LeadNamesProgram, want: "Quit the program that restarted adb, run 'devicefarm-connect bridge start --port 5037 " +
+				"--listen-addr 0.0.0.0', then open it again: it then uses the bridge as its adb server on port 5037."},
 		{name: "another port, nothing named", listenAddr: config.DefaultListenAddr, port: 5555, lead: LeadNamesNothing, want: otherPortFix},
 		{name: "another port, the program named", listenAddr: config.DefaultListenAddr, port: 5555, lead: LeadNamesProgram, want: otherPortFix},
 		{name: "another port, the start command quoted", listenAddr: config.DefaultListenAddr, port: 5555, lead: LeadQuotesStart,
@@ -529,7 +529,7 @@ func TestGivenABridgeOnThePortAndALivePidfileWhenStartClearsItThenAConcurrentSta
 func TestGivenABridgeOccupantWhenTheErrorIsWordedThenADefaultAddressUserSeesNoListenAddrFlag(t *testing.T) {
 	text := BridgeHoldsPortText(config.DefaultListenAddr, 5037, 4242)
 
-	assert.Equal(t, "another devicefarm-connect bridge (pid 4242) is listening on 127.0.0.1:5037, so a new bridge "+
+	assert.Equal(t, "another devicefarm-connect bridge (PID 4242) is listening on 127.0.0.1:5037, so a new bridge "+
 		"cannot bind it. That bridge was started from another working directory or by another user, so this shell "+
 		"cannot stop it. Run 'devicefarm-connect bridge stop' in the shell that started it, or check that process 4242 "+
 		"is devicefarm-connect and end it, then run 'devicefarm-connect bridge start --port 5037'. Or start a bridge on "+

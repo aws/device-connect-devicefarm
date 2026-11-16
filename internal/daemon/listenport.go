@@ -16,6 +16,7 @@ import (
 
 	"github.com/aws/device-connect-devicefarm/internal/adbwire"
 	"github.com/aws/device-connect-devicefarm/internal/config"
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // stopReplyTimeout bounds the occupant probe's reply and each wait of an adb server stop.
@@ -29,15 +30,7 @@ const (
 
 // errStartedMeanwhile: a concurrent start's daemon took the port before the stop. Start's pidfile
 // re-read turns it into success.
-var errStartedMeanwhile = errors.New("another command started the bridge on this port meanwhile")
-
-const (
-	bridgeStartCommand = config.BinaryName + " bridge start"
-	// anotherPortTail names the port flag and adb's matching flag.
-	anotherPortTail = "on another port with '" + bridgeStartCommand + " --port <n>' and point adb at it with 'adb -P <n>'"
-	// otherPortClause follows "start" in every text that moves the daemon off a held port.
-	otherPortClause = "the bridge " + anotherPortTail
-)
+var errStartedMeanwhile = errors.New(wording.PortStartedMeanwhile)
 
 // portOccupant is what a bind of the listen address found.
 type portOccupant int
@@ -155,11 +148,11 @@ func StopAdbServer(listenAddr string, port int, within time.Duration) error {
 	}
 	switch {
 	case err != nil:
-		return fmt.Errorf("it answered nothing within %s", within)
+		return fmt.Errorf(wording.PortStopNoAnswerFormat, within)
 	case string(status) == "FAIL":
 		return errors.New(failCause(conn))
 	case string(status) != "OKAY":
-		return fmt.Errorf("it answered %q, not OKAY or FAIL", status)
+		return fmt.Errorf(wording.PortStopBadReplyFormat, status)
 	}
 	deadline := time.Now().Add(within)
 	if conn.SetDeadline(deadline) == nil {
@@ -167,8 +160,7 @@ func StopAdbServer(listenAddr string, port int, within time.Duration) error {
 	}
 	for bindListenPort(listenAddr, port) != nil {
 		if !time.Now().Before(deadline) {
-			return fmt.Errorf("it answered OKAY but port %d is still held after %s; a program that restarts adb, such as "+
-				"Android Studio, can take it back at once", port, within)
+			return fmt.Errorf(wording.PortStopStillHeldFormat, port, within)
 		}
 		time.Sleep(startupPollInterval)
 	}
@@ -188,34 +180,28 @@ func failCause(conn net.Conn) string {
 		_, err = io.ReadFull(conn, reason)
 	}
 	if err != nil {
-		return "it answered FAIL"
+		return wording.PortStopFailed
 	}
-	return "it answered FAIL: " + string(reason)
+	return wording.PortStopFailedLead + string(reason)
 }
 
 // HeldPortText is the fix when another program holds the listen port.
 func HeldPortText(listenAddr string, port int) string {
-	return fmt.Sprintf("another program is listening on %s, so the bridge cannot bind it. Start %s, or stop that program "+
-		"and run '%s'. The bridge listens on exactly the port you pass.", net.JoinHostPort(listenAddr, strconv.Itoa(port)),
-		otherPortClause, StartCommand(listenAddr, port))
+	return fmt.Sprintf(wording.PortHeldFormat, net.JoinHostPort(listenAddr, strconv.Itoa(port)), StartCommand(listenAddr, port))
 }
 
 // BridgeHoldsPortText is the fix when another bridge holds the listen port; the pid is its own answer.
 func BridgeHoldsPortText(listenAddr string, port, pid int) string {
-	return fmt.Sprintf("another %s bridge (pid %d) is listening on %s, so a new bridge cannot bind it. That bridge "+
-		"was started from another working directory or by another user, so this shell cannot stop it. Run '%s bridge "+
-		"stop' in the shell that started it, or check that process %d is %s and end it, then run '%s'. Or start a "+
-		"bridge %s.",
-		config.BinaryName, pid, net.JoinHostPort(listenAddr, strconv.Itoa(port)), config.BinaryName, pid,
-		config.BinaryName, StartCommand(listenAddr, port), anotherPortTail)
+	return fmt.Sprintf(wording.PortHeldByBridgeFormat, pid, net.JoinHostPort(listenAddr, strconv.Itoa(port)), pid,
+		StartCommand(listenAddr, port))
 }
 
 // StartCommand is 'bridge start' on port, with --listen-addr only off the default address: a user
 // on the default address never sees that flag, and any other user keeps the address they passed.
 func StartCommand(listenAddr string, port int) string {
-	command := fmt.Sprintf("%s --port %d", bridgeStartCommand, port)
+	command := fmt.Sprintf(wording.PortStartCommandFormat, port)
 	if listenAddr != config.DefaultListenAddr {
-		command += " --listen-addr " + listenAddr
+		command += wording.ListenAddrFlagLead + listenAddr
 	}
 	return command
 }
@@ -237,20 +223,18 @@ const (
 func AdbServerKeepsPortFix(listenAddr string, port int, lead KeptPortLead) string {
 	if port != config.DefaultListenPort {
 		if lead == LeadQuotesStart {
-			return "start " + otherPortClause + "."
+			return wording.PortStartOnOtherPortTail
 		}
-		return fmt.Sprintf("Start %s. That adb server keeps port %d and the bridge serves adb on the port you pass.", otherPortClause, port)
+		return fmt.Sprintf(wording.PortStartOnOtherPortFormat, port)
 	}
 	command := StartCommand(listenAddr, port)
-	uses := fmt.Sprintf("it then uses the bridge as its adb server on port %d.", port)
 	switch lead {
 	case LeadNamesProgram:
-		return fmt.Sprintf("Quit that program, run '%s', then open it again: %s", command, uses)
+		return fmt.Sprintf(wording.PortQuitThatProgramFormat, command, port)
 	case LeadQuotesStart:
-		return fmt.Sprintf("quit that program, run '%s' again, then open it: %s", command, uses)
+		return fmt.Sprintf(wording.PortQuitThatProgramTailFormat, command, port)
 	}
-	return fmt.Sprintf("Quit the program that started adb, such as Android Studio, run '%s', then open that program again: %s",
-		command, uses)
+	return fmt.Sprintf(wording.PortQuitProgramThatStartedAdbFormat, command, port)
 }
 
 // bindListenPort binds the daemon's own address once and frees it.
@@ -339,7 +323,7 @@ func (m *DaemonManager) clearListenPort() (stoppedAdbServer string, err error) {
 	}
 	address := net.JoinHostPort(listenAddr, strconv.Itoa(port))
 	if cause := StopAdbServer(host, port, stopReplyTimeout); cause != nil {
-		return "", fmt.Errorf("an adb server on %s was asked to stop, as 'adb kill-server' asks, and did not (%v). %s", address, cause,
+		return "", fmt.Errorf(wording.PortAdbServerDidNotStopFormat, address, cause,
 			AdbServerKeepsPortFix(listenAddr, port, LeadNamesNothing))
 	}
 	return address, nil
@@ -352,11 +336,9 @@ func lostBindError(listenAddr string, port int) error {
 	occupant, _, pid, bindErr := probeListenPort(listenAddr, port)
 	switch occupant {
 	case portAdbServer:
-		return fmt.Errorf("an adb server took %s before the bridge could bind it; a program that restarts adb, such as Android "+
-			"Studio, does this. %s", address, AdbServerKeepsPortFix(listenAddr, port, LeadNamesProgram))
+		return fmt.Errorf(wording.PortAdbServerTookPortFormat, address, AdbServerKeepsPortFix(listenAddr, port, LeadNamesProgram))
 	case portFree:
-		return fmt.Errorf("another program held %s while the bridge started and has released it. Run '%s'. "+
-			"The bridge binds the port on that start.", address, StartCommand(listenAddr, port))
+		return fmt.Errorf(wording.PortReleasedFormat, address, StartCommand(listenAddr, port))
 	}
 	return portError(occupant, bindErr, listenAddr, port, pid)
 }
@@ -373,10 +355,9 @@ func portError(occupant portOccupant, bindErr error, listenAddr string, port, pi
 	case portHeld:
 		return errors.New(HeldPortText(listenAddr, port))
 	}
-	doctorCommand := fmt.Sprintf("%s doctor --port %d", config.BinaryName, port)
+	doctorCommand := fmt.Sprintf(wording.PortDoctorCommandFormat, port)
 	if listenAddr != config.DefaultListenAddr {
-		doctorCommand += " --listen-addr " + listenAddr
+		doctorCommand += wording.ListenAddrFlagLead + listenAddr
 	}
-	return fmt.Errorf("the bridge cannot bind %s: %v. Run '%s' for the fix, or start %s. The bridge listens on exactly "+
-		"the port you pass.", address, bindErr, doctorCommand, otherPortClause)
+	return fmt.Errorf(wording.PortUnbindableFormat, address, bindErr, doctorCommand)
 }

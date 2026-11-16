@@ -7,9 +7,11 @@ import (
 	"context"
 	"errors"
 	"strings"
+
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
-var errNoDeviceSerial = errors.New("the remote adb server lists no device")
+var errNoDeviceSerial = errors.New(wording.RefusalNoDeviceSerial)
 
 // FetchDeviceSerial dials endpoint, sends one host:devices and returns the first device row's
 // serial. The control add calls it before Set, so a bound device always has a serial. ctx

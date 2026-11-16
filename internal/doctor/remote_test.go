@@ -24,6 +24,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/session"
 	"github.com/aws/device-connect-devicefarm/internal/testsupport"
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 const testSessionARN = "arn:aws:devicefarm:us-west-2:123456789012:session:abc/def/00000"
@@ -55,7 +56,7 @@ func TestGivenACredentialsSeamWhenTheCheckRunsThenItsOutcomeIsTheRow(t *testing.
 	inputs.Credentials = func(context.Context) (session.CredentialSummary, error) {
 		return session.CredentialSummary{}, errors.New("no EC2 IMDS role found")
 	}
-	assert.Equal(t, Result{Status: Fail, Summary: "this shell has no usable AWS credentials: no EC2 IMDS role found", Hint: credentialsHint},
+	assert.Equal(t, Result{Status: Fail, Summary: "this shell has no usable AWS credentials: no EC2 IMDS role found", Hint: wording.DoctorHintNoCredentials},
 		runRemote(t, inputs, &runState{}, checkCredentials))
 }
 
@@ -103,7 +104,7 @@ func TestGivenNoSessionArnWhenTheSessionCheckRunsThenItSkipsNamingTheFlag(t *tes
 
 			result := runRemote(t, Inputs{Resolver: resolver}, tc.state(), checkSession)
 
-			assert.Equal(t, Result{Status: Skip, Summary: "pass --session-arn to check the session, the device connection and adb versions"}, result)
+			assert.Equal(t, Result{Status: Skip, Summary: "pass --session-arn to check the session, the device connection, and adb versions"}, result)
 			assert.NotRegexp(t, `(local|aws|session|relay)\.[a-z-]+`, result.Summary, "no check id in a user row")
 			assert.Empty(t, resolver.arns, "no ARN, no call")
 		})
@@ -232,7 +233,7 @@ func TestGivenTheAttachedSessionAndReverseOnWhenTheReverseRowRunsThenItPassesWit
 
 	result := runRemote(t, inputs, state, checkReverse)
 
-	assert.Equal(t, Result{Status: Pass, Summary: reverseOnSummary}, result)
+	assert.Equal(t, Result{Status: Pass, Summary: wording.DoctorDetailReverseOnInDaemon}, result)
 	assert.Zero(t, reverse.NotifiersAccepted(), "no probe beside a reverse-on daemon on the attached session")
 }
 
@@ -246,7 +247,7 @@ func TestGivenAResolverWhenTheSessionCheckRunsThenTheRowFollowsTheResolverOutcom
 	}{
 		{name: "running"},
 		{name: "invalid arn", err: fmt.Errorf("%w: parse session ARN", session.ErrInvalidARN), wantHint: invalidArnHint,
-			wantQuoted: "'" + createSessionCommand + "'"},
+			wantQuoted: "'" + wording.DoctorCreateSessionCommand + "'"},
 		{name: "access denied", err: fmt.Errorf("GetRemoteAccessSession: %w", session.ErrAccessDenied), wantHint: accessDeniedHint,
 			wantQuoted: "'devicefarm:GetRemoteAccessSession'"},
 		{name: "not found", err: fmt.Errorf("GetRemoteAccessSession: %w", session.ErrSessionNotFound), wantHint: sessionGoneHint,
@@ -256,11 +257,11 @@ func TestGivenAResolverWhenTheSessionCheckRunsThenTheRowFollowsTheResolverOutcom
 		{name: "unsupported device, untyped", err: fmt.Errorf("resolve: %w", session.ErrUnsupportedDevice),
 			wantHint: unsupportedDeviceHint, wantQuoted: "'--session-arn'"},
 		{name: "ios device", err: session.UnsupportedDeviceError{SessionARN: testSessionARN, Platform: "iOS", OSVersion: "17.0"},
-			wantHint: func(inputs Inputs) string { return nonAndroidDeviceHint(inputs, "iOS") }, wantQuoted: "'" + createSessionCommand + "'"},
+			wantHint: func(inputs Inputs) string { return nonAndroidDeviceHint(inputs, "iOS") }, wantQuoted: "'" + wording.DoctorCreateSessionCommand + "'"},
 		{name: "unknown platform", err: session.UnsupportedDeviceError{SessionARN: testSessionARN, Platform: "WATCH", OSVersion: "1.0"},
-			wantHint: func(inputs Inputs) string { return nonAndroidDeviceHint(inputs, "WATCH") }, wantQuoted: "'" + createSessionCommand + "'"},
+			wantHint: func(inputs Inputs) string { return nonAndroidDeviceHint(inputs, "WATCH") }, wantQuoted: "'" + wording.DoctorCreateSessionCommand + "'"},
 		{name: "ended", err: fmt.Errorf("session %w (status COMPLETED)", session.ErrSessionEnded), wantHint: sessionEndedHint,
-			wantQuoted: "'" + createSessionCommand + "'"},
+			wantQuoted: "'" + wording.DoctorCreateSessionCommand + "'"},
 		{name: "not running yet", err: fmt.Errorf("session %w (status PENDING)", session.ErrNoEndpointYet), wantHint: notRunningHint,
 			wantQuoted: "'aws devicefarm get-remote-access-session --arn " + testSessionARN + " --region us-west-2'"},
 		{name: "rejected", err: fmt.Errorf("GetRemoteAccessSession: %w", &session.RequestRejectedError{Code: "ExpiredTokenException",
@@ -308,7 +309,7 @@ func TestGivenNoResolverAndAMissingProfileWhenTheSessionCheckRunsThenTheClientBu
 
 	assert.Equal(t, Fail, result.Status)
 	assert.Contains(t, result.Summary, "load AWS config")
-	assert.Equal(t, credentialsHint, result.Hint)
+	assert.Equal(t, wording.DoctorHintNoCredentials, result.Hint)
 }
 
 func TestGivenNoResolverWhenTheSessionCheckRunsThenTheRealClientIsBuiltAndCalls(t *testing.T) {
@@ -332,11 +333,11 @@ func TestGivenTheRunFlagsWhenTheRerunIsQuotedThenItKeepsThePortAndANonDefaultLis
 	inputs := Inputs{Config: config.Default(), SessionARN: testSessionARN}
 	inputs.Config.ListenPort = 6000
 
-	assert.Equal(t, "'"+doctorCommand+" --session-arn "+testSessionARN+" --port 6000'", doctorRerun(inputs))
+	assert.Equal(t, "'"+wording.DoctorCommand+" --session-arn "+testSessionARN+" --port 6000'", doctorRerun(inputs))
 	inputs.Config.ListenAddr = "::1"
-	assert.Equal(t, "'"+doctorCommand+" --session-arn "+testSessionARN+" --port 6000 --listen-addr ::1'", doctorRerun(inputs))
+	assert.Equal(t, "'"+wording.DoctorCommand+" --session-arn "+testSessionARN+" --port 6000 --listen-addr ::1'", doctorRerun(inputs))
 	inputs.Config.ListenAddr = "::1\n[PASS] forged"
-	assert.Equal(t, "'"+doctorCommand+" --session-arn "+testSessionARN+` --port 6000 --listen-addr ::1\n[PASS] forged'`, doctorRerun(inputs),
+	assert.Equal(t, "'"+wording.DoctorCommand+" --session-arn "+testSessionARN+` --port 6000 --listen-addr ::1\n[PASS] forged'`, doctorRerun(inputs),
 		"a listen address with a newline is escaped, so the row stays one line")
 }
 
@@ -424,12 +425,12 @@ func TestGivenAPresignedEndpointNobodyAnswersWhenEachRelayRowRunsThenTheRowCarri
 			}
 			switch id {
 			case checkAdbVersion:
-				assert.Equal(t, versionProbeHint, result.Hint, "the version row's hint quotes no rerun and names no proxy")
+				assert.Equal(t, wording.DoctorHintRemoteAdbSilent, result.Hint, "the version row's hint quotes no rerun and names no proxy")
 			case checkReattach:
 				assert.Equal(t, reattachHint(inputs), result.Hint)
 			default:
 				assert.Contains(t, result.Hint, doctorRerun(inputs), "the hint quotes the rerun for this session")
-				assert.Contains(t, result.Hint, proxyIgnoredNote, "a set proxy is named as ignored")
+				assert.Contains(t, result.Hint, wording.DoctorHintProxyIgnored, "a set proxy is named as ignored")
 			}
 		})
 	}
@@ -443,7 +444,7 @@ func TestGivenNoProxyWhenTheRelayDialFailsThenTheHintCarriesNoProxyNote(t *testi
 
 	assert.Equal(t, Fail, result.Status)
 	assert.Equal(t, relayHint(inputs), result.Hint)
-	assert.NotContains(t, result.Hint, proxyIgnoredNote)
+	assert.NotContains(t, result.Hint, wording.DoctorHintProxyIgnored)
 }
 
 func TestGivenAProbedSessionWhenReattachedThenTheRowNamesTheResumedSession(t *testing.T) {
@@ -468,7 +469,7 @@ func TestGivenASilentRelayWhenTheRowDeadlineNearsThenTheProbeGivesUpFirstAndKeep
 		hintFor func(Inputs) string
 	}{
 		{checkRelaySession, relayHint},
-		{checkAdbVersion, func(Inputs) string { return versionProbeHint }},
+		{checkAdbVersion, func(Inputs) string { return wording.DoctorHintRemoteAdbSilent }},
 	}
 	for _, row := range rows {
 		t.Run(row.id, func(t *testing.T) {
@@ -512,18 +513,18 @@ func TestGivenTheReverseSlotWhenTheRowRunsThenTheRowFollowsWhoHoldsIt(t *testing
 		wantHint    func(inputs Inputs) string
 		wantNoProbe bool
 	}{
-		{name: "free slot, no daemon", wantStatus: Pass, wantText: reversePassSummary},
+		{name: "free slot, no daemon", wantStatus: Pass, wantText: wording.DoctorDetailReverseAvailable},
 		{name: "free slot, daemon on another session with reverse on",
-			daemon: control.Response{OK: true, ARN: "arn:other", ReverseEnabled: true}, wantStatus: Pass, wantText: reversePassSummary},
+			daemon: control.Response{OK: true, ARN: "arn:other", ReverseEnabled: true}, wantStatus: Pass, wantText: wording.DoctorDetailReverseAvailable},
 		{name: "free slot, daemon on this session with reverse off",
-			daemon: control.Response{OK: true, ARN: attachedARN}, wantStatus: Pass, wantText: reversePassSummary},
+			daemon: control.Response{OK: true, ARN: attachedARN}, wantStatus: Pass, wantText: wording.DoctorDetailReverseAvailable},
 		{name: "daemon on this session with reverse on, ARN with stray space",
-			daemon: control.Response{OK: true, ARN: " " + attachedARN, ReverseEnabled: true}, wantStatus: Pass, wantText: reverseOnSummary,
+			daemon: control.Response{OK: true, ARN: " " + attachedARN, ReverseEnabled: true}, wantStatus: Pass, wantText: wording.DoctorDetailReverseOnInDaemon,
 			wantNoProbe: true},
 		{name: "daemon on this session under the ARN the service returned, with reverse on",
 			daemon: control.Response{OK: true, ARN: returnedSessionARN, ReverseEnabled: true}, returnedARN: returnedSessionARN,
-			wantStatus: Pass, wantText: reverseOnSummary, wantNoProbe: true},
-		{name: "slot held elsewhere", rival: true, wantStatus: Fail, wantText: reverseHeldSummary, wantHint: slotHeldHint},
+			wantStatus: Pass, wantText: wording.DoctorDetailReverseOnInDaemon, wantNoProbe: true},
+		{name: "slot held elsewhere", rival: true, wantStatus: Fail, wantText: wording.DoctorDetailReverseInUse, wantHint: slotHeldHint},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -541,7 +542,7 @@ func TestGivenTheReverseSlotWhenTheRowRunsThenTheRowFollowsWhoHoldsIt(t *testing
 				assert.Empty(t, result.Hint)
 			} else {
 				assert.Equal(t, tc.wantHint(inputs), result.Hint)
-				assert.Contains(t, result.Hint, "'"+bridgeStopCommand+"'", "the hint quotes the stop for the other daemon")
+				assert.Contains(t, result.Hint, "'"+wording.BridgeStopCommand+"'", "the hint quotes the stop for the other daemon")
 				assert.Contains(t, result.Hint, doctorRerun(inputs))
 			}
 			if tc.wantStatus == Fail {
@@ -567,7 +568,7 @@ const (
 	// Hint fragments the tests share.
 	skewConsequence  = ". Until then no adb command reaches the device. The remote adb server is not affected."
 	noAdbConsequence = ". A local adb on another version cannot connect through the bridge."
-	noAdbCause       = "adb was not found on PATH or in an Android SDK ('ANDROID_HOME', 'ANDROID_SDK_ROOT' or Android Studio's " +
+	noAdbCause       = "adb was not found on PATH or in an Android SDK ('ANDROID_HOME', 'ANDROID_SDK_ROOT', or Android Studio's " +
 		"default SDK location), so the doctor could not check that its version matches the remote adb server (1.0.41)"
 	sdkManagerFix = "Update Android SDK Platform-Tools in Android Studio's SDK Manager to a release whose adb is 1.0.41, such as " +
 		"platform-tools 37"
@@ -674,7 +675,7 @@ func TestGivenSdkAdbsBesideThePathAdbWhenTheVersionIsCheckedThenEveryFoundAdbCou
 			want: Result{Status: Fail,
 				Summary: "local adb 1.0.39 at '%[1]s' and local adb 1.0.40 at '%[2]s' differ from the remote adb server (1.0.41); every command " +
 					"from any of them fails",
-				Hint: "the local adb at '%[1]s' is 1.0.39, Android Studio's adb at '%[2]s' is 1.0.40 and the remote adb server is 1.0.41, so " +
+				Hint: "the local adb at '%[1]s' is 1.0.39, Android Studio's adb at '%[2]s' is 1.0.40, and the remote adb server is 1.0.41, so " +
 					"every command from any of them fails: that adb tries to start its own adb server on the bridge's port and cannot. " +
 					sdkManagerFix + ", and put such an adb first on PATH, then rerun " +
 					"%[3]s. Until then no command from any of them reaches the device. The remote adb server is not affected."}},
@@ -713,7 +714,7 @@ func TestGivenSdkAdbsBesideThePathAdbWhenTheVersionIsCheckedThenEveryFoundAdbCou
 				return fakeAdbOnPath(t, fakeAdbSpec{Output: adbOutput41}), installFakeAdb(t, sdkPlatformTools(t, "ANDROID_HOME"), fakeAdbSpec{ExitCode: 3})
 			},
 			want: Result{Status: Warn, Summary: "'%[2]s version' failed: exit status 3",
-				Hint: strings.NewReplacer("%[1]s", "'%[2]s version'", "%[2]s", "%[3]s", "%[3]d", "41").Replace(adbFailedHint)}},
+				Hint: strings.NewReplacer("%[1]s", "'%[2]s version'", "%[2]s", "%[3]s", "%[3]d", "41").Replace(wording.DoctorHintAdbFailedFormat)}},
 		{name: "the default SDK location when neither variable is set",
 			setup: func(t *testing.T) (string, string) {
 				isolateLocalAdb(t)
@@ -771,6 +772,24 @@ func TestGivenSdkAdbsBesideThePathAdbWhenTheVersionIsCheckedThenEveryFoundAdbCou
 	}
 }
 
+func TestGivenAListWhenJoinedThenThreeOrMoreItemsTakeASerialComma(t *testing.T) {
+	tests := []struct {
+		items []string
+		want  string
+	}{
+		{items: nil, want: ""},
+		{items: []string{"a"}, want: "a"},
+		{items: []string{"a", "b"}, want: "a and b"},
+		{items: []string{"a", "b", "c"}, want: "a, b, and c"},
+		{items: []string{"a", "b", "c", "d"}, want: "a, b, c, and d"},
+	}
+	for _, tc := range tests {
+		t.Run(fmt.Sprintf("items=%d", len(tc.items)), func(t *testing.T) {
+			assert.Equal(t, tc.want, joinAnd(tc.items))
+		})
+	}
+}
+
 func TestGivenHangingAdbsOnPathAndInTheSdkWhenTheVersionIsCheckedThenOneBoundCoversBoth(t *testing.T) {
 	pathAdb := fakeAdbOnPath(t, fakeAdbSpec{Output: adbOutput41, HangFor: time.Minute})
 	sdkAdb := installFakeAdb(t, sdkPlatformTools(t, "ANDROID_HOME"), fakeAdbSpec{Output: adbOutput41, HangFor: time.Minute})
@@ -782,7 +801,7 @@ func TestGivenHangingAdbsOnPathAndInTheSdkWhenTheVersionIsCheckedThenOneBoundCov
 	assert.Less(t, time.Since(started), adbVersionTimeout+pipeDrainDelay+2*time.Second, "both adbs run under the one bound")
 	assert.Equal(t, Result{Status: Warn,
 		Summary: "'" + pathAdb + " version' did not finish in 5s; '" + sdkAdb + " version' did not finish in 5s",
-		Hint:    fmt.Sprintf(adbFailedHint, "'"+pathAdb+" version'", doctorRerun(inputs), 41)}, result)
+		Hint:    fmt.Sprintf(wording.DoctorHintAdbFailedFormat, "'"+pathAdb+" version'", doctorRerun(inputs), 41)}, result)
 }
 
 func TestGivenTheSdkVariablesWhenCandidatesAreListedThenTheOsDefaultFillsInOnlyWhenBothAreUnset(t *testing.T) {
@@ -846,7 +865,7 @@ func TestGivenARemoteAdbServerThatRefusesHostVersionWhenTheVersionIsCheckedThenT
 
 	assert.Equal(t, Result{Status: Fail,
 		Summary: "the remote adb server did not answer its version request: the device adb server refused host:version: device offline",
-		Hint:    versionProbeHint}, result)
+		Hint:    wording.DoctorHintRemoteAdbSilent}, result)
 }
 
 func TestGivenAnAdbThatLeavesAChildHoldingItsPipesWhenTheVersionIsCheckedThenItsOutputStillCountsInTime(t *testing.T) {
@@ -868,9 +887,9 @@ func TestGivenABrokenAdbOnPathWhenTheVersionIsCheckedThenTheRowWarnsNamingIt(t *
 		wantSummary string // the fake's path fills the %s
 		wantHint    string
 	}{
-		{name: "adb exits non-zero", spec: fakeAdbSpec{ExitCode: 3}, wantSummary: "'%s version' failed: exit status 3", wantHint: adbFailedHint},
+		{name: "adb exits non-zero", spec: fakeAdbSpec{ExitCode: 3}, wantSummary: "'%s version' failed: exit status 3", wantHint: wording.DoctorHintAdbFailedFormat},
 		{name: "adb prints no version line", spec: fakeAdbSpec{Output: "hello\n"},
-			wantSummary: `'%s version' printed no 'version 1.0.N' line: "hello"`, wantHint: adbNoVersionHint},
+			wantSummary: `'%s version' printed no 'version 1.0.N' line: "hello"`, wantHint: wording.DoctorHintAdbNoVersionFormat},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -913,7 +932,7 @@ func TestGivenAnSdkAdbThatCannotStartWhenTheVersionIsCheckedThenTheRowWarnsWithT
 
 			shown := safeValue(sdkAdb)
 			assert.Equal(t, Result{Status: Warn, Summary: fmt.Sprintf("'%[1]s version' failed: fork/exec %[1]s: %[2]s", shown, tc.wantError),
-				Hint: fmt.Sprintf(adbFailedHint, "'"+shown+" version'", doctorRerun(inputs), 41)}, result)
+				Hint: fmt.Sprintf(wording.DoctorHintAdbFailedFormat, "'"+shown+" version'", doctorRerun(inputs), 41)}, result)
 			assert.NotContains(t, result.Summary+result.Hint, "\n", "a newline in the path is shown escaped")
 		})
 	}

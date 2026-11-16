@@ -24,6 +24,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/daemon"
 	"github.com/aws/device-connect-devicefarm/internal/failure"
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // TestMain blocks the real bridge start and stop: a test that needs one uses
@@ -407,7 +408,7 @@ func TestGivenNoBridgeWhenListDevicesInvokedWithJSONThenStdoutHoldsOnlyTheObject
 
 	assert.Equal(t, `{"devices":[]}`+"\n", stdout.String())
 	assert.Equal(t, "* bridge not running; starting it now\n"+
-		fmt.Sprintf("* bridge started (pid %d); log file: %s\n", os.Getpid(), paths.LogFile), stderr.String())
+		fmt.Sprintf("* bridge started (PID %d); log file: %s\n", os.Getpid(), paths.LogFile), stderr.String())
 }
 
 func TestGivenNoBridgeWhenListDevicesInvokedThenStartsTheBridge(t *testing.T) {
@@ -454,7 +455,7 @@ func TestGivenRunningDaemonWithDevicesWhenStatusInvokedThenTheCountLineIsOnStdou
 			stdout, stderr, err := statusRoot(t)
 
 			require.NoError(t, err)
-			assert.Equal(t, fmt.Sprintf("devicefarm-connect bridge is running (pid %d), %s; run 'device list' for details\n",
+			assert.Equal(t, fmt.Sprintf("devicefarm-connect bridge is running (PID %d), %s; run 'device list' for details\n",
 				os.Getpid(), tc.want), stdout.String())
 			assert.Empty(t, stderr.String())
 		})
@@ -471,7 +472,7 @@ func TestGivenRunningDaemonWithoutDeviceWhenStatusInvokedThenTheNoDeviceLineAndN
 
 	require.NoError(t, err)
 	// Literal on purpose: a changed BinaryName must fail here.
-	assert.Contains(t, stdout.String(), "devicefarm-connect bridge is running (pid ")
+	assert.Contains(t, stdout.String(), "devicefarm-connect bridge is running (PID ")
 	assert.Contains(t, stdout.String(), "no device attached; the last device detached")
 	assert.Contains(t, stdout.String(), "the session has ended")
 	assert.Empty(t, stderr.String())
@@ -610,8 +611,8 @@ func TestGivenRunningDaemonWhenStartBridgeInvokedThenStopsItSaysSoThenStarts(t *
 
 	require.NoError(t, err)
 	stopped := strings.Index(out.String(),
-		"* a bridge was running (pid 4242) and was stopped; its attached devices, forward rules and reverse rules were dropped")
-	started := strings.Index(out.String(), "* bridge started (pid 4343); log file: /tmp/d.log")
+		"* a bridge was running (PID 4242) and was stopped; its attached devices, forward rules, and reverse rules were dropped")
+	started := strings.Index(out.String(), "* bridge started (PID 4343); log file: /tmp/d.log")
 	listening := strings.Index(out.String(), "listening on port 5037")
 	require.GreaterOrEqual(t, stopped, 0, out.String())
 	require.GreaterOrEqual(t, started, 0, out.String())
@@ -631,7 +632,7 @@ func TestGivenRunningDaemonThatHadToBeKilledWhenStartBridgeInvokedThenTheLineSay
 
 	require.NoError(t, err)
 	assert.Contains(t, out.String(),
-		"* a bridge was running (pid 4242), did not stop cleanly and was killed; its attached devices, forward rules and reverse rules were dropped")
+		"* a bridge was running (PID 4242), did not stop cleanly, and was killed; its attached devices, forward rules, and reverse rules were dropped")
 }
 
 func TestGivenRunningDaemonThatSurvivesTheStopWhenStartBridgeInvokedThenErrorsAndStartsNothing(t *testing.T) {
@@ -805,7 +806,7 @@ func TestGivenNoBridgeWhenStartBridgeInvokedThenPrintsThePidAndLogFileAsAPlainLi
 
 	require.NoError(t, root.Execute())
 
-	assert.Contains(t, stderr.String(), fmt.Sprintf("* bridge started (pid %d); log file: %s\n", os.Getpid(), paths.LogFile))
+	assert.Contains(t, stderr.String(), fmt.Sprintf("* bridge started (PID %d); log file: %s\n", os.Getpid(), paths.LogFile))
 	assert.NotContains(t, stdout.String(), "* bridge started", "result lines stay off stdout")
 	assert.NotContains(t, stderr.String(), "level=", "a plain line, not a log record")
 }
@@ -819,8 +820,8 @@ func TestGivenAnAdbServerWasStoppedWhenStartBridgeInvokedThenSaysSoBeforeTheStar
 	out, err := execRoot(t, "bridge", "start")
 
 	require.NoError(t, err)
-	stopped := strings.Index(out.String(), "* stopped the adb server on 127.0.0.1:5037, as 'adb kill-server' does")
-	started := strings.Index(out.String(), "* bridge started (pid 4242); log file: "+paths.LogFile)
+	stopped := strings.Index(out.String(), "* stopped the adb server on 127.0.0.1:5037 (via 'adb kill-server')")
+	started := strings.Index(out.String(), "* bridge started (PID 4242); log file: "+paths.LogFile)
 	require.GreaterOrEqual(t, stopped, 0, out.String())
 	require.GreaterOrEqual(t, started, 0, out.String())
 	assert.Less(t, stopped, started, "the stop notice comes before the started line")
@@ -845,7 +846,7 @@ func TestGivenTheBridgeWasKilledWhenStopBridgeInvokedThenSaysSoBeforeStopped(t *
 	out, err := runRoot(t, "bridge", "stop")
 
 	require.NoError(t, err)
-	killed := strings.Index(out.String(), "* the bridge (pid 4242) did not stop cleanly and was killed")
+	killed := strings.Index(out.String(), "* the bridge (PID 4242) did not stop cleanly and was killed")
 	stopped := strings.Index(out.String(), config.BinaryName+" stopped")
 	require.GreaterOrEqual(t, killed, 0, out.String())
 	require.GreaterOrEqual(t, stopped, 0, out.String())
@@ -858,12 +859,12 @@ func TestGivenTheBridgeExitedMeanwhileWhenStopBridgeInvokedThenSaysNotListening(
 	out, err := runRoot(t, "bridge", "stop")
 
 	require.NoError(t, err)
-	assert.Contains(t, out.String(), notListeningMessage)
+	assert.Contains(t, out.String(), wording.OutputNotListening)
 	assert.NotContains(t, out.String(), "stopped\n")
 }
 
 func TestGivenStopFailsWhenStopBridgeInvokedThenTheFailureNamesTheProblem(t *testing.T) {
-	fakeBridgeStop(t, daemon.StopResult{PID: 4242, WasRunning: true}, errors.New("bridge (pid 4242) survived kill after 2s; pidfile left in place"))
+	fakeBridgeStop(t, daemon.StopResult{PID: 4242, WasRunning: true}, errors.New("bridge (PID 4242) survived kill after 2s; PID file left in place"))
 
 	_, err := runRoot(t, "bridge", "stop")
 
@@ -882,7 +883,7 @@ func TestGivenAnAdbServerWasStoppedWhenTheStartThenFailsThenTheStopNoticeStillPr
 	out, err := execRoot(t, "bridge", "start")
 
 	require.ErrorIs(t, err, startFailure)
-	assert.Contains(t, out.String(), "* stopped the adb server on 127.0.0.1:5037, as 'adb kill-server' does")
+	assert.Contains(t, out.String(), "* stopped the adb server on 127.0.0.1:5037 (via 'adb kill-server')")
 	assert.NotContains(t, out.String(), "* bridge started")
 }
 
