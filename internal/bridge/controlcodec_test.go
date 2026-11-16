@@ -127,7 +127,7 @@ func TestGivenAV1FrameWhenUnmarshalledThenErrNotControlFrame(t *testing.T) {
 			_, err := unmarshalControlFrame(testCase.message)
 
 			assert.ErrorIs(t, err, errNotControlFrame)
-			assert.Contains(t, err.Error(), "wire version 0x00")
+			assert.Contains(t, err.Error(), "wire protocol 0x00")
 		})
 	}
 }

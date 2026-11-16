@@ -67,6 +67,9 @@ func TestGivenAReplyThatIsNoWholeOkayWhenAHostReplyIsFetchedThenTheErrorIsAReply
 		// Fixture vector v1-magic-new-frame: a byte-protocol server's first frame.
 		{name: "a control frame on another wire version", frames: [][]byte{decodeHex(t, frameVector(t, "v1-magic-new-frame").Hex)},
 			timeout: time.Hour, wantErr: errNotControlFrame, wantText: "read the session control frame"},
+		// The server refuses the session in place of the reply; its reason is the failure.
+		{name: "an ERROR control frame", frames: [][]byte{testsupport.FrameError("device is busy")},
+			timeout: time.Hour, wantErr: ErrSessionRefused, wantText: "device is busy"},
 	}
 
 	for _, testCase := range testCases {

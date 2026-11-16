@@ -86,27 +86,64 @@ func (s *controlHandlerSuite) TestNoDeviceAttachedAddResolvesAttachesAndReportsL
 		"the fetch sends host:devices alone; the status read follows on its own session")
 }
 
-func (s *controlHandlerSuite) TestSerialFetchDialFailsAddRejectedAndNothingAttached() {
-	// The session resolves, but nothing listens at its endpoint.
-	s.client.set(testEndpoint, nil)
+func (s *controlHandlerSuite) TestSerialFetchFailsTheReplyNamesWhatFailedAndTheLogKeepsTheSteps() {
+	// The session resolves; the fetch at its endpoint fails. The reply names what failed. The
+	// daemon log keeps the fetch's steps and the ARN. Neither carries the endpoint's query.
+	closing := testsupport.NewSessionMockWSS(s.T(), testsupport.SessionMockConfig{})
+	closing.CloseNewConnections(1008, "Device Connect is not supported on this device")
+	refusing := testsupport.NewSessionMockWSS(s.T(), testsupport.SessionMockConfig{RefuseNewSessions: -1})
+	cases := []struct {
+		name     string
+		endpoint string
+		cause    string
+		logged   string
+	}{
+		{name: "nothing listens at the endpoint", endpoint: testsupport.PresignedUnreachableEndpoint,
+			cause:  "cannot connect to Device Farm at 127.0.0.1:1: dial tcp 127.0.0.1:1: connect: connection refused",
+			logged: "fetch the device serial: " + testsupport.ScrubbedDialText + "adb: dial tcp 127.0.0.1:1"},
+		{name: "the service closes with a reason", endpoint: closing.URL,
+			cause:  "Device Farm refused the connection to the device: Device Connect is not supported on this device (close code 1008)",
+			logged: "fetch the device serial: read the devices reply: websocket closed by the peer: code 1008"},
+		{name: "the server refuses the session", endpoint: refusing.URL,
+			cause:  "Device Farm refused the connection to the device: " + testsupport.NewSessionRefusalReason,
+			logged: "fetch the device serial: the remote access service refused the session: " + testsupport.NewSessionRefusalReason},
+	}
+	for _, testCase := range cases {
+		s.Run(testCase.name, func() {
+			s.client.set(testCase.endpoint, nil)
+			logs := &lockedBuffer{}
+			s.mgr.logger = slog.New(slog.NewTextHandler(logs, nil))
 
-	resp := s.handler(addReq(testSessionArnOne))
+			resp := s.handler(addReq(testSessionArnOne))
 
-	s.False(resp.OK, "a failed serial fetch must fail the add")
-	s.Contains(resp.Error, "fetch the device serial")
-	_, present := s.device.Current()
-	s.False(present, "nothing must be attached when the serial fetch fails")
+			s.False(resp.OK, "a failed serial fetch must fail the add")
+			s.Equal(testCase.cause, resp.Error)
+			s.Empty(resp.Fixes)
+			s.Contains(logs.String(), testCase.logged)
+			s.Contains(logs.String(), "arn="+testSessionArnOne)
+			for _, sink := range []string{resp.Error, logs.String()} {
+				s.NotContains(sink, testsupport.SignatureMarker)
+				s.NotContains(sink, "X-Amz-")
+			}
+			_, present := s.device.Current()
+			s.False(present, "nothing must be attached when the serial fetch fails")
+		})
+	}
 }
 
 func (s *controlHandlerSuite) TestSerialFetchMeetsTheSessionStoppingCloseAddFailsWithTheStoppingCauseAndItsFixApart() {
 	// The relay closes the fetch's websocket with the stopping code; its cause replaces the fetch's error.
 	s.mock.CloseNewConnections(4001, "remote access session is stopping")
+	logs := &lockedBuffer{}
+	s.mgr.logger = slog.New(slog.NewTextHandler(logs, nil))
 
 	resp := s.handler(addReq(testSessionArnOne))
 
 	s.False(resp.OK)
 	s.Equal("remote access session "+testSessionArnOne+" is stopping", resp.Error, "the cause carries no fix text")
 	s.Equal([]string{"start a new session and run '" + config.BinaryName + " device add --session-arn <new ARN>'"}, resp.Fixes)
+	s.Contains(logs.String(), "fetch the device serial: read the devices reply: websocket closed by the peer: code 4001",
+		"the log keeps the close as the fetch read it")
 	_, present := s.device.Current()
 	s.False(present, "nothing must be attached when the session is stopping")
 }
@@ -121,23 +158,6 @@ func (s *controlHandlerSuite) TestSerialFetchMeetsTheSessionStoppingCloseUnderAR
 	s.False(resp.OK)
 	s.Equal("remote access session "+testSessionArnTwo+" is stopping", resp.Error,
 		"the cause names the ARN the service returned")
-}
-
-func (s *controlHandlerSuite) TestSerialFetchFailsAtAPresignedEndpointAddErrorAndLogCarryNoCredential() {
-	// The fetch's error reaches the CLI and the daemon log; neither may carry the URL's query.
-	s.client.set(testsupport.PresignedUnreachableEndpoint, nil)
-	logs := &lockedBuffer{}
-	s.mgr.logger = slog.New(slog.NewTextHandler(logs, nil))
-
-	resp := s.handler(addReq(testSessionArnOne))
-
-	s.False(resp.OK)
-	for _, sink := range []string{resp.Error, logs.String()} {
-		s.Contains(sink, testsupport.ScrubbedDialText, "the dial must be named")
-		s.NotContains(sink, testsupport.SignatureMarker)
-		s.NotContains(sink, testsupport.SecurityTokenMarker)
-		s.NotContains(sink, "X-Amz-")
-	}
 }
 
 func (s *controlHandlerSuite) TestSerialFetchHangsAddFailsAtTheResolveTimeoutAndNothingAttached() {
@@ -155,7 +175,7 @@ func (s *controlHandlerSuite) TestSerialFetchHangsAddFailsAtTheResolveTimeoutAnd
 	resp := s.handler(addReq(testSessionArnOne))
 
 	s.False(resp.OK, "a hung fetch must fail the add")
-	s.Contains(resp.Error, "deadline exceeded")
+	s.Equal("the attach ran out of time before the device answered", resp.Error)
 	s.Less(time.Since(started), 2*time.Second, "the add must end at resolveTimeout, not at the reply timeout")
 	_, present := s.device.Current()
 	s.False(present)
@@ -180,11 +200,14 @@ func (s *controlHandlerSuite) TestResolutionFailsAddRejectedAndNothingAttached()
 	// RemoteAccessClient.GetSession returns an error. The error must surface as a
 	// failed add, never a nil-endpoint attach.
 	s.client.set("", errors.New("session not RUNNING"))
+	logs := &lockedBuffer{}
+	s.mgr.logger = slog.New(slog.NewTextHandler(logs, nil))
 
 	resp := s.handler(addReq(testSessionArnOne))
 
 	s.False(resp.OK, "a failed resolution must fail the add")
-	s.Contains(resp.Error, "session not RUNNING")
+	s.Equal("session not RUNNING", resp.Error, "the reply is the session error alone")
+	s.Contains(logs.String(), "resolve session: session not RUNNING", "the log names the step")
 	_, present := s.device.Current()
 	s.False(present, "nothing must be attached when resolution fails")
 }
@@ -395,7 +418,7 @@ func (s *controlHandlerSuite) TestFailedResolveWithAKnownRemedyCarriesItsFixApar
 			resp := s.handler(addReq(testSessionArnOne))
 
 			s.False(resp.OK)
-			s.Equal("resolve session: "+testCase.failure.Error(), resp.Error, "the cause carries no fix text")
+			s.Equal(testCase.failure.Error(), resp.Error, "the cause carries no step and no fix text")
 			s.Equal([]string{testCase.fix}, resp.Fixes)
 		})
 	}

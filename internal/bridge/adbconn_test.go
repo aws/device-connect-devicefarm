@@ -140,7 +140,7 @@ func TestGivenAV1FrameWhenConsumedAsTheFirstServerFrameThenTheSessionFailsWithEr
 	conn, err := firstServerFrameVerdict(t, decodeHex(t, frameVector(t, "v1-magic-new-frame").Hex))
 
 	require.ErrorIs(t, err, errNotControlFrame)
-	assert.ErrorContains(t, err, "wire version 0x00", "the error names the peer's version")
+	assert.ErrorContains(t, err, "wire protocol 0x00", "the error names the peer's version")
 	assert.Empty(t, conn.sessionUUID(), "no session may be latched from a frame this client cannot read")
 }
 

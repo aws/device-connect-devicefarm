@@ -530,7 +530,7 @@ func TestGivenATakenSocketWhenTheServerClosesItBeforeTheFirstReplyThenTheConnect
 		open  func(t *testing.T, device *ActiveDevice) net.Conn
 		reply string
 	}{
-		{name: "a selected local connection", reply: "FAIL" + string(framed(`the server closed the connection: code 1000, reason ""`)),
+		{name: "a selected local connection", reply: "FAIL" + string(framed("Device Farm closed the connection to the device (close code 1000)")),
 			open: func(t *testing.T, device *ActiveDevice) net.Conn {
 				proxyAddress, _ := runProxy(t, device, fastPolicy())
 				client := dialClient(t, proxyAddress)

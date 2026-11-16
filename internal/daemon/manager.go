@@ -529,7 +529,9 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 			defer cancelResolve()
 			resolved, storedARN, err := m.resolveForAttach(resolveCtx, req.ARN)
 			if err != nil {
-				m.logger.Warn("failed to attach the device on add", "error", err, "arn", req.ARN)
+				// The log names the step; the reply gets the session error alone.
+				m.logger.Warn("failed to attach the device on add",
+					"error", fmt.Errorf("resolve session: %w", err), "arn", req.ARN)
 				if fix := m.addFix(err, req.ARN); fix != "" {
 					err = failure.WithFix(err, fix)
 				}
@@ -542,13 +544,10 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 			}
 			serial, err := dialer.FetchDeviceSerial(resolveCtx, resolved.Endpoint)
 			if err != nil {
-				err = fmt.Errorf(wording.RefusalFetchSerialFormat, err)
-				// The relay's session-stopping close: its cause and fix replace the fetch's error.
-				if bridge.IsSessionStopping(err) {
-					err = sessionStoppingError(storedARN)
-				}
-				m.logger.Warn("failed to attach the device on add", "error", err, "arn", storedARN)
-				return refusedReply(err)
+				// The log keeps the fetch's steps; the reply gets the sorted cause.
+				m.logger.Warn("failed to attach the device on add",
+					"error", fmt.Errorf("fetch the device serial: %w", err), "arn", storedARN)
+				return refusedReply(serialFetchFailure(err, storedARN))
 			}
 			startedAt, expiresAt := m.readSessionTimes(resolveCtx, dialer, resolved)
 			// Control commands are serialized on the inline accept loop and nothing
@@ -659,7 +658,7 @@ func (m *DaemonManager) resolveForAttach(ctx context.Context,
 	typedARN string) (session.RemoteAccessInfo, string, error) {
 	resolved, err := m.remoteAccessClient.GetSession(ctx, typedARN)
 	if err != nil {
-		return session.RemoteAccessInfo{}, "", fmt.Errorf(wording.RefusalResolveSessionFormat, err)
+		return session.RemoteAccessInfo{}, "", err
 	}
 	askedARN := typedARN
 	if resolved.ARN != "" && resolved.ARN != typedARN {
@@ -667,7 +666,7 @@ func (m *DaemonManager) resolveForAttach(ctx context.Context,
 		m.logger.Info("the service names this session by another ARN; resolving once more",
 			"typed", typedARN, "returned", askedARN)
 		if resolved, err = m.remoteAccessClient.GetSession(ctx, askedARN); err != nil {
-			return session.RemoteAccessInfo{}, "", fmt.Errorf(wording.RefusalResolveSessionFormat, err)
+			return session.RemoteAccessInfo{}, "", err
 		}
 	}
 	return resolved, resolved.ReturnedARN(askedARN), nil
@@ -717,6 +716,16 @@ func (m *DaemonManager) addFix(err error, sessionARN string) string {
 		return wording.FixWaitForEndpoint
 	}
 	return ""
+}
+
+// serialFetchFailure words a failed serial fetch for the add's reply. The session-stopping close
+// carries its fix.
+func serialFetchFailure(err error, sessionARN string) error {
+	failed := bridge.SortConnectionError(err, sessionARN)
+	if failed.Kind == bridge.FailureSessionStopping {
+		return sessionStoppingError(sessionARN)
+	}
+	return errors.New(failed.Cause)
 }
 
 // sessionStoppingError words the relay's session-stopping close. The fix is apart, for a refused add.

@@ -330,13 +330,14 @@ func TestGivenADialInFlightWhenTheUserRemovesTheDeviceThenTheClientClosesWithZer
 func TestGivenAParkedSocketWhoseLateDialFailsWhenClassifiedThenItIsARefusedOpening(t *testing.T) {
 	// The taken socket's first send fails and its fresh dial fails too: the dial failure sits behind
 	// two wraps, where the client's text and the lookup must still find it.
-	lateDial := &dialFailure{cause: fmt.Errorf("websocket dial wss://127.0.0.1:1 route adb: %w",
-		errors.New("dial tcp 127.0.0.1:1: connect: connection refused"))}
+	lateDial := &dialFailure{cause: &dialError{host: "127.0.0.1:1", route: RouteAdb,
+		cause: errors.New("dial tcp 127.0.0.1:1: connect: connection refused")}}
 	err := fmt.Errorf("send the client's request: %w", fmt.Errorf("send on the parked websocket: %w; dial a fresh one: %w",
 		io.ErrClosedPipe, lateDial))
 
 	assert.True(t, isRefusedOpening(err))
-	assert.Equal(t, "the bridge could not reach the device: dial tcp 127.0.0.1:1: connect: connection refused", refusalText(err))
+	assert.Equal(t, "the bridge could not reach the device: dial tcp 127.0.0.1:1: connect: connection refused",
+		SortConnectionError(err, testDeviceARN).refusalText())
 	assert.False(t, isRefusedOpening(io.ErrClosedPipe), "a failure of the exchange asks nothing")
 }
 
@@ -468,9 +469,14 @@ func TestGivenADeviceStreamWhoseWebsocketDiesWhenTheResumeIsRefusedThenTheLookup
 }
 
 func TestGivenRefusalErrorsWhenWordedForAdbThenTheServersReasonOrTheDialErrorFollowsTheLead(t *testing.T) {
+	refused := fmt.Errorf("open the session: %w", &sessionRefusal{reason: "device is busy"})
 	assert.Equal(t, "the device connection was refused: device is busy",
-		refusalText(fmt.Errorf("open the session: %w", &sessionRefusal{reason: "device is busy"})),
-		"the server's reason alone, not the wraps around it")
-	assert.Equal(t, "the bridge could not reach the device: dial tcp: connection refused",
-		refusalText(&dialFailure{cause: errors.New("dial tcp: connection refused")}), "a bare cause stands as is")
+		SortConnectionError(refused, testDeviceARN).refusalText(), "the server's reason alone, not the wraps around it")
+	otherScheme := &dialFailure{cause: &schemeError{scheme: "ws"}}
+	assert.Equal(t, `the bridge could not reach the device: only wss endpoints are supported for connections to devices: "ws"`,
+		SortConnectionError(otherScheme, testDeviceARN).refusalText(), "a refusal before the dial stands whole")
+	upgradeRefused := &dialFailure{cause: &dialError{host: "relay.example", route: RouteAdb, cause: ErrUpgradeRefused}}
+	assert.Equal(t, "the bridge could not reach the device: Device Farm rejected the connection request: the session may "+
+		"have ended, its address may have expired, or the session ARN may belong to another account",
+		SortConnectionError(upgradeRefused, testDeviceARN).refusalText(), "a refused upgrade names its possible causes")
 }
