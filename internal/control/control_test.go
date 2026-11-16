@@ -17,6 +17,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// testProgramVersion is the version the test servers stamp on their replies.
+const testProgramVersion = "v9.8.7"
+
 // noopLogger discards all log output so tests emit no noise.
 func noopLogger() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
@@ -36,7 +39,7 @@ func shortConnDeadline(t *testing.T, d time.Duration) {
 func startServer(t *testing.T, handler Handler) string {
 	t.Helper()
 	socketPath := filepath.Join(t.TempDir(), "control.sock")
-	server := NewLocalSocketServer(socketPath, noopLogger())
+	server := NewLocalSocketServer(socketPath, testProgramVersion, noopLogger())
 	require.NoError(t, server.Listen())
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -135,12 +138,65 @@ func TestGivenMalformedRequestWhenServedThenErrorResponseAndLoopSurvives(t *test
 	require.NoError(t, json.NewDecoder(bad).Decode(&resp))
 	assert.Equal(t, Response{OK: false, Error: "malformed request", Fixes: []string{"Restart the bridge: run " +
 		"'devicefarm-connect bridge start' with the options that you started it with. If the error remains, " +
-		"install the latest devicefarm-connect."}}, resp)
+		"install the latest devicefarm-connect."}, ProgramVersion: testProgramVersion}, resp,
+		"the server builds this reply itself and still stamps its version")
 
 	// And the loop must still serve a well-formed follow-up command.
 	ok, err := NewDaemonClient(socketPath).Send(Request{Op: OpStatus})
 	require.NoError(t, err)
 	assert.True(t, ok.OK)
+}
+
+func TestGivenAHandlersReplyWhenTheServerWritesItThenItCarriesTheServersProgramVersion(t *testing.T) {
+	socketPath := startServer(t, func(Request) Response {
+		return Response{OK: false, Error: "refused", Fixes: []string{"Run this."}, ProgramVersion: "v0.0.1"}
+	})
+
+	resp, err := NewDaemonClient(socketPath).Send(Request{Op: OpStatus})
+
+	require.NoError(t, err)
+	assert.Equal(t, Response{OK: false, Error: "refused", Fixes: []string{"Run this."}, ProgramVersion: testProgramVersion}, resp,
+		"the server stamps its version over a handler's value")
+}
+
+func TestGivenARequestWithAFieldThisBridgeDoesNotKnowWhenServedThenTheHandlerAnswersIt(t *testing.T) {
+	// A later command can add request fields. An older bridge reads the fields it knows.
+	socketPath := startServer(t, func(request Request) Response { return Response{OK: request.Op == OpStatus} })
+	conn, err := net.Dial("unix", socketPath)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	_, err = conn.Write([]byte(`{"op":"status","aLaterField":{"count":1}}` + "\n"))
+	require.NoError(t, err)
+	var resp Response
+	require.NoError(t, json.NewDecoder(conn).Decode(&resp))
+
+	assert.Equal(t, Response{OK: true, ProgramVersion: testProgramVersion}, resp)
+}
+
+func TestGivenAReplyWithAFieldThisCommandDoesNotKnowWhenTheClientReadsItThenTheKnownFieldsDecode(t *testing.T) {
+	// A later bridge can add reply fields. An older command reads the fields it knows and
+	// ignores the rest.
+	socketPath := filepath.Join(t.TempDir(), "control.sock")
+	listener, err := net.Listen("unix", socketPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { listener.Close() })
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		var request Request
+		if json.NewDecoder(conn).Decode(&request) == nil {
+			_, _ = conn.Write([]byte(`{"ok":false,"error":"refused","aLaterField":{"count":1},"programVersion":"v2.0.0"}` + "\n"))
+		}
+	}()
+
+	resp, err := NewDaemonClient(socketPath).Send(Request{Op: OpStatus})
+
+	require.NoError(t, err)
+	assert.Equal(t, Response{OK: false, Error: "refused", ProgramVersion: "v2.0.0"}, resp)
 }
 
 func TestGivenBoundControlSocketWhenInspectedThenOnlyTheOwnerCanReachIt(t *testing.T) {
@@ -162,7 +218,7 @@ func TestGivenSocketModeCannotBeSetWhenListenedThenErrorsAndLeavesNoSocket(t *te
 	t.Cleanup(func() { chmod = original })
 	chmod = func(string, os.FileMode) error { return assert.AnError }
 	socketPath := filepath.Join(t.TempDir(), "control.sock")
-	server := NewLocalSocketServer(socketPath, noopLogger())
+	server := NewLocalSocketServer(socketPath, testProgramVersion, noopLogger())
 
 	err := server.Listen()
 
@@ -174,7 +230,7 @@ func TestGivenSocketModeCannotBeSetWhenListenedThenErrorsAndLeavesNoSocket(t *te
 func TestGivenSocketPathInMissingDirWhenListenedThenErrors(t *testing.T) {
 	// A socket path under a directory that does not exist cannot be bound; Listen
 	// must surface that rather than panic.
-	server := NewLocalSocketServer(filepath.Join(t.TempDir(), "no-such-dir", "control.sock"), noopLogger())
+	server := NewLocalSocketServer(filepath.Join(t.TempDir(), "no-such-dir", "control.sock"), testProgramVersion, noopLogger())
 
 	require.Error(t, server.Listen())
 }
@@ -219,7 +275,7 @@ func TestGivenBoundServerWhenRelistenedAfterStaleFileThenSucceeds(t *testing.T) 
 	socketPath := filepath.Join(t.TempDir(), "control.sock")
 	leaveStaleSocketFile(t, socketPath)
 
-	server := NewLocalSocketServer(socketPath, noopLogger())
+	server := NewLocalSocketServer(socketPath, testProgramVersion, noopLogger())
 	require.NoError(t, server.Listen(), "Listen should clear a stale socket and bind")
 	t.Cleanup(func() { assert.NoError(t, server.Close()) })
 }
@@ -227,7 +283,7 @@ func TestGivenBoundServerWhenRelistenedAfterStaleFileThenSucceeds(t *testing.T) 
 func TestGivenListeningServerWhenClosedThenSocketFileRemoved(t *testing.T) {
 	// Close must unlink the socket file so a restart binds cleanly.
 	socketPath := filepath.Join(t.TempDir(), "control.sock")
-	server := NewLocalSocketServer(socketPath, noopLogger())
+	server := NewLocalSocketServer(socketPath, testProgramVersion, noopLogger())
 	require.NoError(t, server.Listen())
 
 	require.NoError(t, server.Close())
@@ -238,7 +294,7 @@ func TestGivenListeningServerWhenClosedThenSocketFileRemoved(t *testing.T) {
 
 func TestGivenServerNeverListenedWhenClosedThenReturnsNil(t *testing.T) {
 	// Close before Listen has nothing to release.
-	server := NewLocalSocketServer(filepath.Join(t.TempDir(), "control.sock"), noopLogger())
+	server := NewLocalSocketServer(filepath.Join(t.TempDir(), "control.sock"), testProgramVersion, noopLogger())
 
 	require.NoError(t, server.Close())
 }

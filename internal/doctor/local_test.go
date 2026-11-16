@@ -29,6 +29,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/daemon"
 	"github.com/aws/device-connect-devicefarm/internal/forward"
 	"github.com/aws/device-connect-devicefarm/internal/session"
+	"github.com/aws/device-connect-devicefarm/internal/version"
 	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
@@ -59,15 +60,23 @@ func fakeRuntimePaths(t *testing.T) daemon.Paths {
 	return paths
 }
 
-// fakeDaemon answers every status request with reply on a real control socket at fakeRuntimePaths.
+// fakeDaemon answers every status request with reply on a real control socket at
+// fakeRuntimePaths, as a bridge of this program's version.
 func fakeDaemon(t *testing.T, reply control.Response) daemon.Paths {
+	t.Helper()
+	return fakeDaemonOfProgramVersion(t, version.String(), reply)
+}
+
+// fakeDaemonOfProgramVersion is fakeDaemon for a bridge that reports programVersion; "" reports none,
+// as a bridge from before the field does.
+func fakeDaemonOfProgramVersion(t *testing.T, programVersion string, reply control.Response) daemon.Paths {
 	t.Helper()
 	paths := fakeRuntimePaths(t)
 	handler := func(request control.Request) control.Response {
 		assert.Equal(t, control.OpStatus, request.Op, "the doctor must only ask for status")
 		return reply
 	}
-	server := control.NewLocalSocketServer(paths.ControlSocket, slog.New(slog.DiscardHandler))
+	server := control.NewLocalSocketServer(paths.ControlSocket, programVersion, slog.New(slog.DiscardHandler))
 	require.NoError(t, server.Listen())
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -322,7 +331,7 @@ func TestGivenARunningDaemonWhenCheckedThenTheRowReportsItsStatusAndReverseState
 				assert.Empty(t, result.Hint)
 			}
 			reply, pid := state.daemon()
-			assert.Equal(t, tc.reply, reply)
+			assert.Equal(t, ofThisProgramVersion(tc.reply), reply)
 			assert.Equal(t, os.Getpid(), pid)
 		})
 	}
@@ -336,6 +345,12 @@ const (
 	endedReason = "remote access session " + testSessionARN + " has ended (COMPLETED); " +
 		"start a new remote access session, then run 'devicefarm-connect device add --session-arn <new ARN>'"
 )
+
+// ofThisProgramVersion is reply with this program's version, as the control server stamps it.
+func ofThisProgramVersion(reply control.Response) control.Response {
+	reply.ProgramVersion = version.String()
+	return reply
+}
 
 // attachedReply is a status reply holding one device on sessionARN.
 func attachedReply(sessionARN string, reverse bool) control.Response {
@@ -370,6 +385,58 @@ func TestGivenADetachReasonWhenTheBridgeIsCheckedThenTheRowWarnsAndTheHintQuotes
 	}
 }
 
+func TestGivenABridgeOfAnotherProgramVersionWhenCheckedThenTheRowWarnsFirstWithTheRestart(t *testing.T) {
+	const otherVersion = "v0.0.1"
+	command := version.String()
+	// A reply to which every later WARN applies: a detach reason, the asked session not attached, reverse off.
+	detached := control.Response{OK: true, Port: 6000, LastDetachReason: endedReason}
+	hintLead := "the bridge runs another version of devicefarm-connect than this command, so a command can fail. Run '"
+	hintTail := "' to start it again with this command's version of devicefarm-connect. The restart drops an attached device with " +
+		"its forward rules and open adb connections, and its reverse rules no longer reach this machine; the device comes back " +
+		"when the command names its session."
+	caveat := " '--allow-adb-reverse' lets the device open connections to this machine, so use it only with a device you trust; " +
+		"a public physical device can run software you do not control."
+	tests := []struct {
+		name                 string
+		bridgeProgramVersion string
+		askedARN             string
+		reply                control.Response
+		wantTail             string
+		wantHint             string
+	}{
+		{name: "no version reported, a session, reverse on", askedARN: testSessionARN, reply: attachedReply(testSessionARN, true),
+			wantTail: "device Pixel 9 (OS 16), session " + testSessionARN + "; reverse on; the bridge runs an earlier version of " +
+				"devicefarm-connect than this command (" + command + ")",
+			wantHint: hintLead + "devicefarm-connect bridge start --port 5037 --allow-adb-reverse --session-arn " + testSessionARN + hintTail + caveat},
+		{name: "no version reported, a session, reverse off", reply: attachedReply(testSessionARN, false),
+			wantTail: "device Pixel 9 (OS 16), session " + testSessionARN + "; reverse off; the bridge runs an earlier version of " +
+				"devicefarm-connect than this command (" + command + ")",
+			wantHint: hintLead + "devicefarm-connect bridge start --port 5037 --session-arn " + testSessionARN + hintTail},
+		{name: "another version, no session, reverse on", bridgeProgramVersion: otherVersion,
+			reply: control.Response{OK: true, Port: 6000, ReverseEnabled: true},
+			wantTail: "no device; reverse on; the bridge runs another version of devicefarm-connect (" + otherVersion +
+				") than this command (" + command + ")",
+			wantHint: hintLead + "devicefarm-connect bridge start --port 6000 --allow-adb-reverse" + hintTail + caveat},
+		{name: "another version, every later finding", bridgeProgramVersion: otherVersion, askedARN: testSessionARN, reply: detached,
+			wantTail: "no device; reverse off; the bridge runs another version of devicefarm-connect (" + otherVersion +
+				") than this command (" + command + "); the bridge detached the last device; session " + testSessionARN + " is not attached",
+			wantHint: hintLead + "devicefarm-connect bridge start --port 6000" + hintTail},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &runState{paths: fakeDaemonOfProgramVersion(t, tc.bridgeProgramVersion, tc.reply)}
+			inputs := localInputs(t)
+			inputs.SessionARN = tc.askedARN
+
+			result := runLocal(t, inputs, state, checkDaemon)
+
+			assert.Equal(t, Result{Status: Warn, Hint: tc.wantHint,
+				Summary: fmt.Sprintf("running (PID %d) on port %d; %s", os.Getpid(), tc.reply.Port, tc.wantTail)}, result,
+				"the version outranks the detach, the asked session and reverse off")
+		})
+	}
+}
+
 func TestGivenAnAskedSessionTheBridgeDoesNotHoldWhenCheckedThenTheRowWarnsWithTheAddCommand(t *testing.T) {
 	notAttached := "session " + testSessionARN + " is not attached to the bridge, so adb cannot reach its device. "
 	add := "'devicefarm-connect device add --session-arn " + testSessionARN + "'"
@@ -393,7 +460,7 @@ func TestGivenAnAskedSessionTheBridgeDoesNotHoldWhenCheckedThenTheRowWarnsWithTh
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result := bridgeRowResult(testSessionARN, testSessionARN, tc.reply, 4242)
+			result := bridgeRowResult(testSessionARN, testSessionARN, ofThisProgramVersion(tc.reply), 4242)
 
 			assert.Equal(t, Result{Status: Warn, Hint: tc.wantHint,
 				Summary: "running (PID 4242) on port 5037; " + tc.wantTail + "; session " + testSessionARN + " is not attached"}, result,
@@ -553,11 +620,13 @@ func TestGivenTooLittleOfItsTimeLeftForTheLookupWhenTheBridgeIsCheckedThenTheTyp
 
 func TestGivenAReasonOrAnAskedSessionWithAControlCharacterWhenRenderedThenTheRowStaysOnOneLine(t *testing.T) {
 	forged := "gone\n[PASS] forged\x1b[0m"
-	detached := bridgeRowResult(forged, forged, control.Response{OK: true, Port: 5037, LastDetachReason: forged}, 4242)
-	notAttached := bridgeRowResult(forged, forged, control.Response{OK: true, Port: 5037, DeviceLabel: forged, ARN: otherSessionARN}, 4242)
+	detached := bridgeRowResult(forged, forged, ofThisProgramVersion(control.Response{OK: true, Port: 5037, LastDetachReason: forged}), 4242)
+	notAttached := bridgeRowResult(forged, forged,
+		ofThisProgramVersion(control.Response{OK: true, Port: 5037, DeviceLabel: forged, ARN: otherSessionARN}), 4242)
+	otherVersion := bridgeRowResult("", "", control.Response{OK: true, Port: 5037, ProgramVersion: forged}, 4242)
 
 	for name, text := range map[string]string{"detach summary": detached.Summary, "detach hint": detached.Hint,
-		"add summary": notAttached.Summary, "add hint": notAttached.Hint} {
+		"add summary": notAttached.Summary, "add hint": notAttached.Hint, "version summary": otherVersion.Summary} {
 		assert.NotContains(t, text, "\n", name)
 		assert.NotContains(t, text, "\x1b", name)
 		assert.Contains(t, text, `gone\n[PASS] forged\x1b[0m`, name)

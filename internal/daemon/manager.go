@@ -24,6 +24,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/failure"
 	"github.com/aws/device-connect-devicefarm/internal/session"
+	"github.com/aws/device-connect-devicefarm/internal/version"
 	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
@@ -401,7 +402,7 @@ func (m *DaemonManager) RunForeground(ctx context.Context) error {
 	}
 	defer server.Close()
 
-	controlServer := control.NewLocalSocketServer(m.paths.ControlSocket, m.logger)
+	controlServer := control.NewLocalSocketServer(m.paths.ControlSocket, version.String(), m.logger)
 	if err := controlServer.Listen(); err != nil {
 		return err
 	}

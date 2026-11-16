@@ -30,6 +30,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/session"
 	"github.com/aws/device-connect-devicefarm/internal/testsupport"
+	"github.com/aws/device-connect-devicefarm/internal/version"
 )
 
 // testTimeout bounds every blocking wait so a hung test fails instead of stalling the run.
@@ -126,7 +127,7 @@ func TestHelperProcess(t *testing.T) {
 	}
 	// Keeps pidFile reachable through the park, so the GC cannot close the lock.
 	defer pidFile.Remove()
-	controlServer := control.NewLocalSocketServer(os.Getenv(helperControlSocketEnv), nil)
+	controlServer := control.NewLocalSocketServer(os.Getenv(helperControlSocketEnv), version.String(), nil)
 	if err := controlServer.Listen(); err != nil {
 		t.Fatal(err)
 	}
@@ -987,6 +988,7 @@ func TestGivenServingDaemonWhenAddAndShutdownSentOverControlSocketThenAttachesAn
 	require.NoError(t, err)
 	require.True(t, addResp.OK, "add over the live control socket must succeed: %s", addResp.Error)
 	assert.Equal(t, "Pixel 10 (OS 17)", addResp.DeviceLabel)
+	assert.Equal(t, version.String(), addResp.ProgramVersion, "the daemon's control server stamps the daemon's own version")
 	assert.Equal(t, cfg.ListenPort, addResp.Port)
 
 	shutdownResp, err := client.Send(control.Request{Op: control.OpShutdown})

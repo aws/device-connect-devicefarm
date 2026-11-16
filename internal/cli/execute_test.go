@@ -18,6 +18,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/daemon"
 	"github.com/aws/device-connect-devicefarm/internal/failure"
+	"github.com/aws/device-connect-devicefarm/internal/version"
 )
 
 // runExecute runs the command tree through execute against the current runtime dir:
@@ -113,12 +114,13 @@ func TestGivenCommandLineMistakesWhenExecutedThenEachNamesTheCommandsHelp(t *tes
 	}
 }
 
-// otherVersionFix is the command's own fix for a refusal that carries none.
+// otherVersionFix is the command's own fix for a refusal with no fix, unless the bridge reports
+// this program's version.
 const otherVersionFix = "The running bridge is another version of devicefarm-connect than this command. Restart it: run " +
 	"'devicefarm-connect bridge start' with the options that you started it with. If the error remains, install the latest " +
 	"devicefarm-connect, then run 'devicefarm-connect doctor'. If the doctor does not find the cause, contact AWS Support."
 
-func TestGivenTheBridgeRefusesWhenEachCommandExecutesThenItPrintsTheBridgesFixOrTheRestartFixForAReplyWithNone(t *testing.T) {
+func TestGivenTheBridgeRefusesWhenEachCommandExecutesThenItPrintsTheBridgesFixOrTheRestartFixForAnotherVersionWithNone(t *testing.T) {
 	const sessionARN = "arn:aws:devicefarm:us-west-2:1:session:a/b/0"
 	commands := []struct {
 		args    []string
@@ -129,29 +131,38 @@ func TestGivenTheBridgeRefusesWhenEachCommandExecutesThenItPrintsTheBridgesFixOr
 		{[]string{"device", "list"}, "could not list the devices"},
 		{[]string{"device", "remove"}, "could not detach the device"},
 	}
+	const noVersion, otherVersion = "", "v0.0.1"
 	replies := []struct {
-		name    string
-		fixes   []string
-		fixLine string
+		name           string
+		programVersion string
+		fixes          []string
+		// fixLines is every fix line the command prints, or "" for none.
+		fixLines string
 	}{
-		{"a reply with a fix", []string{"Run this."}, "Run this."},
-		{"a reply with no fix, as an older bridge sends", nil, otherVersionFix},
+		{"a fix from a bridge of this version", version.String(), []string{"Run this."}, "  fix:   Run this.\n"},
+		{"a fix from a bridge that reports no version", noVersion, []string{"Run this."}, "  fix:   Run this.\n"},
+		{"a fix from a bridge of another version", otherVersion, []string{"Run this."}, "  fix:   Run this.\n"},
+		{"no fix from a bridge that reports no version, as an older bridge", noVersion, nil, "  fix:   " + otherVersionFix + "\n"},
+		{"no fix from a bridge of another version", otherVersion, nil, "  fix:   " + otherVersionFix + "\n"},
+		{"no fix from a bridge of this version", version.String(), nil, ""},
 	}
 	for _, command := range commands {
 		for _, reply := range replies {
 			t.Run(strings.Join(command.args[:2], " ")+", "+reply.name, func(t *testing.T) {
-				fakeRestart(t, func(control.Request) control.Response {
+				serveControlOfProgramVersion(t, fakeRuntimePaths(t), reply.programVersion, func(control.Request) control.Response {
 					return control.Response{OK: false, Error: "refused", Fixes: reply.fixes}
-				}, daemon.StopResult{})
+				})
+				// bridge start --session-arn restarts the running bridge before its add.
+				fakeBridgeStop(t, daemon.StopResult{}, nil)
+				countingBridgeStart(t)
 
 				code, out := runExecute(t, command.args...)
 
 				assert.Equal(t, 1, code)
 				// bridge start prints its start line first.
 				assert.True(t, strings.HasSuffix(out, config.BinaryName+": error: "+command.problem+"\n"+
-					"  cause: refused\n"+
-					"  fix:   "+reply.fixLine+"\n"), out)
-				assert.Equal(t, 1, strings.Count(out, "  fix:   "), out)
+					"  cause: refused\n"+reply.fixLines), out)
+				assert.Equal(t, strings.Count(reply.fixLines, "  fix:   "), strings.Count(out, "  fix:   "), out)
 			})
 		}
 	}
