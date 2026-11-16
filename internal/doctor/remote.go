@@ -245,7 +245,7 @@ func checkRelaySessionOpens(ctx context.Context, inputs Inputs, state *runState)
 	defer cancel()
 	sessionUUID, err := inputs.Dialer.ProbeSession(probeCtx, state.endpoint)
 	if err != nil {
-		return Result{Status: Fail, Summary: wording.DoctorDetailAdbSessionFailedLead + err.Error(), Hint: relayHint(inputs)}
+		return Result{Status: Fail, Summary: wording.DoctorDetailAdbSessionFailedLead + err.Error(), Hint: relayHint(inputs, err)}
 	}
 	state.sessionUUID = sessionUUID
 	return Result{Status: Pass, Summary: fmt.Sprintf(wording.DoctorDetailAdbSessionOpenedFormat, sessionUUID)}
@@ -282,7 +282,7 @@ func checkReverseNotifier(ctx context.Context, inputs Inputs, state *runState) R
 	case errors.Is(err, bridge.ErrNotifierSlotTaken):
 		return Result{Status: Fail, Summary: wording.DoctorDetailReverseInUse, Hint: slotHeldHint(inputs)}
 	case err != nil:
-		return Result{Status: Fail, Summary: wording.DoctorDetailReverseUnavailableLead + err.Error(), Hint: relayHint(inputs)}
+		return Result{Status: Fail, Summary: wording.DoctorDetailReverseUnavailableLead + err.Error(), Hint: relayHint(inputs, err)}
 	}
 	return Result{Status: Pass, Summary: wording.DoctorDetailReverseAvailable}
 }
@@ -298,10 +298,15 @@ func withProbeBudget(ctx context.Context) (context.Context, context.CancelFunc) 
 	return context.WithDeadline(ctx, deadline.Add(-probeMargin))
 }
 
-// relayHint is the one hint for a failed relay probe; the summary names the failure. With a
-// proxy set, it adds that the websocket connection ignores it.
-func relayHint(inputs Inputs) string {
-	hint := fmt.Sprintf(wording.DoctorHintAdbConnectionFailedFormat, doctorRerun(inputs))
+// relayHint is the hint for a failed relay probe; the summary names the failure. For a failed
+// dial it names the host and the port to allow on the network. For any other failure it says to
+// rerun once. With a proxy set, it adds that the websocket connection ignores it.
+func relayHint(inputs Inputs, probeErr error) string {
+	rerun := doctorRerun(inputs)
+	hint := fmt.Sprintf(wording.DoctorHintAdbConnectionFailedFormat, rerun)
+	if host, port := bridge.SortConnectionError(probeErr, inputs.SessionARN).DialedHostPort(); host != "" {
+		hint = fmt.Sprintf(wording.DoctorHintWebSocketFailedFormat, safeValue(host), port, rerun)
+	}
 	if os.Getenv("HTTPS_PROXY") != "" || os.Getenv("https_proxy") != "" {
 		hint += " " + wording.DoctorHintProxyIgnored
 	}

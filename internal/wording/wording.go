@@ -278,8 +278,12 @@ const (
 	// Verbs: the session ARN, the doctor command.
 	FixRetryThenDoctorFormat = "Run " + DoctorDeviceAddCommandFormat + " again. If the error remains, run '%s'. " +
 		"If the doctor does not find the cause, contact AWS Support."
+	// Follows a sentence that names the host and the port.
+	FixAskNetworkAdministratorLead = "If a firewall or a proxy on your network blocks the connection, ask your network administrator " +
+		"to allow direct outbound WebSocket connections (wss) to that host and port"
 	// Verbs: the host and port of the session's address, the session ARN, the doctor command.
-	FixCheckReachFormat = "Check that this machine can reach %s on port %s, then " + DetachReattachLead + " %s' again. '%s' tests the connection."
+	FixCheckReachFormat = "Check that this machine can reach %s on TCP port %s. " + FixAskNetworkAdministratorLead + ". Then " +
+		DetachReattachLead + " %s' again. '%s' tests the connection."
 	// Verb: the restart.
 	FixInstallLatestFormat = "Install the latest " + BinaryName + ", then run %s."
 	FixMalformedRequest    = "Restart the bridge: run " + StartWithYourOptionsClause + ". If the error remains, install the latest " + BinaryName + "."
@@ -673,11 +677,15 @@ const (
 	DoctorDetailAdbSessionOpenedFormat = "adb session %s opened to the device"
 	DoctorDetailAdbSessionFailedLead   = "could not open an adb session to the device: "
 
-	// Also the adb reverse check's hint. Verb: the quoted rerun.
+	// A failed dial. Also the adb reverse check's hint. Verbs: the host and port of the session's address, the quoted rerun.
+	DoctorHintWebSocketFailedFormat = "this machine could not open a WebSocket connection (wss) to %s on TCP port %s, so adb cannot " +
+		"reach the device through the bridge. " + FixAskNetworkAdministratorLead + ", then rerun %s. If your network allows that " +
+		"connection and the error remains, contact AWS Support."
+	// Any other failure. Also the adb reverse check's hint. Verb: the quoted rerun.
 	DoctorHintAdbConnectionFailedFormat = "Device Farm or the device did not complete the adb connection, so an adb connection through the bridge " +
 		"would fail the same way. Rerun %s once; a second failure means the network path to Device Farm or the device itself " +
 		"is at fault, so check the session in the Device Farm console."
-	// Follows that hint when a proxy is set.
+	// Follows either hint when a proxy is set.
 	DoctorHintProxyIgnored = "'HTTPS_PROXY' is set, but the connection to the device does not use it, so no adb traffic gets " +
 		"through when this machine reaches the internet only through that proxy."
 )
