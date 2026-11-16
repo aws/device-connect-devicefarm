@@ -412,7 +412,8 @@ Run `devicefarm-connect <command> --help` to see the flags of a command.
   error: adb reverse is off for this client; restart it with --allow-adb-reverse
   ```
 
-  To turn reverse on, run `bridge stop`, then `bridge start --allow-adb-reverse` with your `--session-arn`.
+  To turn reverse on, run `bridge start --allow-adb-reverse` with your `--session-arn` and other flags. It
+  restarts the bridge.
 
 ## Platform support
 
@@ -472,8 +473,8 @@ build follows in a later release. If you build the Windows binary yourself:
 - **Credential scope.** The bridge needs only `devicefarm:GetRemoteAccessSession`. It uses the credentials
   it inherited at start and stores none. When they expire, the next refresh fails and the bridge detaches the
   device. `device list`, `bridge status` and every adb command the bridge refuses for want of a device then
-  say `the AWS credentials the bridge started with have expired`. Run `bridge stop`, then `bridge start` from
-  a shell with fresh credentials, then `device add` the session again.
+  say `the AWS credentials the bridge started with have expired`. Refresh the credentials, then run the
+  `bridge start` command that message quotes from that shell. It restarts the bridge and attaches the session again.
 - **`bridge stop` does not stop billing.** `bridge stop` and `device remove` act on your computer only. The
   remote access session keeps running, and keeps costing, until you stop it in Device Farm.
 

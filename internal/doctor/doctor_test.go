@@ -154,7 +154,7 @@ func TestGivenMixedResultsWhenWrittenAsTextThenOneLinePerRowPlusTheCountLine(t *
 			return Result{Status: Pass, Summary: "/run/user/1000/devicefarm-connect (socket path 41 bytes)"}
 		}},
 		constantCheck("local.daemon", Result{Status: Warn, Summary: "running (PID 42) on port 6000, not 5037",
-			Hint: "the running bridge listens on port 6000, not 5037. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 5037'."}),
+			Hint: "the running bridge listens on port 6000, not 5037. Run 'devicefarm-connect bridge start --port 5037'."}),
 		constantCheck("local.listen-port", Result{Status: Fail, Summary: "cannot bind 127.0.0.1:5037 because another program is listening on it",
 			Hint: "stop that program, then run 'devicefarm-connect bridge start --port 5037'"}),
 		constantCheck("relay.session", Result{Status: Pass, Summary: "unused"}, "local.listen-port"),
@@ -171,7 +171,7 @@ func TestGivenMixedResultsWhenWrittenAsTextThenOneLinePerRowPlusTheCountLine(t *
 	assert.Equal(t, []string{"local.listen-port"}, report.Rows[3].Needs)
 	assert.Equal(t, 1, report.Failed())
 	assert.Equal(t, "[PASS] local.runtime-dir: /run/user/1000/devicefarm-connect (socket path 41 bytes)\n"+
-		"[WARN] local.daemon: running (PID 42) on port 6000, not 5037; fix: the running bridge listens on port 6000, not 5037. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 5037'.\n"+
+		"[WARN] local.daemon: running (PID 42) on port 6000, not 5037; fix: the running bridge listens on port 6000, not 5037. Run 'devicefarm-connect bridge start --port 5037'.\n"+
 		"[FAIL] local.listen-port: cannot bind 127.0.0.1:5037 because another program is listening on it; fix: stop that program, then run 'devicefarm-connect bridge start --port 5037'\n"+
 		"[SKIP] relay.session: needs local.listen-port\n"+
 		"doctor: 1 passed, 1 warning, 1 failed, 1 skipped\n", out.String())
@@ -203,7 +203,7 @@ const (
 	fixtureSessionArn         = "arn:aws:devicefarm:us-west-2:123456789012:session:11111111-2222-3333-4444-555555555555"
 	fixtureNoSessionSkip      = "pass --session-arn to check the session, the device connection, and adb versions"
 	fixturePortHeldHint       = "an adb server is listening on 127.0.0.1:35477, so the bridge cannot bind it until that server stops. Run 'devicefarm-connect bridge start --port 35477': it stops that server first, as 'adb kill-server' would. If a program that restarts adb, such as Android Studio, takes the port back, start the bridge on another port with 'devicefarm-connect bridge start --port <n>' and point adb at it with 'adb -P <n>'."
-	fixtureReverseOffHint     = "the bridge runs with adb reverse off, so every 'adb reverse' fails. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 40775 --allow-adb-reverse --session-arn " + fixtureSessionArn + "' to start it again with reverse on. '--allow-adb-reverse' lets the device open connections to this machine, so use it only with a device you trust; a public physical device can run software you do not control."
+	fixtureReverseOffHint     = "the bridge runs with adb reverse off, so every 'adb reverse' fails. Run 'devicefarm-connect bridge start --port 40775 --allow-adb-reverse --session-arn " + fixtureSessionArn + "' to start it again with reverse on. '--allow-adb-reverse' lets the device open connections to this machine, so use it only with a device you trust; a public physical device can run software you do not control."
 	fixtureVersionSkewHint    = "the local adb is 1.0.39 and the remote adb server is 1.0.41, so every adb command fails: that adb tries to start its own adb server on the bridge's port and cannot. Install platform-tools whose adb is 1.0.41, such as platform-tools 37, or put such an adb first on PATH, then rerun 'devicefarm-connect doctor --session-arn " + fixtureSessionArn + " --port 37537'. Until then no adb command reaches the device. The remote adb server is not affected."
 	fixtureCredentialsSummary = `this shell has no usable AWS credentials: failed to refresh cached credentials, no EC2 IMDS role found, operation error ec2imds: GetMetadata, access disabled to EC2 IMDS via client option, or "AWS_EC2_METADATA_DISABLED" environment variable`
 	fixtureCredentialsHint    = "the AWS config did not load or its credential chain resolved nothing, so every Device Farm call fails. Set 'AWS_PROFILE' to a profile with Device Farm access, run 'aws sso login --profile <name>' for a profile that uses SSO, or export 'AWS_ACCESS_KEY_ID' and 'AWS_SECRET_ACCESS_KEY'. For more information, see https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-authentication.html"
@@ -344,7 +344,7 @@ doctor: 1 of 4 categories passed, 1 warning, 2 not checked
 What to do
 1. Local machine, bridge: the bridge runs with adb reverse off, so every
    'adb reverse' fails. Run
-   'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 40775 --allow-adb-reverse --session-arn arn:aws:devicefarm:us-west-2:123456789012:session:11111111-2222-3333-4444-555555555555'
+   'devicefarm-connect bridge start --port 40775 --allow-adb-reverse --session-arn arn:aws:devicefarm:us-west-2:123456789012:session:11111111-2222-3333-4444-555555555555'
    to start it again with reverse on. '--allow-adb-reverse' lets the device open
    connections to this machine, so use it only with a device you trust; a public
    physical device can run software you do not control.
@@ -568,7 +568,7 @@ func TestGivenMixedResultsWhenWrittenAsJSONThenOneCompactObjectCarriesEveryRow(t
 			Result: Result{Status: Pass, Summary: "working directory /run/user/1000/devicefarm-connect is writable"}, Elapsed: 1500 * time.Microsecond},
 		{ID: "local.daemon", Title: "bridge daemon", Category: CategoryLocal, Needs: []string{"local.runtime-dir"},
 			Result: Result{Status: Warn, Summary: "running (PID 42) on port 6000, not 5037",
-				Hint: "the running bridge listens on port 6000, not 5037. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 5037'."},
+				Hint: "the running bridge listens on port 6000, not 5037. Run 'devicefarm-connect bridge start --port 5037'."},
 			Elapsed: 20 * time.Millisecond},
 		{ID: "local.listen-port", Title: "listen port", Category: CategoryLocal, Needs: []string{"local.daemon"},
 			Result: Result{Status: Fail, Summary: "cannot bind 127.0.0.1:5037 because another program is listening on it", Hint: "stop that program, then run 'devicefarm-connect bridge start --port 5037'"}},
@@ -582,7 +582,7 @@ func TestGivenMixedResultsWhenWrittenAsJSONThenOneCompactObjectCarriesEveryRow(t
 	assert.Equal(t, `{"ok":false,"sessionArn":"arn:aws:devicefarm:us-west-2:123456789012:session:a/b/0",`+
 		`"checks":[`+
 		`{"id":"local.runtime-dir","title":"working directory","category":"local","status":"pass","summary":"working directory /run/user/1000/devicefarm-connect is writable","needs":[],"elapsedMs":1},`+
-		`{"id":"local.daemon","title":"bridge daemon","category":"local","status":"warn","summary":"running (PID 42) on port 6000, not 5037","hint":"the running bridge listens on port 6000, not 5037. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 5037'.","needs":["local.runtime-dir"],"elapsedMs":20},`+
+		`{"id":"local.daemon","title":"bridge daemon","category":"local","status":"warn","summary":"running (PID 42) on port 6000, not 5037","hint":"the running bridge listens on port 6000, not 5037. Run 'devicefarm-connect bridge start --port 5037'.","needs":["local.runtime-dir"],"elapsedMs":20},`+
 		`{"id":"local.listen-port","title":"listen port","category":"local","status":"fail","summary":"cannot bind 127.0.0.1:5037 because another program is listening on it","hint":"stop that program, then run 'devicefarm-connect bridge start --port 5037'","needs":["local.daemon"],"elapsedMs":0},`+
 		`{"id":"relay.reverse","title":"adb reverse","category":"network","status":"skip","summary":"needs session.resolve","needs":["session.resolve","local.daemon"],"elapsedMs":0}],`+
 		`"summary":{"pass":1,"warn":1,"fail":1,"skip":1}}`+"\n", out.String())

@@ -303,9 +303,9 @@ func TestGivenARunningDaemonWhenCheckedThenTheRowReportsItsStatusAndReverseState
 			wantStatus: Pass, wantTail: "on port 6000; no device; reverse on"},
 		{name: "reverse off with a device", reply: control.Response{OK: true, Port: 5037, DeviceLabel: "Pixel 9 (OS 16)", ARN: "arn:2"},
 			wantStatus: Warn, wantTail: "on port 5037; device Pixel 9 (OS 16), session arn:2; reverse off",
-			wantRestart: wording.DoctorRestartCommand + " --port 5037 --allow-adb-reverse --session-arn arn:2"},
+			wantRestart: wording.BridgeStartCommand + " --port 5037 --allow-adb-reverse --session-arn arn:2"},
 		{name: "reverse off with no device", reply: control.Response{OK: true, Port: 6000},
-			wantStatus: Warn, wantTail: "on port 6000; no device; reverse off", wantRestart: wording.DoctorRestartCommand + " --port 6000 --allow-adb-reverse"},
+			wantStatus: Warn, wantTail: "on port 6000; no device; reverse off", wantRestart: wording.BridgeStartCommand + " --port 6000 --allow-adb-reverse"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -432,8 +432,8 @@ func TestGivenTheAskedSessionAttachedWhenCheckedThenTheRowKeepsItsReverseVerdict
 func TestGivenTheServiceReturnsAnotherArnForTheAskedSessionWhenTheBridgeIsCheckedThenThatArnNamesTheAskedSession(t *testing.T) {
 	// The session still runs: the bridge lost its credentials, this shell has its own.
 	expiredReason := "the AWS credentials the bridge started with have expired, so it can no longer read remote access session " +
-		returnedSessionARN + "; refresh the credentials, run 'devicefarm-connect bridge stop', start the bridge again from that " +
-		"shell with the same options, then run 'devicefarm-connect device add --session-arn " + returnedSessionARN + "'"
+		returnedSessionARN + "; refresh the credentials, then from that shell run 'devicefarm-connect bridge start --port 5037 " +
+		"--session-arn " + returnedSessionARN + "'"
 	notAttached := "; session " + testSessionARN + " is not attached"
 	tests := []struct {
 		name        string
@@ -616,8 +616,8 @@ func TestGivenALockedPidfileWhoseDaemonDoesNotAnswerOrRefusesStatusWhenCheckedTh
 			assert.Equal(t, Fail, result.Status)
 			assert.Contains(t, result.Summary, tc.wantSummary)
 			assert.NotContains(t, result.Summary, state.paths.ControlSocket, "the row names no path")
-			assert.Equal(t, wording.DoctorHintDaemonNoStatus, result.Hint)
-			assert.Contains(t, result.Hint, "'"+wording.DoctorRestartCommand+"'", "the hint quotes the restart")
+			assert.Equal(t, "a bridge is registered but did not report its status. Run 'devicefarm-connect bridge start' with "+
+				"the options that you started it with. The start ends that bridge and launches a new one.", result.Hint)
 			reply, _ := state.daemon()
 			assert.False(t, reply.OK, "a failed row leaves no status for later checks")
 		})
@@ -749,9 +749,9 @@ func TestGivenAPortProblemWhenItsHintIsBuiltThenEveryCommandCarriesTheRealPortOn
 		{name: "an address with control characters", hint: listenAddrHint("203.0.113.1\n[PASS] forged\x1b[0m", port),
 			wantQuoted: []string{`'203.0.113.1\n[PASS] forged\x1b[0m'`}, wantAbsent: "\x1b"},
 		{name: "the daemon on another port with reverse on", hint: otherPortDaemonHint(reverseDaemon, port),
-			wantQuoted: []string{"'" + wording.DoctorRestartCommand + " --port 5555 --allow-adb-reverse --session-arn arn:1'", "'adb -P 6000'", wording.DoctorHintReverseCaveat}},
+			wantQuoted: []string{"'" + wording.BridgeStartCommand + " --port 5555 --allow-adb-reverse --session-arn arn:1'", "'adb -P 6000'", wording.DoctorHintReverseCaveat}},
 		{name: "the daemon on another port with reverse off", hint: otherPortDaemonHint(control.Response{OK: true, Port: 6000}, port),
-			wantQuoted: []string{"'" + wording.DoctorRestartCommand + " --port 5555'", "'adb -P 6000'"}, wantAbsent: wording.DoctorHintReverseCaveat},
+			wantQuoted: []string{"'" + wording.BridgeStartCommand + " --port 5555'", "'adb -P 6000'"}, wantAbsent: wording.DoctorHintReverseCaveat},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
