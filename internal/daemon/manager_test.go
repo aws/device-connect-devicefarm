@@ -409,7 +409,7 @@ func TestGivenChildSpawnsButNeverReportsReadyWhenStartedThenErrorsAndKillsOrphan
 
 // stopRefusedText is what Start returns when the adb server on 127.0.0.1:port did not stop.
 func stopRefusedText(port int, cause string) string {
-	return fmt.Sprintf("an adb server on 127.0.0.1:%d was asked to stop, as 'adb kill-server' asks, and did not (%s). Start the "+
+	return fmt.Sprintf("an adb server on 127.0.0.1:%d was asked to stop (via 'adb kill-server') and did not (%s). Start the "+
 		"bridge on another port with 'devicefarm-connect bridge start --port <n>' and point adb at it with 'adb -P <n>'. That adb "+
 		"server keeps port %d and the bridge serves adb on the port you pass.", port, cause, port)
 }
@@ -622,10 +622,10 @@ func TestGivenAChildThatExitsWithABindErrorWhenStartedThenThePortIsProbedAgainAn
 		{name: "an adb server took the port", occupy: func(t *testing.T, port int) *fakeAdbServer {
 			return startFakeAdbServer(t, port, killExits)
 		}, wantText: func(port int) string {
-			return fmt.Sprintf("an adb server took 127.0.0.1:%d before the bridge could bind it; a program that restarts adb, such "+
-				"as Android Studio, does this. Start the bridge on another port with 'devicefarm-connect bridge start --port <n>' "+
-				"and point adb at it with 'adb -P <n>'. That adb server keeps port %d and the bridge serves adb on the port you pass.",
-				port, port)
+			return fmt.Sprintf("an adb server took 127.0.0.1:%d before the bridge could bind it. Programs that restart adb "+
+				"automatically, such as Android Studio, are known to do this. Start the bridge on another port with "+
+				"'devicefarm-connect bridge start --port <n>' and point adb at it with 'adb -P <n>'. That adb server keeps port %d "+
+				"and the bridge serves adb on the port you pass.", port, port)
 		}},
 		{name: "another program took the port", occupy: func(t *testing.T, port int) *fakeAdbServer {
 			occupyPort(t, port, closingOccupant)

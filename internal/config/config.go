@@ -4,6 +4,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"net/netip"
@@ -13,11 +14,12 @@ import (
 	"time"
 
 	"github.com/aws/device-connect-devicefarm/internal/failure"
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
-// BinaryName names the executable. Runtime file names and user-facing text read
-// it; the env var prefix below is spelled out.
-const BinaryName = "devicefarm-connect"
+// BinaryName names the executable. The wording package defines it; runtime file
+// names read it through this alias. The env var prefix below is spelled out.
+const BinaryName = wording.BinaryName
 
 // Hidden test-only overrides; _MS values are integer milliseconds. Env vars, not
 // flags: they stay out of --help and cross the daemon re-exec with no AsDaemonArgs
@@ -227,18 +229,18 @@ func Default() ProxyConfig {
 // rule cap below one refuses every rule.
 func (c ProxyConfig) Validate() error {
 	if c.ListenAddr == "" {
-		return fmt.Errorf("--listen-addr must not be empty")
+		return errors.New(wording.ConfigListenAddrEmpty)
 	}
 	// A hostname has no colon or bracket. One in a value netip rejects means
 	// host:port or a broken IP literal.
 	if _, err := netip.ParseAddr(c.ListenAddr); err != nil && strings.ContainsAny(c.ListenAddr, ":[]") {
 		return failure.WithFix(
-			fmt.Errorf("--listen-addr must be an IP address or hostname with no port or brackets, got %q", c.ListenAddr),
-			"set the port with --port",
+			fmt.Errorf(wording.ConfigListenAddrMalformedFormat, c.ListenAddr),
+			wording.ConfigSetPortWithFlag,
 		)
 	}
 	if c.ListenPort < 1 || c.ListenPort > 65535 {
-		return fmt.Errorf("--port must be in 1..65535, got %d", c.ListenPort)
+		return fmt.Errorf(wording.ConfigPortOutOfRangeFormat, c.ListenPort)
 	}
 	if c.EndpointRefreshInterval <= 0 {
 		return fmt.Errorf("endpoint refresh interval must be positive, got %s", c.EndpointRefreshInterval)

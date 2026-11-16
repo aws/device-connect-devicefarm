@@ -91,7 +91,7 @@ func TestGivenCommandLineMistakesWhenExecutedThenEachNamesTheCommandsHelp(t *tes
 		{name: "flag value of the wrong type", args: []string{"bridge", "start", "--port", "abc"},
 			problem: `invalid argument "abc" for "--port" flag: strconv.ParseInt: parsing "abc": invalid syntax`, helpOf: "bridge start"},
 		{name: "flag value out of range", args: []string{"bridge", "start", "--port", "0"},
-			problem: "--port must be in 1..65535, got 0", helpOf: "bridge start"},
+			problem: "--port must be from 1 to 65535, got 0", helpOf: "bridge start"},
 		{name: "flag on the hidden help command names the root", args: []string{"help", "--bogus"},
 			problem: "unknown flag: --bogus", helpOf: ""},
 		{name: "--list and --json together, refused before the bridge starts", args: []string{"device", "list", "--list", "--json"},
@@ -155,8 +155,8 @@ func TestGivenDaemonRefusesAddWhenBridgeStartExecutedWithARNThenPrintsProblemCau
 
 	assert.Equal(t, 1, code)
 	assert.Equal(t,
-		"* a bridge was running (pid 4242) and was stopped; its attached devices, forward rules and reverse rules were dropped\n"+
-			"* bridge started (pid 4343); log file: /tmp/d.log\n"+
+		"* a bridge was running (PID 4242) and was stopped; its attached devices, forward rules, and reverse rules were dropped\n"+
+			"* bridge started (PID 4343); log file: /tmp/d.log\n"+
 			config.BinaryName+": error: the bridge started but could not attach the device\n"+
 			"  cause: resolve session: session not RUNNING\n"+
 			"  fix:   fix the issue, then run this command again; 'bridge start' restarts the bridge, so it reads this shell's AWS settings\n",

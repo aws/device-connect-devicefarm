@@ -10,11 +10,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/aws/device-connect-devicefarm/internal/config"
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/failure"
 	"github.com/aws/device-connect-devicefarm/internal/report"
 	"github.com/aws/device-connect-devicefarm/internal/session"
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // newBridgeCommand groups the daemon-lifecycle subcommands under one parent:
@@ -25,7 +25,7 @@ import (
 func newBridgeCommand(state *rootState) *cobra.Command {
 	bridge := &cobra.Command{
 		Use:   "bridge",
-		Short: "Manage the background bridge",
+		Short: wording.HelpBridge,
 		Args:  cobra.NoArgs,
 		// A RunE makes the parent runnable, so cobra validates Args (NoArgs) rather
 		// than short-circuiting to help for a non-runnable command: `bridge` alone
@@ -60,14 +60,14 @@ func newBridgeCommand(state *rootState) *cobra.Command {
 func newBridgeStartCommand(state *rootState) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "start",
-		Short: fmt.Sprintf("Start the bridge, optionally attaching a %s remote access device", productName),
+		Short: wording.HelpBridgeStart,
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := state.cfg.Validate(); err != nil {
 				return usageError(cmd, err)
 			}
 			if blankSessionArn(cmd, state) {
-				return usageError(cmd, errors.New("--session-arn is blank"))
+				return usageError(cmd, errors.New(wording.ProblemSessionARNBlank))
 			}
 			if state.sessionARN != "" {
 				if err := session.ValidateSessionARN(state.sessionARN); err != nil {
@@ -80,8 +80,8 @@ func newBridgeStartCommand(state *rootState) *cobra.Command {
 
 			if state.sessionARN != "" {
 				return attachDevice(cmd, state, failure.Explained{
-					Problem: "the bridge started but could not attach the device",
-					Fix:     "fix the issue, then run this command again; 'bridge start' restarts the bridge, so it reads this shell's AWS settings",
+					Problem: wording.ProblemStartedButNotAttached,
+					Fix:     wording.FixRetryBridgeStart,
 				})
 			}
 
@@ -101,8 +101,8 @@ func newBridgeStartCommand(state *rootState) *cobra.Command {
 	// `doctor` takes the address flags to check what the daemon would bind.
 	bindListenerFlags(cmd, &state.cfg)
 	bindReverseFlag(cmd, &state.cfg)
-	cmd.Flags().StringVar(&state.cfg.LogPath, "log", state.cfg.LogPath, "bridge logfile path (defaults to the per-user runtime directory)")
-	addSessionArnFlag(cmd, state, sessionArnDescription+" (optional; attaches the device on start)")
+	cmd.Flags().StringVar(&state.cfg.LogPath, "log", state.cfg.LogPath, wording.FlagLogUsage)
+	addSessionArnFlag(cmd, state, wording.FlagSessionARNStartUsage)
 	return cmd
 }
 
@@ -111,21 +111,21 @@ func newBridgeStartCommand(state *rootState) *cobra.Command {
 func newBridgeStopCommand(state *rootState) *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop",
-		Short: "Stop the running bridge",
+		Short: wording.HelpBridgeStop,
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			result, err := stopBridge(state.newManager())
 			if err != nil {
-				return &failure.Explained{Problem: "could not stop the bridge", Cause: err}
+				return &failure.Explained{Problem: wording.ProblemStopFailed, Cause: err}
 			}
 			if !result.WasRunning {
-				cmd.PrintErrln(notListeningMessage)
+				cmd.PrintErrln(wording.OutputNotListening)
 				return nil
 			}
 			if result.Killed {
-				cmd.PrintErrf("* the bridge (pid %d) did not stop cleanly and was killed\n", result.PID)
+				cmd.PrintErrf(wording.OutputStopKilledFormat+"\n", result.PID)
 			}
-			cmd.PrintErrln(config.BinaryName + " stopped")
+			cmd.PrintErrln(wording.OutputStopped)
 			return nil
 		},
 	}
@@ -139,7 +139,7 @@ func newBridgeStatusCommand(state *rootState) *cobra.Command {
 	jsonView := false
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Report whether the bridge is running and how many devices are attached",
+		Short: wording.HelpBridgeStatus,
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			stdout := cmd.OutOrStdout()
@@ -162,23 +162,23 @@ func newBridgeStatusCommand(state *rootState) *cobra.Command {
 				return report.WriteJSON(stdout, bridgeStatusJSON(running, pid, resp))
 			}
 			if !running {
-				_, err = fmt.Fprintln(stdout, config.BinaryName+" bridge is not running")
+				_, err = fmt.Fprintln(stdout, wording.OutputDaemonNotRunning)
 				return err
 			}
 			if len(resp.Devices) == 0 {
-				line := fmt.Sprintf("%s bridge is running (pid %d), no device attached", config.BinaryName, pid)
+				line := fmt.Sprintf(wording.OutputDaemonRunningNoDeviceFormat, pid)
 				if note := lastDetachNote(resp, time.Now()); note != "" {
 					line += "; " + note
 				}
 				_, err = fmt.Fprintln(stdout, line)
 				return err
 			}
-			_, err = fmt.Fprintf(stdout, "%s bridge is running (pid %d), %s attached; run 'device list' for details\n",
-				config.BinaryName, pid, countNoun(len(resp.Devices), "device"))
+			_, err = fmt.Fprintf(stdout, wording.OutputDaemonRunningDevicesFormat+"\n",
+				pid, countNoun(len(resp.Devices), wording.OutputDeviceNoun))
 			return err
 		},
 	}
-	cmd.Flags().BoolVar(&jsonView, "json", false, "print one JSON object instead of the report line")
+	cmd.Flags().BoolVar(&jsonView, "json", false, wording.FlagBridgeStatusJSONUsage)
 	return cmd
 }
 

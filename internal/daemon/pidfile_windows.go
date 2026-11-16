@@ -40,7 +40,7 @@ const publishRetryTimeout = time.Second
 func (p *PidFile) Write() error {
 	name, err := syscall.UTF16PtrFromString(p.path)
 	if err != nil {
-		return fmt.Errorf("publish pidfile %q: %w", p.path, err)
+		return fmt.Errorf("publish PID file %q: %w", p.path, err)
 	}
 	deadline := time.Now().Add(publishRetryTimeout)
 	var handle syscall.Handle
@@ -51,7 +51,7 @@ func (p *PidFile) Write() error {
 			break
 		}
 		if !errors.Is(err, errorSharingViolation) || !time.Now().Before(deadline) {
-			return fmt.Errorf("publish pidfile %q: %w", p.path, err)
+			return fmt.Errorf("publish PID file %q: %w", p.path, err)
 		}
 		time.Sleep(startupPollInterval)
 	}
@@ -59,7 +59,7 @@ func (p *PidFile) Write() error {
 	if _, err := file.WriteString(strconv.Itoa(os.Getpid())); err != nil {
 		file.Close()
 		_ = os.Remove(p.path)
-		return fmt.Errorf("write pidfile %q: %w", p.path, err)
+		return fmt.Errorf("write PID file %q: %w", p.path, err)
 	}
 	p.lock = file
 	return nil
@@ -81,7 +81,7 @@ func (p *PidFile) Remove() error {
 	p.lock = nil
 	err := os.Remove(p.path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, errorSharingViolation) {
-		return fmt.Errorf("remove pidfile %q: %w", p.path, err)
+		return fmt.Errorf("remove PID file %q: %w", p.path, err)
 	}
 	return nil
 }

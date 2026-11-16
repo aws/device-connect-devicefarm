@@ -19,6 +19,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/report"
 	"github.com/aws/device-connect-devicefarm/internal/session"
 	"github.com/aws/device-connect-devicefarm/internal/testsupport"
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // constantCheck answers result at once.
@@ -152,7 +153,7 @@ func TestGivenMixedResultsWhenWrittenAsTextThenOneLinePerRowPlusTheCountLine(t *
 			_, deadlineSet = ctx.Deadline()
 			return Result{Status: Pass, Summary: "/run/user/1000/devicefarm-connect (socket path 41 bytes)"}
 		}},
-		constantCheck("local.daemon", Result{Status: Warn, Summary: "running (pid 42) on port 6000, not 5037",
+		constantCheck("local.daemon", Result{Status: Warn, Summary: "running (PID 42) on port 6000, not 5037",
 			Hint: "the running bridge listens on port 6000, not 5037. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 5037'."}),
 		constantCheck("local.listen-port", Result{Status: Fail, Summary: "cannot bind 127.0.0.1:5037 because another program is listening on it",
 			Hint: "stop that program, then run 'devicefarm-connect bridge start --port 5037'"}),
@@ -170,7 +171,7 @@ func TestGivenMixedResultsWhenWrittenAsTextThenOneLinePerRowPlusTheCountLine(t *
 	assert.Equal(t, []string{"local.listen-port"}, report.Rows[3].Needs)
 	assert.Equal(t, 1, report.Failed())
 	assert.Equal(t, "[PASS] local.runtime-dir: /run/user/1000/devicefarm-connect (socket path 41 bytes)\n"+
-		"[WARN] local.daemon: running (pid 42) on port 6000, not 5037; fix: the running bridge listens on port 6000, not 5037. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 5037'.\n"+
+		"[WARN] local.daemon: running (PID 42) on port 6000, not 5037; fix: the running bridge listens on port 6000, not 5037. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 5037'.\n"+
 		"[FAIL] local.listen-port: cannot bind 127.0.0.1:5037 because another program is listening on it; fix: stop that program, then run 'devicefarm-connect bridge start --port 5037'\n"+
 		"[SKIP] relay.session: needs local.listen-port\n"+
 		"doctor: 1 passed, 1 warnings, 1 failed, 1 skipped\n", out.String())
@@ -188,7 +189,7 @@ func TestGivenAnEmptyTableWhenRunThenTheReportIsEmptyAndTheCountLineIsAllZero(t 
 
 const (
 	fixtureSessionArn         = "arn:aws:devicefarm:us-west-2:123456789012:session:11111111-2222-3333-4444-555555555555"
-	fixtureNoSessionSkip      = "pass --session-arn to check the session, the device connection and adb versions"
+	fixtureNoSessionSkip      = "pass --session-arn to check the session, the device connection, and adb versions"
 	fixturePortHeldHint       = "an adb server is listening on 127.0.0.1:35477, so the bridge cannot bind it until that server stops. Run 'devicefarm-connect bridge start --port 35477': it stops that server first, as 'adb kill-server' would. If a program that restarts adb, such as Android Studio, takes the port back, start the bridge on another port with 'devicefarm-connect bridge start --port <n>' and point adb at it with 'adb -P <n>'."
 	fixtureReverseOffHint     = "the bridge runs with adb reverse off, so every 'adb reverse' fails. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 40775 --allow-adb-reverse --session-arn " + fixtureSessionArn + "' to start it again with reverse on. '--allow-adb-reverse' lets the device open connections to this machine, so use it only with a device you trust; a public physical device can run software you do not control."
 	fixtureVersionSkewHint    = "the local adb is 1.0.39 and the remote adb server is 1.0.41, so every adb command fails: that adb tries to start its own adb server on the bridge's port and cannot. Install platform-tools whose adb is 1.0.41, such as platform-tools 37, or put such an adb first on PATH, then rerun 'devicefarm-connect doctor --session-arn " + fixtureSessionArn + " --port 37537'. Until then no adb command reaches the device. The remote adb server is not affected."
@@ -249,7 +250,7 @@ func TestGivenCannedResultsWhenWrittenAsATableAt80ColumnsThenTheOutputMatchesByt
 | AWS           | PASS   | AWS credentials                                     |
 |               |        | remote access session not checked: pass             |
 |               |        |   --session-arn to check the session, the device    |
-|               |        |   connection and adb versions                       |
+|               |        |   connection, and adb versions                      |
 +---------------+--------+-----------------------------------------------------+
 | Network       | SKIP   | not checked: needs remote access session            |
 +---------------+--------+-----------------------------------------------------+
@@ -285,7 +286,7 @@ doctor: 4 of 4 categories passed
 | AWS           | PASS   | AWS credentials                                     |
 |               |        | remote access session not checked: pass             |
 |               |        |   --session-arn to check the session, the device    |
-|               |        |   connection and adb versions                       |
+|               |        |   connection, and adb versions                      |
 +---------------+--------+-----------------------------------------------------+
 | Network       | SKIP   | not checked: needs remote access session            |
 +---------------+--------+-----------------------------------------------------+
@@ -303,14 +304,14 @@ What to do
 doctor: 1 of 4 categories passed, 1 warning, 2 not checked
 `},
 		{name: "reverse off and an adb version mismatch", results: map[string]Result{
-			"local.daemon": {Status: Warn, Summary: "running (pid 17557) on port 40775; device Google Pixel 9 (OS 16), session " + fixtureSessionArn + "; reverse off",
+			"local.daemon": {Status: Warn, Summary: "running (PID 17557) on port 40775; device Google Pixel 9 (OS 16), session " + fixtureSessionArn + "; reverse off",
 				Hint: fixtureReverseOffHint},
 			"relay.adb-version": {Status: Fail, Summary: "local adb 1.0.39 differs from the remote adb server (1.0.41); every adb command fails",
 				Hint: fixtureVersionSkewHint},
 		}, want: `+---------------+--------+-----------------------------------------------------+
 | Category      | Status | Details                                             |
 +---------------+--------+-----------------------------------------------------+
-| Local machine | WARN   | bridge: running (pid 17557) on port 40775; device   |
+| Local machine | WARN   | bridge: running (PID 17557) on port 40775; device   |
 |               |        |   Google Pixel 9 (OS 16), session                   |
 |               |        |   arn:aws:devicefarm:us-west-2:123456789012:session |
 |               |        |   :11111111-2222-3333-4444-555555555555; reverse    |
@@ -554,7 +555,7 @@ func TestGivenMixedResultsWhenWrittenAsJSONThenOneCompactObjectCarriesEveryRow(t
 		{ID: "local.runtime-dir", Title: "working directory", Category: CategoryLocal,
 			Result: Result{Status: Pass, Summary: "working directory /run/user/1000/devicefarm-connect is writable"}, Elapsed: 1500 * time.Microsecond},
 		{ID: "local.daemon", Title: "bridge daemon", Category: CategoryLocal, Needs: []string{"local.runtime-dir"},
-			Result: Result{Status: Warn, Summary: "running (pid 42) on port 6000, not 5037",
+			Result: Result{Status: Warn, Summary: "running (PID 42) on port 6000, not 5037",
 				Hint: "the running bridge listens on port 6000, not 5037. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 5037'."},
 			Elapsed: 20 * time.Millisecond},
 		{ID: "local.listen-port", Title: "listen port", Category: CategoryLocal, Needs: []string{"local.daemon"},
@@ -569,7 +570,7 @@ func TestGivenMixedResultsWhenWrittenAsJSONThenOneCompactObjectCarriesEveryRow(t
 	assert.Equal(t, `{"ok":false,"sessionArn":"arn:aws:devicefarm:us-west-2:123456789012:session:a/b/0",`+
 		`"checks":[`+
 		`{"id":"local.runtime-dir","title":"working directory","category":"local","status":"pass","summary":"working directory /run/user/1000/devicefarm-connect is writable","needs":[],"elapsedMs":1},`+
-		`{"id":"local.daemon","title":"bridge daemon","category":"local","status":"warn","summary":"running (pid 42) on port 6000, not 5037","hint":"the running bridge listens on port 6000, not 5037. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 5037'.","needs":["local.runtime-dir"],"elapsedMs":20},`+
+		`{"id":"local.daemon","title":"bridge daemon","category":"local","status":"warn","summary":"running (PID 42) on port 6000, not 5037","hint":"the running bridge listens on port 6000, not 5037. Run 'devicefarm-connect bridge stop && devicefarm-connect bridge start --port 5037'.","needs":["local.runtime-dir"],"elapsedMs":20},`+
 		`{"id":"local.listen-port","title":"listen port","category":"local","status":"fail","summary":"cannot bind 127.0.0.1:5037 because another program is listening on it","hint":"stop that program, then run 'devicefarm-connect bridge start --port 5037'","needs":["local.daemon"],"elapsedMs":0},`+
 		`{"id":"relay.reverse","title":"adb reverse","category":"network","status":"skip","summary":"needs session.resolve","needs":["session.resolve","local.daemon"],"elapsedMs":0}],`+
 		`"summary":{"pass":1,"warn":1,"fail":1,"skip":1}}`+"\n", out.String())
@@ -690,7 +691,7 @@ func TestGivenASessionArnTheBridgeHoldsUnderAnotherArnWhenDiagnosedThenOneLookup
 			assert.Equal(t, tc.wantSession, sessionRow.Status, sessionRow.Summary)
 			assert.Equal(t, tc.wantReverse, reverseRow.Status, reverseRow.Summary)
 			if tc.wantReverse == Pass {
-				assert.Equal(t, reverseOnSummary, reverseRow.Summary)
+				assert.Equal(t, wording.DoctorDetailReverseOnInDaemon, reverseRow.Summary)
 			}
 			assert.Zero(t, reverse.NotifiersAccepted(), "no reverse probe: the bridge holds the slot, or the row did not run")
 			assert.Equal(t, []string{testSessionARN}, resolver.arns, "one lookup, of the typed ARN")

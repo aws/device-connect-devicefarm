@@ -15,6 +15,7 @@ import (
 
 	"github.com/aws/device-connect-devicefarm/internal/adbwire"
 	"github.com/aws/device-connect-devicefarm/internal/forward"
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // The accept seam: what the daemon reads from a local adb client before it dials, and
@@ -316,10 +317,6 @@ func respondForwardLocally(tcpConn net.Conn, clientOpening opening, forwarding *
 	return true
 }
 
-// msgReverseOff is the FAIL a reverse request gets while reverse is off. adb prints it after
-// `error: `, so it names the flag that turns reverse on.
-const msgReverseOff = "adb reverse is off for this client; restart it with --allow-adb-reverse"
-
 // reverseServicePrefix opens every request of adb's reverse family.
 const reverseServicePrefix = "reverse:"
 
@@ -335,23 +332,9 @@ func refuseReverseFamily(tcpConn net.Conn, clientOpening opening, forwarding *at
 	if forwarding == nil || forwarding.reverseEnabled || !clientOpening.reverseFamily() {
 		return false
 	}
-	refuseOpening(tcpConn, msgReverseOff, "could not refuse a reverse request", logger)
+	refuseOpening(tcpConn, wording.AdbFailReverseOff, "could not refuse a reverse request", logger)
 	return true
 }
-
-// msgReverseOntoListenPort is the FAIL format for a reverse install whose customer port is the
-// daemon's own listen port; %d is that port. adb prints it after `error: `.
-const msgReverseOntoListenPort = "cannot reverse to tcp:%d: the bridge listens on that port"
-
-// msgReverseNotReady is the FAIL a reverse request gets when the attachment's clear of the
-// server's reverse rules outlasts the request's hold. adb prints it after `error: `.
-const msgReverseNotReady = "the device's reverse rules are not ready yet; run the command again"
-
-// msgReverseSlotHeld is the FAIL a reverse request gets while the server's notifier slot for the
-// device is held elsewhere: relayed, it would act on another client's rules, or on rules no live
-// notifier here serves. The refusal payload is the same for both holders, so the text names both.
-// adb prints it after `error: `.
-const msgReverseSlotHeld = "adb reverse on this device is held by another adb client, or by this client's previous connection for a short while; stop the other client or retry later"
 
 // awaitServerRulesCleared holds a `reverse:` request until the attachment's clear of the server's
 // reverse rules settles, so the clear cannot wipe an install sent first. It keys on the prefix
@@ -386,7 +369,7 @@ func awaitServerRulesCleared(ctx context.Context, tcpConn net.Conn, clientOpenin
 				return false
 			}
 			logger.Debug("refused a reverse request: the attach clear has not settled", "service", clientOpening.service)
-			refuseOpening(tcpConn, msgReverseNotReady, "could not refuse a reverse request", logger)
+			refuseOpening(tcpConn, wording.AdbFailReverseNotReady, "could not refuse a reverse request", logger)
 			return false
 		case <-ctx.Done():
 			return false
@@ -394,8 +377,9 @@ func awaitServerRulesCleared(ctx context.Context, tcpConn net.Conn, clientOpenin
 	}
 }
 
-// refuseWhileSlotHeld answers a reverse request with msgReverseSlotHeld while the server's notifier
-// slot is held elsewhere. A detached attachment gets no reply: its connections are being canceled.
+// refuseWhileSlotHeld answers a reverse request with a FAIL while the server's notifier slot is
+// held elsewhere. Relayed, the request would act on another client's rules, or on rules no live
+// notifier here serves. A detached attachment gets no reply: its connections are being canceled.
 // answered means the client has its FAIL and the connection is done.
 func refuseWhileSlotHeld(tcpConn net.Conn, clientOpening opening, forwarding *attachmentFeatures,
 	logger *slog.Logger) (answered bool) {
@@ -403,7 +387,7 @@ func refuseWhileSlotHeld(tcpConn net.Conn, clientOpening opening, forwarding *at
 		return false
 	}
 	logger.Debug("refused a reverse request: the notifier slot is held elsewhere", "service", clientOpening.service)
-	refuseOpening(tcpConn, msgReverseSlotHeld, "could not refuse a reverse request", logger)
+	refuseOpening(tcpConn, wording.AdbFailReverseHeld, "could not refuse a reverse request", logger)
 	return true
 }
 
@@ -420,7 +404,7 @@ func refuseOverBudget(tcpConn net.Conn, clientOpening opening, forwarding *attac
 	if clientOpening.service == "" {
 		return
 	}
-	reason := fmt.Sprintf("too many adb connections (limit %d)", forwarding.budget.limit)
+	reason := fmt.Sprintf(wording.AdbFailTooManyConnectionsFormat, forwarding.budget.limit)
 	refuseOpening(tcpConn, reason, "could not refuse a local adb connection", logger)
 }
 
@@ -436,7 +420,7 @@ func refuseOpening(tcpConn net.Conn, reason, failMessage string, logger *slog.Lo
 
 // screenReverseRule counts a `reverse:*` request against the attachment's reverse rules before
 // anything is dialed; adb has no such limit. An install onto the daemon's own listen port gets
-// msgReverseOntoListenPort, logged at Debug. A new device spec (the device-side `tcp:<port>`) at
+// wording.AdbFailReverseOntoListenPortFormat, logged at Debug. A new device spec (the device-side `tcp:<port>`) at
 // the limit gets `too many reverse rules (limit <n>)`, with a Warn throttled like the budget's. adb
 // prints either reason. A refusal ends the connection: no dial, no rule slot. Otherwise request
 // awaits the server's verdict; nil when nothing is counted.
@@ -455,7 +439,7 @@ func screenReverseRule(tcpConn net.Conn, clientOpening opening, forwarding *atta
 	listenPort := forwarding.notifier.cfg.params.ListenPort
 	if listenPort > 0 && customerPort == listenPort {
 		logger.Debug("refused a reverse rule: its target is the daemon's own listen port", "listenPort", listenPort)
-		refuseOpening(tcpConn, fmt.Sprintf(msgReverseOntoListenPort, listenPort), "could not refuse a reverse rule", logger)
+		refuseOpening(tcpConn, fmt.Sprintf(wording.AdbFailReverseOntoListenPortFormat, listenPort), "could not refuse a reverse rule", logger)
 		return nil, true
 	}
 	if request, full := rules.begin(action, deviceSpec, customerPort); !full {
@@ -464,7 +448,7 @@ func screenReverseRule(tcpConn net.Conn, clientOpening opening, forwarding *atta
 	if rules.refusals.allow(time.Now()) {
 		logger.Warn("refused a reverse rule: the attachment holds its limit", "maxReverseRules", rules.limit)
 	}
-	reason := fmt.Sprintf("too many reverse rules (limit %d)", rules.limit)
+	reason := fmt.Sprintf(wording.AdbFailTooManyReverseRulesFormat, rules.limit)
 	refuseOpening(tcpConn, reason, "could not refuse a reverse rule", logger)
 	return nil, true
 }

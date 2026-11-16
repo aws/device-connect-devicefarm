@@ -24,6 +24,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/failure"
 	"github.com/aws/device-connect-devicefarm/internal/session"
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // DaemonSubcommand is the hidden subcommand the detached child runs to become
@@ -145,7 +146,7 @@ func (m *DaemonManager) Start() (StartResult, error) {
 	// openNoFollow refuses a symlink where the OS can.
 	logOut, err := os.OpenFile(m.paths.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND|openNoFollow, 0o600)
 	if err != nil {
-		return StartResult{}, fmt.Errorf("open bridge logfile %q: %w", m.paths.LogFile, err)
+		return StartResult{}, fmt.Errorf("open bridge log file %q: %w", m.paths.LogFile, err)
 	}
 	// The child inherits the underlying fd, so closing the parent's handle after
 	// the spawn does not affect the child's logging.
@@ -208,13 +209,11 @@ func (m *DaemonManager) startupError(waitErr error, offset int64) error {
 	case strings.HasPrefix(childError, listenErrorPrefix(m.config.ListenAddr, port)):
 		return lostBindError(m.config.ListenAddr, port)
 	case childError != "":
-		return fmt.Errorf("the bridge exited while starting: %s. Fix what it reports, then run '%s'. Its log is \"%s\".",
-			childError, start, logPath)
+		return fmt.Errorf(wording.StartExitedFormat, childError, start, logPath)
 	case errors.Is(waitErr, errChildExited):
-		return fmt.Errorf("the bridge exited while starting and logged no error. Check \"%s\", then run '%s'.", logPath, start)
+		return fmt.Errorf(wording.StartExitedNoErrorFormat, logPath, start)
 	}
-	return fmt.Errorf("the bridge did not report ready within %s and logged no error, so it was stopped. Check \"%s\", "+
-		"then run '%s'.", startupTimeout, logPath, start)
+	return fmt.Errorf(wording.StartNotReadyFormat, startupTimeout, logPath, start)
 }
 
 // lastChildError is the error value of the last level=ERROR line after offset in the log, or
@@ -271,7 +270,7 @@ func (m *DaemonManager) Stop() (StopResult, error) {
 		if m.stillRunning(pid) {
 			lookupFailed := fmt.Errorf("find bridge process %d: %w", pid, err)
 			if errors.Is(err, os.ErrPermission) {
-				return StopResult{}, failure.WithFix(lookupFailed, "stop it from an elevated shell")
+				return StopResult{}, failure.WithFix(lookupFailed, wording.StopFromElevatedShell)
 			}
 			return StopResult{}, lookupFailed
 		}
@@ -320,7 +319,7 @@ func (m *DaemonManager) Stop() (StopResult, error) {
 		if !m.waitUntilStopped(pid, killTimeout) {
 			// Keep the pidfile: the process lives and holds the listen port, so
 			// status must not report "not running".
-			return StopResult{}, fmt.Errorf("bridge (pid %d) survived kill after %s; pidfile left in place", pid, killTimeout)
+			return StopResult{}, fmt.Errorf(wording.StopSurvivedKillFormat, pid, killTimeout)
 		}
 		result.Killed = true
 	}
@@ -543,7 +542,7 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 			}
 			serial, err := dialer.FetchDeviceSerial(resolveCtx, resolved.Endpoint)
 			if err != nil {
-				err = fmt.Errorf("fetch the device serial: %w", err)
+				err = fmt.Errorf(wording.RefusalFetchSerialFormat, err)
 				// The relay's session-stopping close: its cause and fix replace the fetch's error.
 				if bridge.IsSessionStopping(err) {
 					err = sessionStoppingError(storedARN)
@@ -568,10 +567,10 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 		case control.OpRemove:
 			current, present := device.Current()
 			if !present {
-				return control.Response{OK: false, Error: "no device is attached"}
+				return control.Response{OK: false, Error: wording.RefusalNoDevice}
 			}
 			if req.ARN != "" && req.ARN != current.ARN {
-				return control.Response{OK: false, Error: "the attached device does not match the requested session"}
+				return control.Response{OK: false, Error: wording.RefusalDeviceMismatch}
 			}
 			// Before Clear: the server needs the notifier up to take the request. The control loop
 			// is inline, so the next attachment cannot install under the clear.
@@ -603,7 +602,7 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 			return control.Response{OK: true}
 
 		default:
-			return control.Response{OK: false, Error: fmt.Sprintf("unknown control op %q", req.Op)}
+			return control.Response{OK: false, Error: fmt.Sprintf(wording.RefusalUnknownOpFormat, req.Op)}
 		}
 	}
 }
@@ -660,7 +659,7 @@ func (m *DaemonManager) resolveForAttach(ctx context.Context,
 	typedARN string) (session.RemoteAccessInfo, string, error) {
 	resolved, err := m.remoteAccessClient.GetSession(ctx, typedARN)
 	if err != nil {
-		return session.RemoteAccessInfo{}, "", fmt.Errorf("resolve session: %w", err)
+		return session.RemoteAccessInfo{}, "", fmt.Errorf(wording.RefusalResolveSessionFormat, err)
 	}
 	askedARN := typedARN
 	if resolved.ARN != "" && resolved.ARN != typedARN {
@@ -668,7 +667,7 @@ func (m *DaemonManager) resolveForAttach(ctx context.Context,
 		m.logger.Info("the service names this session by another ARN; resolving once more",
 			"typed", typedARN, "returned", askedARN)
 		if resolved, err = m.remoteAccessClient.GetSession(ctx, askedARN); err != nil {
-			return session.RemoteAccessInfo{}, "", fmt.Errorf("resolve session: %w", err)
+			return session.RemoteAccessInfo{}, "", fmt.Errorf(wording.RefusalResolveSessionFormat, err)
 		}
 	}
 	return resolved, resolved.ReturnedARN(askedARN), nil
@@ -689,9 +688,6 @@ func (m *DaemonManager) lookUpSession(ctx context.Context, sessionARN string) (b
 	return bridge.SessionVerdict{Endpoint: resolved.Endpoint, Label: resolved.Label}, nil
 }
 
-// reattachCommand is how the detach reasons tell the user to attach a session again.
-const reattachCommand = "run '" + config.BinaryName + " device add --session-arn"
-
 // refusedReply is the reply to a refused request: err's text in Error, its fixes in Fixes.
 func refusedReply(err error) control.Response {
 	cause, fixes := failure.Split(err)
@@ -700,36 +696,32 @@ func refusedReply(err error) control.Response {
 
 // differentDeviceAttached refuses an add while another session is attached.
 func differentDeviceAttached(label string) error {
-	return failure.WithFix(fmt.Errorf("a different device is already attached (%s)", label),
-		"run '"+config.BinaryName+" device remove' first")
+	return failure.WithFix(fmt.Errorf(wording.RefusalDifferentDeviceFormat, label), wording.FixRemoveDeviceFirst)
 }
 
 // addFix is the fix for a failed add whose cause has one known remedy, else "". The bridge
 // reads AWS settings only from the shell that starts it, so a credential fix restarts it.
 func (m *DaemonManager) addFix(err error, sessionARN string) string {
-	restart := fmt.Sprintf("then run '%s --session-arn %s' with any other option the bridge started with; "+
-		"the bridge reads AWS settings only from the shell that starts it",
-		StartCommand(m.config.ListenAddr, m.config.ListenPort), sessionARN)
+	restart := fmt.Sprintf(wording.FixRestartBridgeTailFormat, StartCommand(m.config.ListenAddr, m.config.ListenPort), sessionARN)
 	var rejected *session.RequestRejectedError
 	switch {
 	case errors.Is(err, session.ErrNoCredentials), errors.As(err, &rejected) && rejected.CredentialsExpired():
-		return "get working AWS credentials in this shell, " + restart
+		return wording.FixWorkingCredentialsLead + restart
 	case errors.Is(err, session.ErrAccessDenied):
-		return "get AWS credentials allowed 'devicefarm:GetRemoteAccessSession' on this session in this shell, " + restart
+		return wording.FixAllowedCredentialsLead + restart
 	case errors.Is(err, session.ErrSessionEnded):
-		return fmt.Sprintf("start a new remote access session, then %s <new ARN>'", reattachCommand)
+		return wording.FixNewSession
 	case errors.Is(err, session.ErrUnsupportedDevice):
-		return fmt.Sprintf("start a remote access session on a supported Android device, then %s <its ARN>'", reattachCommand)
+		return wording.FixSupportedDevice
 	case errors.Is(err, session.ErrNoEndpointYet):
-		return "wait until the session is RUNNING with an endpoint, then try again"
+		return wording.FixWaitForEndpoint
 	}
 	return ""
 }
 
 // sessionStoppingError words the relay's session-stopping close. The fix is apart, for a refused add.
 func sessionStoppingError(sessionARN string) error {
-	return failure.WithFix(fmt.Errorf("remote access session %s is stopping", sessionARN),
-		fmt.Sprintf("start a new session and %s <new ARN>'", reattachCommand))
+	return failure.WithFix(fmt.Errorf(wording.DetachSessionStoppingFormat, sessionARN), wording.DetachNewSessionFix)
 }
 
 // sessionStoppingReason is the detach reason for the relay's session-stopping close, which needs
@@ -749,27 +741,21 @@ var classifiedFailures = []error{session.ErrAccessDenied, session.ErrInvalidARN,
 func detachReason(sessionARN string, err error) (reason string, detach bool) {
 	switch {
 	case errors.Is(err, session.ErrSessionNotFound):
-		return fmt.Sprintf("remote access session %s no longer exists; start a new session and %s <new ARN>'",
-			sessionARN, reattachCommand), true
+		return fmt.Sprintf(wording.DetachSessionGoneFormat, sessionARN), true
 	case errors.Is(err, session.ErrSessionEnded):
-		return fmt.Sprintf("remote access session %s %s; start a new session and %s <new ARN>'",
-			sessionARN, endedState(err), reattachCommand), true
+		return fmt.Sprintf(wording.DetachSessionEndedFormat, sessionARN, endedState(err)), true
 	}
 	// No flags in the restart: a FAIL line must not quote --allow-adb-reverse without its caveat.
 	var rejected *session.RequestRejectedError
 	if errors.As(err, &rejected) && rejected.CredentialsExpired() {
-		return fmt.Sprintf("the AWS credentials the bridge started with have expired, so it can no longer read remote access "+
-			"session %s; refresh the credentials, run '%s bridge stop', start the bridge again from that shell with the same "+
-			"options, then %s %s'", sessionARN, config.BinaryName, reattachCommand, sessionARN), true
+		return fmt.Sprintf(wording.DetachCredentialsExpiredFormat, sessionARN, sessionARN), true
 	}
 	for _, class := range classifiedFailures {
 		if errors.Is(err, class) {
-			return fmt.Sprintf("the bridge can no longer read remote access session %s: %s; restart the bridge from a shell with working AWS credentials",
-				sessionARN, classCause(class, err)), true
+			return fmt.Sprintf(wording.DetachSessionUnreadableFormat, sessionARN, classCause(class, err)), true
 		}
 	}
-	return fmt.Sprintf("the bridge could not look up remote access session %s: %v; %s %s' to attach it again",
-		sessionARN, err, reattachCommand, sessionARN), false
+	return fmt.Sprintf(wording.DetachLookupFailedFormat, sessionARN, err, sessionARN), false
 }
 
 // classCause words a classified failure for the user: the class, plus the service's error code
@@ -787,11 +773,11 @@ func endedState(err error) string {
 	var ended *session.SessionEndedError
 	switch {
 	case !errors.As(err, &ended):
-		return "has ended"
+		return wording.SessionEnded
 	case ended.Status == "STOPPING":
-		return "is stopping (STOPPING)"
+		return wording.DetachStoppingClause
 	}
-	return "has ended (" + ended.Status + ")"
+	return fmt.Sprintf(wording.DetachEndedWithStatusClauseFormat, ended.Status)
 }
 
 // refusalHandler is the bridge's lookup after a refused fresh adb connection. It runs under the

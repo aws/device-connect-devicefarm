@@ -3,7 +3,7 @@
 AWS Device Farm hosts real mobile devices in the cloud. A remote access session gives you live control of one
 of them. Device Connect for AWS Device Farm lets you use `adb`, the Android command-line tool, with that device
 as if it were plugged into your computer. You run one program, `devicefarm-connect`. It acts as the adb server
-for your local `adb` command and relays each adb connection over an encrypted websocket to the device. It is
+for your local `adb` command and relays each adb connection over an encrypted WebSocket to the device. It is
 for developers and testers who use Device Farm devices from the command line.
 
 ## Requirements
@@ -260,17 +260,17 @@ device detached <age> ago: <reason>` when the bridge detached it itself.
 # Check this machine and this shell before 'bridge start'.
 devicefarm-connect doctor
 
-# Also check the session, the connection to the device and the remote adb server's version.
+# Also check the session, the connection to the device, and the remote adb server's version.
 devicefarm-connect doctor --session-arn arn:aws:devicefarm:us-west-2:123456789012:session:11111111-2222-3333-4444-5555555abcde
 ```
 
 `doctor` runs readiness checks for `bridge start`, `device add`, an adb connection, a reconnect to
-the device, `adb forward` and `adb reverse`, and prints one table row per category on stdout:
-Local machine (the working directory, the bridge and the ports it needs), AWS (this
+the device, `adb forward`, and `adb reverse`, and prints one table row per category on stdout:
+Local machine (the working directory, the bridge, and the ports it needs), AWS (this
 shell's credentials and the remote access session), Network (the adb connection to the device
-through Device Farm, its reconnect and adb reverse) and Dependencies (the adb installed here
-against the device's adb server). A row is `FAIL` when a check in it failed, `WARN` when one
-works with a caveat, `SKIP` when none ran, else `PASS`; the Details column names each check that
+through Device Farm, its reconnect, and adb reverse), and Dependencies (the adb installed here
+against the device's adb server). A row is `FAIL` when a check in it fails, `WARN` when one
+works with a caveat, `SKIP` when none run, else `PASS`; the Details column names each check that
 did not pass and why. On a machine with no bridge running, `devicefarm-connect doctor --port 60001`
 (a port nothing holds) prints:
 
@@ -283,7 +283,7 @@ did not pass and why. On a machine with no bridge running, `devicefarm-connect d
 | AWS           | PASS   | AWS credentials                                     |
 |               |        | remote access session not checked: pass             |
 |               |        |   --session-arn to check the session, the device    |
-|               |        |   connection and adb versions                       |
+|               |        |   connection, and adb versions                      |
 +---------------+--------+-----------------------------------------------------+
 | Network       | SKIP   | not checked: needs remote access session            |
 +---------------+--------+-----------------------------------------------------+
@@ -308,7 +308,7 @@ and exits 0:
 | AWS           | PASS   | AWS credentials                                     |
 |               |        | remote access session not checked: pass             |
 |               |        |   --session-arn to check the session, the device    |
-|               |        |   connection and adb versions                       |
+|               |        |   connection, and adb versions                      |
 +---------------+--------+-----------------------------------------------------+
 | Network       | SKIP   | not checked: needs remote access session            |
 +---------------+--------+-----------------------------------------------------+
@@ -329,10 +329,10 @@ doctor: 1 of 4 categories passed, 1 warning, 2 not checked
 Exit code 0 unless a check is `FAIL`; a `WARN` leaves it 0. The table follows the terminal width,
 or `COLUMNS` when stdout is not a terminal, between 60 and 120 columns. Flags: `--session-arn`
 (optional; defaults to the session of the one device the running bridge holds; with no bridge, no
-device or several devices, the session, the connection to the device and the adb versions are not
+device, or several devices, the session, the connection to the device, and the adb versions are not
 checked), `--port` and `--listen-addr` (the address the bridge would bind, same defaults as
-`bridge start`), `--verbose` (one line per check, with its id, instead of the table), `--json` (one
-compact JSON object instead of the table; same exit code) and the global `--debug`. Run the doctor
+`bridge start`), `--verbose` (one line per check, with its ID, instead of the table), `--json` (one
+compact JSON object instead of the table; same exit code), and the global `--debug`. Run the doctor
 from the shell that will run `bridge start`: the bridge inherits that shell's environment. The
 doctor reports a running bridge in the Local machine row and does not change it. The row's
 `bridge` check is `WARN` when:
@@ -369,7 +369,7 @@ devicefarm-connect doctor --json | jq .ok
 |---|---|---|
 | `ok` | boolean | `true` when no check is `fail` (the exit code is 0) |
 | `sessionArn` | string | the session the doctor checked: the `--session-arn` value, or the one attached session, empty when none |
-| `checks` | array | one object per check in run order: `id`, `title`, `category` (`local`, `aws`, `network` or `dependencies`, the table row), `status` (`pass`, `warn`, `fail`, `skip`), `summary`, `hint` (absent when the row has none: every `pass`, and a `fail` from a timeout or Ctrl-C), `needs` (ids of the checks it needs), `elapsedMs` |
+| `checks` | array | one object per check in run order: `id`, `title`, `category` (`local`, `aws`, `network`, or `dependencies`, the table row), `status` (`pass`, `warn`, `fail`, `skip`), `summary`, `hint` (absent when the row has none: every `pass`, and a `fail` from a timeout or Ctrl-C), `needs` (IDs of the checks it needs), `elapsedMs` |
 | `summary` | object | `pass`, `warn`, `fail`, `skip` counts |
 
 Fields may be added in any release; a field is renamed, removed or retyped only in a new major
@@ -400,7 +400,7 @@ Run `devicefarm-connect <command> --help` to see the flags of a command.
 | `--session-arn` | `bridge start`, `device add`, `device remove`, `doctor` | The remote access session ARN. `device remove` without it detaches the attached device. |
 
 - The runtime directory is `$XDG_RUNTIME_DIR/devicefarm-connect`, or a per-user directory under the system
-  temp directory when that variable is not set. The log, pid file and control socket live there.
+  temp directory when that variable is not set. The log, PID file, and control socket live there.
 - `device add` and `device list` start the bridge with the default settings when none runs. They take no
   listener flags, so to pick a port or turn reverse on, run `bridge start` first. `bridge start` stops a
   running bridge in this runtime directory, says so, and starts a new one with the given flags. The restart

@@ -12,6 +12,7 @@ import (
 
 	"github.com/aws/device-connect-devicefarm/internal/doctor"
 	"github.com/aws/device-connect-devicefarm/internal/report"
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // newDoctorCommand runs the readiness checks and prints the report on stdout. Its own
@@ -22,43 +23,9 @@ func newDoctorCommand(state *rootState) *cobra.Command {
 	jsonReport := false
 	cmd := &cobra.Command{
 		Use:   "doctor",
-		Short: "Check this machine, the AWS credentials and a session before 'bridge start'",
-		Long: fmt.Sprintf(`Run readiness checks for 'bridge start', 'device add', an adb connection, a
-reconnect to the device, 'adb forward' and 'adb reverse', and print one table
-row per category:
-
-  Local machine  the working directory, the bridge, the ports it needs
-  AWS            this shell's AWS credentials and the remote access session
-  Network        the adb connection to the device, its reconnect and adb reverse
-  Dependencies   the adb on this machine against the device's adb server
-
-A row is FAIL when a check in it failed, WARN when one works with a caveat, SKIP
-when none ran, else PASS. The Details column names each check that did not pass
-and why. A "What to do" list under the table gives the fix for each WARN or
-FAIL, with the command to run. The table fits the terminal width, or COLUMNS
-when stdout is not a terminal. --verbose prints one line per check instead;
---json prints one compact JSON object. Exit code 0 unless a check is FAIL.
-Without --session-arn the doctor checks the session of the one device the
-running bridge holds; with no bridge, no device or several devices, the
-session, the connection to the device and the adb versions are not checked.
-Run the doctor from the shell that will run 'bridge start': the bridge
-inherits that shell's environment. A running bridge is reported, not changed.
-
-Side effects:
-  creates the client's working directory if absent; forgets a bridge that no
-  longer runs
-  binds and frees the listen address when no bridge holds it, and one port on
-  127.0.0.1 for 'adb forward'
-  asks whatever holds the listen address for its adb version
-  makes one GetRemoteAccessSession call
-  opens one short connection to the %s %s device per Network and
-  Dependencies check
-  runs 'adb version' on each adb it finds on PATH, in ANDROID_HOME or
-  ANDROID_SDK_ROOT, or in Android Studio's default SDK location; none starts an
-  adb server
-Starts no bridge; installs no forward or reverse rule. Each check has its own
-timeout; a run in which every check times out ends in under two minutes.`, awsName, productName),
-		Args: cobra.NoArgs,
+		Short: wording.HelpDoctor,
+		Long:  wording.HelpDoctorLong,
+		Args:  cobra.NoArgs,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			state.commandLineAccepted = true
 			initLogging(cmd, state.cfg.Debug)
@@ -82,15 +49,15 @@ timeout; a run in which every check times out ends in under two minutes.`, awsNa
 				return writeErr
 			}
 			if failed := results.Failed(); failed > 0 {
-				return fmt.Errorf("doctor: %d checks failed", failed)
+				return fmt.Errorf(wording.ProblemDoctorChecksFailedFormat, failed)
 			}
 			return nil
 		},
 	}
 	// The listen-port check binds the address bridge start would, so it takes the same flags.
 	bindListenerFlags(cmd, &state.cfg)
-	addSessionArnFlag(cmd, state, sessionArnDescription+" (optional; defaults to the one attached session; also checks the session, the connection to the device and the adb versions)")
-	cmd.Flags().BoolVar(&verbose, "verbose", false, "print one line per check, with its id, instead of the table")
-	cmd.Flags().BoolVar(&jsonReport, "json", false, "print one JSON object instead of the table; same exit code")
+	addSessionArnFlag(cmd, state, wording.FlagSessionARNDoctorUsage)
+	cmd.Flags().BoolVar(&verbose, "verbose", false, wording.FlagVerboseUsage)
+	cmd.Flags().BoolVar(&jsonReport, "json", false, wording.FlagDoctorJSONUsage)
 	return cmd
 }

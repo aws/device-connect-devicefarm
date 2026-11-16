@@ -12,36 +12,15 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/aws/device-connect-devicefarm/internal/config"
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/daemon"
 	"github.com/aws/device-connect-devicefarm/internal/failure"
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
-
-// awsName is the cloud provider prefix, kept in one place so every user-facing
-// message names it identically.
-const awsName = "AWS"
-
-// productName is the AWS product this tool fronts, kept in one place so every
-// user-facing message names it identically.
-const productName = "Device Farm"
-
-// notListeningMessage is what 'bridge stop' prints when no daemon runs.
-const notListeningMessage = config.BinaryName + " not listening"
 
 // errNotListening: no daemon answers the control socket, because none runs or
 // one holds its pidfile over a dead socket.
-var errNotListening = &failure.Explained{Problem: "the bridge is not listening"}
-
-// bridgeAutoStartNote is the help paragraph of every command that starts the bridge
-// daemon itself.
-const bridgeAutoStartNote = "If the bridge is not running, this command starts it with default\n" +
-	"settings, as 'adb' starts its own server. To pick a port or other options,\n" +
-	"run 'bridge start' first."
-
-// sessionArnDescription is the shared --session-arn help text; bridge start and
-// device remove append their own suffixes.
-var sessionArnDescription = fmt.Sprintf("%s %s remote access session ARN", awsName, productName)
+var errNotListening = &failure.Explained{Problem: wording.ProblemBridgeNotListening}
 
 // addSessionArnFlag binds the --session-arn flag to the shared rootState on cmd.
 // Every command that takes a session ARN registers it identically apart from the
@@ -82,19 +61,19 @@ func lastDetachNote(response control.Response, now time.Time) string {
 	if response.LastDetachReason == "" {
 		return ""
 	}
-	return fmt.Sprintf("the last device detached %s ago: %s",
+	return fmt.Sprintf(wording.OutputLastDetachFormat,
 		humanAge(now.Sub(response.LastDetachAt)), response.LastDetachReason)
 }
 
 // humanAge renders an age in its largest whole unit up to hours: "42 seconds", "1 minute".
 func humanAge(age time.Duration) string {
 	age = max(age, 0)
-	count, unit := int(age.Seconds()), "second"
+	count, unit := int(age.Seconds()), wording.OutputUnitSecond
 	switch {
 	case age >= time.Hour:
-		count, unit = int(age.Hours()), "hour"
+		count, unit = int(age.Hours()), wording.OutputUnitHour
 	case age >= time.Minute:
-		count, unit = int(age.Minutes()), "minute"
+		count, unit = int(age.Minutes()), wording.OutputUnitMinute
 	}
 	return countNoun(count, unit)
 }
@@ -132,7 +111,7 @@ func startBridgeIfNotRunning(cmd *cobra.Command, state *rootState) error {
 	if _, running := manager.Status(); running {
 		return nil
 	}
-	cmd.PrintErrln("* bridge not running; starting it now")
+	cmd.PrintErrln(wording.OutputBridgeStarting)
 	return startAndReport(cmd, manager)
 }
 
@@ -142,20 +121,20 @@ func startBridgeIfNotRunning(cmd *cobra.Command, state *rootState) error {
 func restartBridge(cmd *cobra.Command, state *rootState) error {
 	manager := state.newManager()
 	if _, running := manager.Status(); !running {
-		cmd.PrintErrln("* bridge not running; starting it now")
+		cmd.PrintErrln(wording.OutputBridgeStarting)
 		return startAndReport(cmd, manager)
 	}
 	result, err := stopBridge(manager)
 	if err != nil {
 		// A fix on the stop error (the elevated-shell one) rides the chain.
-		return &failure.Explained{Problem: "could not stop the running bridge", Cause: err}
+		return &failure.Explained{Problem: wording.ProblemStopRunningFailed, Cause: err}
 	}
 	if result.WasRunning {
-		line := fmt.Sprintf("* a bridge was running (pid %d) and was stopped", result.PID)
+		line := fmt.Sprintf(wording.OutputRestartStoppedFormat, result.PID)
 		if result.Killed {
-			line = fmt.Sprintf("* a bridge was running (pid %d), did not stop cleanly and was killed", result.PID)
+			line = fmt.Sprintf(wording.OutputRestartKilledFormat, result.PID)
 		}
-		cmd.PrintErrln(line + "; its attached devices, forward rules and reverse rules were dropped")
+		cmd.PrintErrln(line + wording.OutputRestartDroppedTail)
 	}
 	return startAndReport(cmd, manager)
 }
@@ -166,7 +145,7 @@ func startAndReport(cmd *cobra.Command, manager *daemon.DaemonManager) error {
 	result, err := startBridge(manager)
 	printAdbServerStopped(cmd, result.StoppedAdbServer)
 	if err != nil {
-		return &failure.Explained{Problem: "could not start the bridge", Cause: err}
+		return &failure.Explained{Problem: wording.ProblemStartFailed, Cause: err}
 	}
 	printStartResult(cmd, result)
 	return nil
@@ -175,7 +154,7 @@ func startAndReport(cmd *cobra.Command, manager *daemon.DaemonManager) error {
 // printAdbServerStopped tells the user that Start stopped their adb server.
 func printAdbServerStopped(cmd *cobra.Command, address string) {
 	if address != "" {
-		cmd.PrintErrln("* stopped the adb server on " + address + ", as 'adb kill-server' does")
+		cmd.PrintErrf(wording.OutputAdbServerStoppedFormat+"\n", address)
 	}
 }
 
@@ -183,7 +162,7 @@ func printAdbServerStopped(cmd *cobra.Command, address string) {
 // line names the log file.
 func printStartResult(cmd *cobra.Command, result daemon.StartResult) {
 	if !result.AlreadyRunning {
-		cmd.PrintErrf("* bridge started (pid %d); log file: %s\n", result.PID, result.LogFile)
+		cmd.PrintErrf(wording.OutputBridgeStartedFormat+"\n", result.PID, result.LogFile)
 	}
 }
 
@@ -196,7 +175,7 @@ func (s *rootState) send(req control.Request) (control.Response, error) {
 			slog.Debug("control dial failed", "error", err)
 			return control.Response{}, errNotListening
 		}
-		return control.Response{}, &failure.Explained{Problem: "the bridge did not answer", Cause: err}
+		return control.Response{}, &failure.Explained{Problem: wording.ProblemBridgeNoAnswer, Cause: err}
 	}
 	return resp, nil
 }
@@ -214,7 +193,7 @@ func sendToBridge(cmd *cobra.Command, state *rootState, req control.Request) (co
 // becomes the cause under refused, the command's own problem and fix.
 func attachDevice(cmd *cobra.Command, state *rootState, refused failure.Explained) error {
 	if state.sessionARN == "" {
-		return usageError(cmd, errors.New("--session-arn is required"))
+		return usageError(cmd, errors.New(wording.ProblemSessionARNRequired))
 	}
 	resp, err := sendToBridge(cmd, state, control.Request{Op: control.OpAdd, ARN: state.sessionARN})
 	if err != nil {
@@ -229,7 +208,7 @@ func attachDevice(cmd *cobra.Command, state *rootState, refused failure.Explaine
 	}
 	printListeningLine(cmd, resp)
 	if resp.ARN != "" && resp.ARN != state.sessionARN {
-		cmd.PrintErrln("* the service names this session " + resp.ARN + "; use that ARN with 'device remove'")
+		cmd.PrintErrf(wording.OutputServiceARNFormat+"\n", resp.ARN)
 	}
 	return nil
 }
@@ -251,14 +230,8 @@ func daemonRefusal(resp control.Response) error {
 // colon; wrapping it would read "...device (Google Pixel 9 (OS 16))".
 func printListeningLine(cmd *cobra.Command, response control.Response) {
 	if response.DeviceLabel == "" {
-		cmd.Printf(
-			"%s listening on port %d with no device attached; use 'device add' to connect one\n",
-			config.BinaryName, response.Port,
-		)
+		cmd.Printf(wording.OutputListeningNoDeviceFormat+"\n", response.Port)
 		return
 	}
-	cmd.Printf(
-		"%s listening on port %d with connected device: %s\n",
-		config.BinaryName, response.Port, response.DeviceLabel,
-	)
+	cmd.Printf(wording.OutputListeningWithDeviceFormat+"\n", response.Port, response.DeviceLabel)
 }

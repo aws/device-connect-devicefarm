@@ -56,11 +56,11 @@ func TestGivenExplainedOverAPlainChainWhenWrittenThenTheChainIsOneCauseLine(t *t
 }
 
 func TestGivenPlainWrapOverAnExplainedWhenWrittenThenSplitAtTheExplained(t *testing.T) {
-	err := fmt.Errorf("invalid configuration: %w", WithFix(errors.New("--port must be in 1..65535, got 0"), "set --port"))
+	err := fmt.Errorf("invalid configuration: %w", WithFix(errors.New("--port must be from 1 to 65535, got 0"), "set --port"))
 
 	assert.Equal(t,
 		"prog: error: invalid configuration\n"+
-			"  cause: --port must be in 1..65535, got 0\n"+
+			"  cause: --port must be from 1 to 65535, got 0\n"+
 			"  fix:   set --port\n",
 		render(err))
 }

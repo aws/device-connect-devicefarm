@@ -20,6 +20,7 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/bridge"
 	"github.com/aws/device-connect-devicefarm/internal/config"
 	"github.com/aws/device-connect-devicefarm/internal/session"
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 const (
@@ -48,123 +49,55 @@ const (
 var adbVersionPattern = regexp.MustCompile(`version 1\.0\.(\d{1,5})\b`)
 
 // errNoAdbVersionLine: adb ran but printed no version the pattern reads.
-var errNoAdbVersionLine = errors.New("printed no 'version 1.0.N' line")
-
-const (
-	ssoLoginCommand = "aws sso login --profile <name>"
-	// credentialsFailLead puts user words before the SDK's config or chain error.
-	credentialsFailLead = "this shell has no usable AWS credentials: "
-	// No period after the URL, so a copied line stays a working link.
-	credentialsHint = "the AWS config did not load or its credential chain resolved nothing, so every Device Farm call fails. " +
-		"Set 'AWS_PROFILE' to a profile with Device Farm access, run '" + ssoLoginCommand + "' for a profile that uses SSO, " +
-		"or export 'AWS_ACCESS_KEY_ID' and 'AWS_SECRET_ACCESS_KEY'. For more information, see " +
-		"https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-authentication.html"
-	proxyIgnoredNote = "'HTTPS_PROXY' is set, but the connection to the device does not use it, so no adb traffic gets " +
-		"through when this machine reaches the internet only through that proxy."
-	reverseOnSummary   = "the running bridge has adb reverse on for this session"
-	reversePassSummary = "adb reverse is available on this session"
-	// reverseHeldSummary replaces bridge.ErrNotifierSlotTaken's text, which names the mechanism.
-	reverseHeldSummary = "another client, or an earlier run of this client, still uses adb reverse on this session"
-	// adbHostVersionTail ends the broken-adb WARN hints.
-	adbHostVersionTail = " The remote adb server is 1.0.%[3]d, and a local adb on another version cannot connect through " +
-		"the bridge."
-	// Broken-adb WARN format args: quoted `<adb> version` command, quoted doctor rerun, remote adb server's version.
-	adbFailedHint = "the local %[1]s failed or did not finish, so that adb's version is unknown. Run %[1]s by hand and fix what it " +
-		"reports, then rerun %[2]s." + adbHostVersionTail
-	adbNoVersionHint = "the local %[1]s printed no 'version 1.0.N' line, so that adb's version is unknown. Run %[1]s by hand " +
-		"and check that it is the platform-tools adb, then rerun %[2]s." + adbHostVersionTail
-	// versionProbeFailLead puts user words before the probe error, the cause AWS Support needs.
-	versionProbeFailLead = "the remote adb server did not answer its version request: "
-	versionProbeHint     = "there is an error communicating with the remote adb server, so an adb connection through the bridge " +
-		"would fail the same way. Try again later, or contact AWS Support for assistance."
-	// noAdbSummary takes the remote adb server's version.
-	noAdbSummary = "no adb found on PATH or in an Android SDK, so its version was not checked against the remote adb server (1.0.%d)"
-	// sdkLocations: the SDK places searched, as the no-adb hint names them.
-	sdkLocations = "'ANDROID_HOME', 'ANDROID_SDK_ROOT' or Android Studio's default SDK location"
-)
+var errNoAdbVersionLine = errors.New(wording.DoctorDetailAdbNoVersionLine)
 
 // doctorRerun quotes the doctor rerun with the flags this run used.
 func doctorRerun(inputs Inputs) string {
-	command := fmt.Sprintf("%s --session-arn %s --port %d", doctorCommand, safeValue(inputs.SessionARN), inputs.Config.ListenPort)
+	command := fmt.Sprintf(wording.DoctorRerunCommandFormat, safeValue(inputs.SessionARN), inputs.Config.ListenPort)
 	if inputs.Config.ListenAddr != config.DefaultListenAddr {
-		command += " --listen-addr " + safeValue(inputs.Config.ListenAddr)
+		command += wording.ListenAddrFlagLead + safeValue(inputs.Config.ListenAddr)
 	}
 	return "'" + command + "'"
 }
 
-const (
-	createSessionCommand = "aws devicefarm create-remote-access-session --project-arn <project ARN> --device-arn <device ARN> " +
-		"--region us-west-2"
-	passArnTail = "and pass its ARN with '--session-arn'"
-)
-
 // Session hints. Each quotes the passed ARN.
 
 func invalidArnHint(inputs Inputs) string {
-	return fmt.Sprintf("'%s' is not a Device Farm remote access session ARN in us-west-2. Pass '--session-arn' the ARN that the "+
-		"Device Farm console or '%s' printed. The bridge reaches the device through that ARN and refuses any other.",
-		safeValue(inputs.SessionARN), createSessionCommand)
+	return fmt.Sprintf(wording.DoctorHintARNInvalidFormat, safeValue(inputs.SessionARN))
 }
 
 func accessDeniedHint(inputs Inputs) string {
-	return fmt.Sprintf("these credentials may not read session '%s'. Allow 'devicefarm:GetRemoteAccessSession' on it in the IAM "+
-		"policy of this profile or role, or set 'AWS_PROFILE' to a profile that has it. The bridge makes the same call every "+
-		"few minutes while the device is attached, so the permission must stay for that whole time.",
-		safeValue(inputs.SessionARN))
+	return fmt.Sprintf(wording.DoctorHintSessionAccessDeniedFormat, safeValue(inputs.SessionARN))
 }
 
 func sessionGoneHint(inputs Inputs) string {
-	return fmt.Sprintf("Device Farm has no session '%s' in this account and region. Check the ARN against "+
-		"'aws devicefarm list-remote-access-sessions --arn <project ARN> --region us-west-2' and pass one whose status is "+
-		"RUNNING. A mistyped ARN or a session of another account resolves to nothing.", safeValue(inputs.SessionARN))
+	return fmt.Sprintf(wording.DoctorHintSessionNotFoundFormat, safeValue(inputs.SessionARN))
 }
 
 func unsupportedDeviceHint(inputs Inputs) string {
-	return fmt.Sprintf("session '%s' runs on an Android release older than this client supports, so the bridge cannot attach it. "+
-		"Start a new remote access session on a device with a newer Android release (the summary names the oldest one "+
-		"supported) %s. The bridge refuses the older device at attach time too.", safeValue(inputs.SessionARN), passArnTail)
+	return fmt.Sprintf(wording.DoctorHintAndroidTooOldFormat, safeValue(inputs.SessionARN))
 }
 
 // nonAndroidDeviceHint: the device is not Android. platform is UnsupportedDeviceError.Platform.
 func nonAndroidDeviceHint(inputs Inputs, platform string) string {
-	return fmt.Sprintf("session '%s' runs on an %s device. This client connects adb to Android devices only, so the bridge "+
-		"cannot attach it. Start a new remote access session on an Android device in the Device Farm console or with '%s', %s. "+
-		"The bridge refuses the %s device at attach time too.", safeValue(inputs.SessionARN), platform, createSessionCommand,
-		passArnTail, platform)
+	return fmt.Sprintf(wording.DoctorHintNotAndroidFormat, safeValue(inputs.SessionARN), platform, platform)
 }
 
 func sessionEndedHint(inputs Inputs) string {
-	return fmt.Sprintf("session '%s' has ended, so nothing can attach to it. Start a new remote access session in the Device Farm "+
-		"console or with '%s', %s. A bridge attached to a session that ends drops the device within a few minutes.",
-		safeValue(inputs.SessionARN), createSessionCommand, passArnTail)
+	return fmt.Sprintf(wording.DoctorHintSessionEndedFormat, safeValue(inputs.SessionARN))
 }
 
 func notRunningHint(inputs Inputs) string {
-	return fmt.Sprintf("this session has no interactive endpoint yet (it is still starting, or not RUNNING), so the bridge "+
-		"cannot attach it. Wait until 'aws devicefarm get-remote-access-session --arn %s --region us-west-2' reports status "+
-		"RUNNING with an endpoint, then rerun %s.", safeValue(inputs.SessionARN), doctorRerun(inputs))
+	return fmt.Sprintf(wording.DoctorHintSessionNotReadyFormat, safeValue(inputs.SessionARN), doctorRerun(inputs))
 }
 
 func requestRejectedHint(inputs Inputs) string {
-	return fmt.Sprintf("Device Farm rejected the request for session '%s' (the summary names the code), so the request itself "+
-		"is at fault: expired or wrong credentials, a bad signature or a clock that is off, not the network. Run "+
-		"'aws sts get-caller-identity' with the same profile or keys and fix what it reports, or the system clock on a "+
-		"signature error, then rerun %s. The bridge signs its calls the same way and would detach the device on the same answer.",
-		safeValue(inputs.SessionARN), doctorRerun(inputs))
+	return fmt.Sprintf(wording.DoctorHintRequestRejectedFormat, safeValue(inputs.SessionARN), doctorRerun(inputs))
 }
 
 func sessionNetworkHint(inputs Inputs) string {
-	return fmt.Sprintf("the call to Device Farm for session '%s' failed. Check the network path from this machine to "+
-		"'devicefarm.us-west-2.amazonaws.com'; 'HTTPS_PROXY' applies to this call, so set or clear it to match your network. "+
-		"The bridge makes the same call when it attaches and every few minutes after.", safeValue(inputs.SessionARN))
+	return fmt.Sprintf(wording.DoctorHintSessionCallFailedFormat, safeValue(inputs.SessionARN))
 }
-
-// sessionArnSkipSummary is the session row's SKIP text with no ARN and no device.
-const sessionArnSkipSummary = "pass --session-arn to check the session, the device connection and adb versions"
-
-// severalSessionsSkipSummary is the session row's SKIP text with no ARN and several devices.
-// It takes the device count.
-const severalSessionsSkipSummary = "the bridge holds %d devices; pass --session-arn to pick the session to check"
 
 // sessionToCheck is the session the session and relay rows check: the trimmed --session-arn
 // value, else the session of the one device the running daemon holds (fromDaemon true), else
@@ -190,17 +123,17 @@ func withSessionToCheck(inputs Inputs, state *runState) Inputs {
 // remoteChecks are the rows that leave this machine, in run order.
 func remoteChecks(inputs Inputs, state *runState) []Check {
 	return []Check{
-		{ID: checkCredentials, Title: "AWS credentials", Category: CategoryAWS, Timeout: remoteTimeout,
+		{ID: checkCredentials, Title: wording.DoctorTitleAWSCredentials, Category: CategoryAWS, Timeout: remoteTimeout,
 			Run: func(ctx context.Context) Result { return checkCredentialsResolve(ctx, inputs) }},
-		{ID: checkSession, Title: "remote access session", Category: CategoryAWS, Needs: []string{checkCredentials}, Timeout: remoteTimeout,
+		{ID: checkSession, Title: wording.DoctorTitleRemoteAccessSession, Category: CategoryAWS, Needs: []string{checkCredentials}, Timeout: remoteTimeout,
 			Run: func(ctx context.Context) Result { return checkSessionRunning(ctx, inputs, state) }},
-		{ID: checkRelaySession, Title: "adb session to the device", Category: CategoryNetwork, Needs: []string{checkSession}, Timeout: remoteTimeout,
+		{ID: checkRelaySession, Title: wording.DoctorTitleAdbSession, Category: CategoryNetwork, Needs: []string{checkSession}, Timeout: remoteTimeout,
 			Run: func(ctx context.Context) Result { return checkRelaySessionOpens(ctx, inputs, state) }},
-		{ID: checkReattach, Title: "adb session reconnect", Category: CategoryNetwork, Needs: []string{checkRelaySession}, Timeout: reattachTimeout,
+		{ID: checkReattach, Title: wording.DoctorTitleAdbSessionReconnect, Category: CategoryNetwork, Needs: []string{checkRelaySession}, Timeout: reattachTimeout,
 			Run: func(ctx context.Context) Result { return checkReattachAcked(ctx, inputs, state) }},
-		{ID: checkReverse, Title: "adb reverse", Category: CategoryNetwork, Needs: []string{checkSession, checkDaemon}, Timeout: remoteTimeout,
+		{ID: checkReverse, Title: wording.DoctorTitleAdbReverse, Category: CategoryNetwork, Needs: []string{checkSession, checkDaemon}, Timeout: remoteTimeout,
 			Run: func(ctx context.Context) Result { return checkReverseNotifier(ctx, inputs, state) }},
-		{ID: checkAdbVersion, Title: "adb versions", Category: CategoryDependencies, Needs: []string{checkRelaySession},
+		{ID: checkAdbVersion, Title: wording.DoctorTitleAdbVersions, Category: CategoryDependencies, Needs: []string{checkRelaySession},
 			Timeout: adbVersionTimeout + pipeDrainDelay + remoteTimeout,
 			Run:     func(ctx context.Context) Result { return checkAdbVersionSkew(ctx, inputs, state) }},
 	}
@@ -213,9 +146,9 @@ func remoteChecks(inputs Inputs, state *runState) []Check {
 func checkCredentialsResolve(ctx context.Context, inputs Inputs) Result {
 	summary, err := inputs.Credentials(ctx)
 	if err != nil {
-		return Result{Status: Fail, Summary: credentialsFailLead + err.Error(), Hint: credentialsHint}
+		return Result{Status: Fail, Summary: wording.DoctorDetailNoCredentialsLead + err.Error(), Hint: wording.DoctorHintNoCredentials}
 	}
-	return Result{Status: Pass, Summary: "credentials from " + summary.Source}
+	return Result{Status: Pass, Summary: fmt.Sprintf(wording.DoctorDetailCredentialsSourceFormat, summary.Source)}
 }
 
 // sessionLookup is one GetSession answer. noClient: err came from building the client.
@@ -256,24 +189,24 @@ func checkSessionRunning(ctx context.Context, inputs Inputs, state *runState) Re
 	sessionARN, fromDaemon, attached := sessionToCheck(inputs, state)
 	if sessionARN == "" {
 		if attached >= 2 {
-			return Result{Status: Skip, Summary: fmt.Sprintf(severalSessionsSkipSummary, attached)}
+			return Result{Status: Skip, Summary: fmt.Sprintf(wording.DoctorDetailSeveralDevicesFormat, attached)}
 		}
-		return Result{Status: Skip, Summary: sessionArnSkipSummary}
+		return Result{Status: Skip, Summary: wording.DoctorDetailSessionARNMissing}
 	}
 	inputs.SessionARN = sessionARN
 	lookup := state.lookUpSession(ctx, inputs)
 	switch {
 	case lookup.noClient:
-		return Result{Status: Fail, Summary: lookup.err.Error(), Hint: credentialsHint}
+		return Result{Status: Fail, Summary: lookup.err.Error(), Hint: wording.DoctorHintNoCredentials}
 	case lookup.err != nil:
 		return Result{Status: Fail, Summary: lookup.err.Error(), Hint: sessionHint(lookup.err, inputs)}
 	}
 	info := lookup.info
 	state.endpoint, state.returnedARN = info.Endpoint, info.ReturnedARN(sessionARN)
 	if fromDaemon {
-		return Result{Status: Pass, Summary: fmt.Sprintf("RUNNING: %s (the session the bridge holds: %s)", info.Label, safeValue(sessionARN))}
+		return Result{Status: Pass, Summary: fmt.Sprintf(wording.DoctorDetailDaemonSessionRunningFormat, info.Label, safeValue(sessionARN))}
 	}
-	return Result{Status: Pass, Summary: "RUNNING: " + info.Label}
+	return Result{Status: Pass, Summary: fmt.Sprintf(wording.DoctorDetailSessionRunningFormat, info.Label)}
 }
 
 // sessionHint picks the fix by the error's class.
@@ -308,10 +241,10 @@ func checkRelaySessionOpens(ctx context.Context, inputs Inputs, state *runState)
 	defer cancel()
 	sessionUUID, err := inputs.Dialer.ProbeSession(probeCtx, state.endpoint)
 	if err != nil {
-		return Result{Status: Fail, Summary: "could not open an adb session to the device: " + err.Error(), Hint: relayHint(inputs)}
+		return Result{Status: Fail, Summary: wording.DoctorDetailAdbSessionFailedLead + err.Error(), Hint: relayHint(inputs)}
 	}
 	state.sessionUUID = sessionUUID
-	return Result{Status: Pass, Summary: fmt.Sprintf("adb session %s opened to the device", sessionUUID)}
+	return Result{Status: Pass, Summary: fmt.Sprintf(wording.DoctorDetailAdbSessionOpenedFormat, sessionUUID)}
 }
 
 // checkReattachAcked dials again with the probed UUID; the server must resume the session, as
@@ -321,10 +254,10 @@ func checkReattachAcked(ctx context.Context, inputs Inputs, state *runState) Res
 	probeCtx, cancel := withProbeBudget(ctx)
 	defer cancel()
 	if err := inputs.Dialer.ProbeReattach(probeCtx, state.endpoint, state.sessionUUID); err != nil {
-		return Result{Status: Fail, Summary: fmt.Sprintf("could not reconnect to adb session %s: %v", state.sessionUUID, err),
+		return Result{Status: Fail, Summary: fmt.Sprintf(wording.DoctorDetailReconnectFailedFormat, state.sessionUUID, err),
 			Hint: reattachHint(inputs)}
 	}
-	return Result{Status: Pass, Summary: "reconnected to adb session " + state.sessionUUID}
+	return Result{Status: Pass, Summary: wording.DoctorDetailReconnectedLead + state.sessionUUID}
 }
 
 // checkReverseNotifier registers a reverse notifier and releases it. The server allows one
@@ -336,18 +269,18 @@ func checkReverseNotifier(ctx context.Context, inputs Inputs, state *runState) R
 	daemon, _ := state.daemon()
 	if daemon.OK && daemon.ReverseEnabled &&
 		attachedIsAsked(strings.TrimSpace(daemon.ARN), strings.TrimSpace(inputs.SessionARN), state.returnedARN) {
-		return Result{Status: Pass, Summary: reverseOnSummary}
+		return Result{Status: Pass, Summary: wording.DoctorDetailReverseOnInDaemon}
 	}
 	probeCtx, cancel := withProbeBudget(ctx)
 	defer cancel()
 	err := inputs.Dialer.ProbeNotifier(probeCtx, state.endpoint)
 	switch {
 	case errors.Is(err, bridge.ErrNotifierSlotTaken):
-		return Result{Status: Fail, Summary: reverseHeldSummary, Hint: slotHeldHint(inputs)}
+		return Result{Status: Fail, Summary: wording.DoctorDetailReverseInUse, Hint: slotHeldHint(inputs)}
 	case err != nil:
-		return Result{Status: Fail, Summary: "adb reverse is not available on this session: " + err.Error(), Hint: relayHint(inputs)}
+		return Result{Status: Fail, Summary: wording.DoctorDetailReverseUnavailableLead + err.Error(), Hint: relayHint(inputs)}
 	}
-	return Result{Status: Pass, Summary: reversePassSummary}
+	return Result{Status: Pass, Summary: wording.DoctorDetailReverseAvailable}
 }
 
 // withProbeBudget ends a probe probeMargin before the row's deadline. The probes bound each
@@ -364,25 +297,19 @@ func withProbeBudget(ctx context.Context) (context.Context, context.CancelFunc) 
 // relayHint is the one hint for a failed relay probe; the summary names the failure. With a
 // proxy set, it adds that the websocket connection ignores it.
 func relayHint(inputs Inputs) string {
-	hint := fmt.Sprintf("Device Farm or the device did not complete the adb connection, so an adb connection through the bridge "+
-		"would fail the same way. Rerun %s once; a second failure means the network path to Device Farm or the device itself "+
-		"is at fault, so check the session in the Device Farm console.", doctorRerun(inputs))
+	hint := fmt.Sprintf(wording.DoctorHintAdbConnectionFailedFormat, doctorRerun(inputs))
 	if os.Getenv("HTTPS_PROXY") != "" || os.Getenv("https_proxy") != "" {
-		hint += " " + proxyIgnoredNote
+		hint += " " + wording.DoctorHintProxyIgnored
 	}
 	return hint
 }
 
 func reattachHint(inputs Inputs) string {
-	return fmt.Sprintf("Device Farm did not resume the adb session on a new connection, so a live adb connection would drop "+
-		"when the bridge reconnects. Rerun %s once. A second failure means Device Farm does not keep adb sessions across "+
-		"reconnects.", doctorRerun(inputs))
+	return fmt.Sprintf(wording.DoctorHintReconnectFailedFormat, doctorRerun(inputs))
 }
 
 func slotHeldHint(inputs Inputs) string {
-	return fmt.Sprintf("another client still uses adb reverse on this session, so Device Farm would refuse 'adb reverse' through "+
-		"the bridge. Stop that client with '%s' on the machine where it runs, or wait for Device Farm to release it, then rerun "+
-		"%s. Device Farm lets one client at a time use adb reverse on a device.", bridgeStopCommand, doctorRerun(inputs))
+	return fmt.Sprintf(wording.DoctorHintReverseInUseFormat, doctorRerun(inputs))
 }
 
 // checkAdbVersionSkew compares every local adb's protocol version with the remote adb server's.
@@ -396,7 +323,7 @@ func checkAdbVersionSkew(ctx context.Context, inputs Inputs, state *runState) Re
 	defer cancel()
 	hostVersion, err := inputs.Dialer.ProbeAdbServerVersion(probeCtx, state.endpoint)
 	if err != nil {
-		return Result{Status: Fail, Summary: versionProbeFailLead + err.Error(), Hint: versionProbeHint}
+		return Result{Status: Fail, Summary: wording.DoctorDetailRemoteAdbSilentLead + err.Error(), Hint: wording.DoctorHintRemoteAdbSilent}
 	}
 	return adbVersionVerdict(adbs, hiddenAdb, hostVersion, inputs)
 }
@@ -406,7 +333,7 @@ func checkAdbVersionSkew(ctx context.Context, inputs Inputs, state *runState) Re
 // adb"; others are named by path.
 func adbVersionVerdict(adbs []localAdb, hiddenAdb string, hostVersion int, inputs Inputs) Result {
 	if len(adbs) == 0 {
-		return Result{Status: Warn, Summary: fmt.Sprintf(noAdbSummary, hostVersion), Hint: noAdbHint(hiddenAdb, hostVersion, inputs)}
+		return Result{Status: Warn, Summary: fmt.Sprintf(wording.DoctorDetailNoAdbFormat, hostVersion), Hint: noAdbHint(hiddenAdb, hostVersion, inputs)}
 	}
 	var mismatched, broken []localAdb
 	for _, adb := range adbs {
@@ -428,8 +355,8 @@ func adbVersionVerdict(adbs []localAdb, hiddenAdb string, hostVersion int, input
 		}
 		return Result{Status: Warn, Summary: strings.Join(problems, "; "), Hint: brokenAdbHint(broken[0], hostVersion, inputs)}
 	case hiddenAdb != "":
-		return Result{Status: Warn, Summary: fmt.Sprintf("%s, but an adb at '%s' reached only through the current directory or a relative "+
-			"PATH entry was not checked", matchSummary(adbs, hostVersion), safeValue(hiddenAdb)), Hint: hiddenAdbHint(hiddenAdb, inputs)}
+		return Result{Status: Warn, Summary: fmt.Sprintf(wording.DoctorDetailAdbNotRunFormat, matchSummary(adbs, hostVersion), safeValue(hiddenAdb)),
+			Hint: hiddenAdbHint(hiddenAdb, inputs)}
 	}
 	return Result{Status: Pass, Summary: matchSummary(adbs, hostVersion)}
 }
@@ -437,24 +364,22 @@ func adbVersionVerdict(adbs []localAdb, hiddenAdb string, hostVersion int, input
 // matchSummary: the matching version, with the count when several adbs were found.
 func matchSummary(adbs []localAdb, hostVersion int) string {
 	if len(adbs) > 1 {
-		return fmt.Sprintf("local adb 1.0.%d (%d found) matches the remote adb server", hostVersion, len(adbs))
+		return fmt.Sprintf(wording.DoctorDetailSeveralAdbsMatchFormat, hostVersion, len(adbs))
 	}
-	return fmt.Sprintf("local adb 1.0.%d matches the remote adb server", hostVersion)
+	return fmt.Sprintf(wording.DoctorDetailAdbMatchesFormat, hostVersion)
 }
 
 // hiddenAdbHint, for an adb the lookup found but did not run beside adbs it did: the PATH fix,
 // the consequence.
 func hiddenAdbHint(hiddenAdb string, inputs Inputs) string {
-	return fmt.Sprintf("an adb exists at '%s', reached only through the current directory or a relative PATH entry, so it was not run "+
-		"and its version is unknown. Add that directory to PATH by its absolute path if you meant that adb, then rerun %s. A local adb "+
-		"on another version cannot connect through the bridge.", safeValue(hiddenAdb), doctorRerun(inputs))
+	return fmt.Sprintf(wording.DoctorHintAdbNotRunFormat, safeValue(hiddenAdb), doctorRerun(inputs))
 }
 
 // platformToolsExample: a leading-comma clause naming a platform-tools release whose adb speaks
 // hostVersion; "" when none is known. Updated by hand when platform-tools moves adb's protocol version.
 func platformToolsExample(hostVersion int) string {
 	if hostVersion == 41 {
-		return ", such as platform-tools 37"
+		return wording.DoctorHintPlatformToolsClause
 	}
 	return ""
 }
@@ -463,14 +388,13 @@ func platformToolsExample(hostVersion int) string {
 func skewSummary(mismatched []localAdb, named bool, hostVersion int) string {
 	labels := make([]string, len(mismatched))
 	for index, adb := range mismatched {
-		labels[index] = fmt.Sprintf("local adb 1.0.%d%s", adb.version, adb.at(named))
+		labels[index] = adb.summaryLabel(named)
 	}
-	verb := "differs"
+	verb := wording.DoctorDetailMismatchDiffers
 	if len(mismatched) > 1 {
-		verb = "differ"
+		verb = wording.DoctorDetailMismatchDiffer
 	}
-	return fmt.Sprintf("%s %s from the remote adb server (1.0.%d); every %s fails",
-		joinAnd(labels), verb, hostVersion, failingCommand(mismatched, named))
+	return fmt.Sprintf(wording.DoctorDetailMismatchFormat, joinAnd(labels), verb, hostVersion, failingCommand(mismatched, named))
 }
 
 // failingCommand is the command family a mismatch breaks: any adb command for a lone PATH adb,
@@ -478,11 +402,11 @@ func skewSummary(mismatched []localAdb, named bool, hostVersion int) string {
 func failingCommand(mismatched []localAdb, named bool) string {
 	switch {
 	case !named:
-		return "adb command"
+		return wording.DoctorMismatchAdbCommandClause
 	case len(mismatched) > 1:
-		return "command from any of them"
+		return wording.DoctorMismatchFromAnyOfThemClause
 	}
-	return "command from that adb"
+	return wording.DoctorMismatchFromThatAdbClause
 }
 
 // skewHint: each version, an Android Studio clause when a lone PATH adb is also the SDK's, the
@@ -498,33 +422,28 @@ func skewHint(mismatched []localAdb, named bool, hostVersion int, inputs Inputs)
 			sdkPath = adb.sdkPath
 		}
 	}
-	labels = append(labels, fmt.Sprintf("the remote adb server is 1.0.%d", hostVersion))
+	labels = append(labels, fmt.Sprintf(wording.DoctorHintMismatchRemoteAdbFormat, hostVersion))
 	command := failingCommand(mismatched, named)
-	cause := fmt.Sprintf("%s, so every %s fails: that adb tries to start its own adb server on the bridge's port and cannot",
-		joinAnd(labels), command)
-	fix := fmt.Sprintf("Install platform-tools whose adb is 1.0.%d%s, or put such an adb first on PATH", hostVersion,
-		platformToolsExample(hostVersion))
+	cause := fmt.Sprintf(wording.DoctorHintMismatchCauseFormat, joinAnd(labels), command)
+	fix := fmt.Sprintf(wording.DoctorHintMismatchInstallFormat, hostVersion, platformToolsExample(hostVersion))
 	if sdkPath != "" {
 		if !named {
-			cause += fmt.Sprintf("; Android Studio runs the SDK's adb at '%s', so Studio lists no device while that adb is on "+
-				"another version", safeValue(sdkPath))
+			cause += fmt.Sprintf(wording.DoctorHintMismatchStudioClauseFormat, safeValue(sdkPath))
 		}
 		alsoPath := ""
 		if pathOnly {
-			alsoPath = ", and put such an adb first on PATH"
+			alsoPath = wording.DoctorHintMismatchPathClause
 		}
-		fix = fmt.Sprintf("Update Android SDK Platform-Tools in Android Studio's SDK Manager to a release whose adb is 1.0.%d%s%s",
-			hostVersion, platformToolsExample(hostVersion), alsoPath)
+		fix = fmt.Sprintf(wording.DoctorHintMismatchUpdateSDKFormat, hostVersion, platformToolsExample(hostVersion), alsoPath)
 	}
-	return fmt.Sprintf("%s. %s, then rerun %s. Until then no %s reaches the device. The remote adb server is not affected.",
-		cause, fix, doctorRerun(inputs), command)
+	return fmt.Sprintf(wording.DoctorHintMismatchFormat, cause, fix, doctorRerun(inputs), command)
 }
 
 // brokenAdbHint: the failed command, its by-hand run, the rerun, the remote adb server's version.
 func brokenAdbHint(adb localAdb, hostVersion int, inputs Inputs) string {
-	format := adbFailedHint
+	format := wording.DoctorHintAdbFailedFormat
 	if errors.Is(adb.err, errNoAdbVersionLine) {
-		format = adbNoVersionHint
+		format = wording.DoctorHintAdbNoVersionFormat
 	}
 	return fmt.Sprintf(format, adb.versionCommand(), doctorRerun(inputs), hostVersion)
 }
@@ -532,24 +451,21 @@ func brokenAdbHint(adb localAdb, hostVersion int, inputs Inputs) string {
 // noAdbHint: the cause (and any adb found only through a relative entry), the PATH or install fix,
 // the consequence.
 func noAdbHint(hiddenAdb string, hostVersion int, inputs Inputs) string {
-	hidden, action := "", "Install"
+	hidden, action := "", wording.DoctorHintNoAdbInstallLead
 	if hiddenAdb != "" {
-		hidden = fmt.Sprintf("; an adb exists at '%s', reached only through the current directory or a relative PATH entry, so it "+
-			"was not run", safeValue(hiddenAdb))
-		action = "Add that directory to PATH by its absolute path if you meant that adb, or install"
+		hidden = fmt.Sprintf(wording.DoctorHintNoAdbNotRunClauseFormat, safeValue(hiddenAdb))
+		action = wording.DoctorHintNoAdbAddOrInstallLead
 	}
-	return fmt.Sprintf("adb was not found on PATH or in an Android SDK (%s), so the doctor could not check that its version "+
-		"matches the remote adb server (1.0.%d)%s. %s Android platform-tools whose adb is 1.0.%d%s, then add its directory to "+
-		"PATH and rerun %s. A local adb on another version cannot connect through the bridge.", sdkLocations,
+	return fmt.Sprintf(wording.DoctorHintNoAdbFormat,
 		hostVersion, hidden, action, hostVersion, platformToolsExample(hostVersion), doctorRerun(inputs))
 }
 
-// joinAnd lists items as "a", "a and b" or "a, b and c".
+// joinAnd lists items as "a", "a and b", or "a, b, and c".
 func joinAnd(items []string) string {
-	if len(items) <= 1 {
-		return strings.Join(items, "")
+	if len(items) <= 2 {
+		return strings.Join(items, wording.DoctorMismatchListAnd)
 	}
-	return strings.Join(items[:len(items)-1], ", ") + " and " + items[len(items)-1]
+	return strings.Join(items[:len(items)-1], ", ") + wording.DoctorMismatchListSerialAnd + items[len(items)-1]
 }
 
 // localAdb is one adb binary on this machine: how the lookup reached it, then its protocol
@@ -562,12 +478,12 @@ type localAdb struct {
 	err     error
 }
 
-// at renders " at '<path>'", or "" when not named.
-func (adb localAdb) at(named bool) string {
+// summaryLabel names the adb and its version for a summary: by path when named.
+func (adb localAdb) summaryLabel(named bool) string {
 	if !named {
-		return ""
+		return fmt.Sprintf(wording.DoctorDetailMismatchLocalAdbFormat, adb.version)
 	}
-	return fmt.Sprintf(" at '%s'", safeValue(adb.path))
+	return fmt.Sprintf(wording.DoctorDetailMismatchLocalAdbAtPathFormat, adb.version, safeValue(adb.path))
 }
 
 // hintLabel names the adb and its version for a hint: a lone PATH adb is "the local adb", an SDK
@@ -575,16 +491,16 @@ func (adb localAdb) at(named bool) string {
 func (adb localAdb) hintLabel(named bool) string {
 	switch {
 	case !named:
-		return fmt.Sprintf("the local adb is 1.0.%d", adb.version)
+		return fmt.Sprintf(wording.DoctorHintMismatchLocalAdbFormat, adb.version)
 	case adb.sdkPath != "":
-		return fmt.Sprintf("Android Studio's adb at '%s' is 1.0.%d", safeValue(adb.sdkPath), adb.version)
+		return fmt.Sprintf(wording.DoctorHintMismatchStudioAdbFormat, safeValue(adb.sdkPath), adb.version)
 	}
-	return fmt.Sprintf("the local adb at '%s' is 1.0.%d", safeValue(adb.path), adb.version)
+	return fmt.Sprintf(wording.DoctorHintMismatchLocalAdbAtPathFormat, safeValue(adb.path), adb.version)
 }
 
 // versionCommand quotes the `adb version` run on this adb.
 func (adb localAdb) versionCommand() string {
-	return fmt.Sprintf("'%s version'", safeValue(adb.path))
+	return fmt.Sprintf(wording.DoctorAdbVersionCommandFormat, safeValue(adb.path))
 }
 
 // inspectLocalAdbs runs `adb version` on every found adb in parallel: all share one bound.
@@ -693,9 +609,9 @@ func localAdbVersion(ctx context.Context, adb localAdb) (int, error) {
 	case errors.Is(err, exec.ErrWaitDelay):
 		// adb exited and a child kept its pipes; the output is whole, whatever the clock says.
 	case versionCtx.Err() != nil:
-		return 0, fmt.Errorf("%s did not finish in %s", adb.versionCommand(), adbVersionTimeout)
+		return 0, fmt.Errorf(wording.DoctorDetailAdbTimedOutFormat, adb.versionCommand(), adbVersionTimeout)
 	case err != nil:
-		return 0, fmt.Errorf("%s failed: %s", adb.versionCommand(), safeValue(err.Error())) // the launch error repeats the path
+		return 0, fmt.Errorf(wording.DoctorDetailAdbFailedFormat, adb.versionCommand(), safeValue(err.Error())) // the launch error repeats the path
 	}
 	match := adbVersionPattern.FindSubmatch(output)
 	if match == nil {

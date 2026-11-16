@@ -14,6 +14,7 @@ import (
 
 	"github.com/aws/device-connect-devicefarm/internal/adbwire"
 	"github.com/aws/device-connect-devicefarm/internal/forward"
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // DeviceInfo identifies the remote device the proxy is currently bridging to.
@@ -199,7 +200,7 @@ func WithSessionStoppingReason(reason func(sessionARN string) string) ActiveDevi
 
 // defaultStoppingReason is the detach reason without WithSessionStoppingReason.
 func defaultStoppingReason(sessionARN string) string {
-	return fmt.Sprintf("remote access session %s is stopping", sessionARN)
+	return fmt.Sprintf(wording.DetachSessionStoppingFormat, sessionARN)
 }
 
 // NewActiveDevice builds an empty ActiveDevice.

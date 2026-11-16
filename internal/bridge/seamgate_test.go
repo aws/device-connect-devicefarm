@@ -19,10 +19,10 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/testsupport"
 )
 
-// reverseNotReadyFail is msgReverseNotReady as the client reads it, framed.
+// reverseNotReadyFail is wording.AdbFailReverseNotReady as the client reads it, framed.
 const reverseNotReadyFail = "FAIL0043the device's reverse rules are not ready yet; run the command again"
 
-// reverseSlotHeldFail is msgReverseSlotHeld as the client reads it, framed.
+// reverseSlotHeldFail is wording.AdbFailReverseHeld as the client reads it, framed.
 const reverseSlotHeldFail = "FAIL0099adb reverse on this device is held by another adb client, or by this client's previous connection for a short while; stop the other client or retry later"
 
 // framedKillforwardAll is the attach clear's kill as one websocket message.
