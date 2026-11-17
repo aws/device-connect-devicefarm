@@ -97,6 +97,8 @@ func TestGivenCommandLineMistakesWhenExecutedThenEachNamesTheCommandsHelp(t *tes
 			problem: "unknown flag: --bogus", helpOf: ""},
 		{name: "unknown flag on a leaf", args: []string{"device", "list", "--list"},
 			problem: "unknown flag: --list", helpOf: "device list"},
+		{name: "a session on bridge start", args: []string{"bridge", "start", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0"},
+			problem: "unknown flag: --session-arn", helpOf: "bridge start"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -127,7 +129,6 @@ func TestGivenTheBridgeRefusesWhenEachCommandExecutesThenItPrintsTheBridgesFixOr
 		problem string
 	}{
 		{[]string{"device", "add", "--session-arn", sessionARN}, "could not attach the device"},
-		{[]string{"bridge", "start", "--session-arn", sessionARN}, "the bridge started but could not attach the device"},
 		{[]string{"device", "list"}, "could not list the devices"},
 		{[]string{"device", "remove"}, "could not detach the device"},
 	}
@@ -152,17 +153,11 @@ func TestGivenTheBridgeRefusesWhenEachCommandExecutesThenItPrintsTheBridgesFixOr
 				serveControlOfProgramVersion(t, fakeRuntimePaths(t), reply.programVersion, func(control.Request) control.Response {
 					return control.Response{OK: false, Error: "refused", Fixes: reply.fixes}
 				})
-				// bridge start --session-arn restarts the running bridge before its add.
-				fakeBridgeStop(t, daemon.StopResult{}, nil)
-				countingBridgeStart(t)
 
 				code, out := runExecute(t, command.args...)
 
 				assert.Equal(t, 1, code)
-				// bridge start prints its start line first.
-				assert.True(t, strings.HasSuffix(out, config.BinaryName+": error: "+command.problem+"\n"+
-					"  cause: refused\n"+reply.fixLines), out)
-				assert.Equal(t, strings.Count(reply.fixLines, "  fix:   "), strings.Count(out, "  fix:   "), out)
+				assert.Equal(t, config.BinaryName+": error: "+command.problem+"\n"+"  cause: refused\n"+reply.fixLines, out)
 			})
 		}
 	}
@@ -259,25 +254,4 @@ func TestGivenCommandSucceedsWhenExecutedThenReturnsZero(t *testing.T) {
 
 	require.Equal(t, 0, code)
 	assert.Equal(t, config.BinaryName+" bridge is not running\n", out)
-}
-
-func TestGivenARunningBridgeWhenBridgeStartGetsAMalformedSessionArnThenItPrintsTheArnFixAndTheBridgeKeepsRunning(t *testing.T) {
-	for _, malformedArn := range []string{"not-an-arn", "arn::devicefarm:us-west-2:1:session:a/b/0"} {
-		t.Run(malformedArn, func(t *testing.T) {
-			stops, starts := fakeRestart(t, func(req control.Request) control.Response {
-				t.Errorf("no request may reach the daemon; got %q", req.Op)
-				return control.Response{OK: true}
-			}, daemon.StopResult{PID: 4242, WasRunning: true})
-
-			code, out := runExecute(t, "bridge", "start", "--session-arn", malformedArn)
-
-			assert.Equal(t, 1, code)
-			assert.Contains(t, out, config.BinaryName+": error: invalid session ARN: ")
-			assert.True(t, strings.HasSuffix(out, "\n  fix:   Pass the ARN of a running remote access session. To list your sessions, "+
-				"run 'aws devicefarm list-remote-access-sessions --arn <project ARN> --region us-west-2'.\n"), out)
-			assert.NotContains(t, out, "--help", "the fix is the ARN's, not the usage one")
-			assert.Zero(t, *stops, "a malformed ARN must not stop the running bridge")
-			assert.Zero(t, *starts)
-		})
-	}
 }

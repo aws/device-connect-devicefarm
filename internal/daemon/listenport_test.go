@@ -310,25 +310,28 @@ func TestGivenAListenAddressWhenItsHostIsResolvedThenTheBindAndTheDialShareOneAd
 	assert.Error(t, err, "a name that does not resolve is the bind error")
 }
 
-func TestGivenARestartWhenItsCommandIsBuiltThenItIsOneStartWithThePortTheReverseFlagAndTheSessionAsGiven(t *testing.T) {
+func TestGivenARestartRemedyWhenItIsBuiltThenTheStartIsQuotedWithItsClauseAndTheAddFollowsOnlyForASession(t *testing.T) {
 	const sessionARN = "arn:aws:devicefarm:us-west-2:111122223333:session:a/b/0"
+	const startCommand = "devicefarm-connect bridge start --port 6000"
+	const otherOptions = " with any other option the bridge started with"
 	tests := []struct {
 		name       string
-		listenAddr string
-		port       int
-		reverse    bool
+		clause     string
 		sessionARN string
 		want       string
 	}{
-		{"the port alone", "127.0.0.1", 5037, false, "", "devicefarm-connect bridge start --port 5037"},
-		{"a session", "127.0.0.1", 6000, false, sessionARN, "devicefarm-connect bridge start --port 6000 --session-arn " + sessionARN},
-		{"reverse on", "127.0.0.1", 5037, true, "", "devicefarm-connect bridge start --port 5037 --allow-adb-reverse"},
-		{"reverse on with a session off the default address", "0.0.0.0", 5037, true, sessionARN,
-			"devicefarm-connect bridge start --port 5037 --listen-addr 0.0.0.0 --allow-adb-reverse --session-arn " + sessionARN},
+		{"no session", "", "", "'devicefarm-connect bridge start --port 6000'"},
+		{"a clause and no session", otherOptions, "",
+			"'devicefarm-connect bridge start --port 6000' with any other option the bridge started with"},
+		{"a session", "", sessionARN,
+			"'devicefarm-connect bridge start --port 6000', then run 'devicefarm-connect device add --session-arn " + sessionARN + "'"},
+		{"a clause and a session", otherOptions, sessionARN,
+			"'devicefarm-connect bridge start --port 6000' with any other option the bridge started with, then run " +
+				"'devicefarm-connect device add --session-arn " + sessionARN + "'"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, RestartCommand(tc.listenAddr, tc.port, tc.reverse, tc.sessionARN))
+			assert.Equal(t, tc.want, RestartRemedy(startCommand, tc.clause, tc.sessionARN))
 		})
 	}
 }

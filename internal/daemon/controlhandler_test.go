@@ -31,16 +31,17 @@ func addReq(arn string) control.Request {
 
 // Commands and fixes that a bridge on the default port sends for testSessionArnOne.
 const (
-	fixAddCommand     = "devicefarm-connect device add --session-arn " + testSessionArnOne
-	fixDoctorCommand  = "devicefarm-connect doctor --session-arn " + testSessionArnOne + " --port 5037"
-	fixRestartCommand = "devicefarm-connect bridge start --port 5037 --session-arn " + testSessionArnOne
+	fixAddCommand    = "devicefarm-connect device add --session-arn " + testSessionArnOne
+	fixDoctorCommand = "devicefarm-connect doctor --session-arn " + testSessionArnOne + " --port 5037"
+	// The restart, then the add, quoted.
+	fixRestartThenAdd = "'devicefarm-connect bridge start --port 5037', then run '" + fixAddCommand + "'"
 	fixNewSession     = "Start a new remote access session, then run 'devicefarm-connect device add --session-arn <new ARN>'."
 	fixOtherDevice    = "Start a remote access session on another device, then run 'devicefarm-connect device add " +
 		"--session-arn <new ARN>'. If the error remains, contact AWS Support."
 	fixPassRunningARN = "Pass the ARN of a running remote access session. To list your sessions, run " +
 		"'aws devicefarm list-remote-access-sessions --arn <project ARN> --region us-west-2'."
 	fixCredentials = "The bridge uses the AWS credentials of the shell that started it. From a shell with working AWS " +
-		"credentials that allow devicefarm:GetRemoteAccessSession, run '" + fixRestartCommand + "'."
+		"credentials that allow devicefarm:GetRemoteAccessSession, run " + fixRestartThenAdd + "."
 	fixDoctorThenSupport = "Run '" + fixDoctorCommand + "'. If the doctor does not find the cause, contact AWS Support."
 	fixRetryThenDoctor   = "Run '" + fixAddCommand + "' again. If the error remains, run '" + fixDoctorCommand +
 		"'. If the doctor does not find the cause, contact AWS Support."
@@ -440,7 +441,7 @@ func (s *controlHandlerSuite) TestEveryFailedLookupIsRefusedWithItsCauseAloneAnd
 			"Wait for the session to begin running, then run '" + fixAddCommand + "' again."},
 		{"running with no endpoint", &session.NoEndpointError{SessionARN: testSessionArnOne, Status: "RUNNING"}, fixDoctorThenSupport},
 		{"a failure with no class", errors.New("connection reset"),
-			"Run '" + fixDoctorCommand + "'. If its AWS and Network rows pass, restart the bridge from this shell with '" + fixRestartCommand + "'."},
+			"Run '" + fixDoctorCommand + "'. If its AWS and Network rows pass, restart the bridge from this shell with " + fixRestartThenAdd + "."},
 	}
 	for _, testCase := range cases {
 		s.Run(testCase.name, func() {
@@ -465,7 +466,7 @@ func (s *controlHandlerSuite) TestBridgeOffTheDefaultsWithReverseOnItsFixQuotesI
 
 	s.Equal([]string{"Run 'devicefarm-connect doctor --session-arn " + testSessionArnOne + " --port 6000 --listen-addr 0.0.0.0'. " +
 		"If its AWS and Network rows pass, restart the bridge from this shell with 'devicefarm-connect bridge start --port 6000 " +
-		"--listen-addr 0.0.0.0 --session-arn " + testSessionArnOne + "' with any other option the bridge started with."}, resp.Fixes)
+		"--listen-addr 0.0.0.0' with any other option the bridge started with, then run '" + fixAddCommand + "'."}, resp.Fixes)
 }
 
 func TestGivenEachKindOfFailedConnectionWhenItsFixIsPickedThenItIsTheFixOfItsClass(t *testing.T) {
@@ -489,7 +490,7 @@ func TestGivenEachKindOfFailedConnectionWhenItsFixIsPickedThenItIsTheFixOfItsCla
 		{"an unreachable host that names its port", bridge.ConnectionFailure{Kind: bridge.FailureUnreachable, Host: "device.example:8443"},
 			"Check that this machine can reach device.example on TCP port 8443" + fixReachTail},
 		{"another wire protocol", bridge.ConnectionFailure{Kind: bridge.FailureOtherProtocol},
-			"Install the latest devicefarm-connect, then run '" + fixRestartCommand + "'."},
+			"Install the latest devicefarm-connect, then run " + fixRestartThenAdd + "."},
 		{"the session-stopping close", bridge.ConnectionFailure{Kind: bridge.FailureSessionStopping}, fixNewSession},
 	}
 	// The next try may work: the refused session, the drop, the timers and a failure no kind names.

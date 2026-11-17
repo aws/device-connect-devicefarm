@@ -49,10 +49,14 @@ const (
 	maxControlSocketPath = 103
 )
 
-// restartWith renders the restart command on port, with reverse as asked and the session the
-// daemon reported. The status reply names no listen address, so the command names none.
+// restartWith is the quoted restart on port with reverse as asked, then the add of the session
+// the daemon reports, if any. The status reply names no listen address, so the command names none.
 func restartWith(reply control.Response, port int, reverse bool) string {
-	return daemon.RestartCommand(config.DefaultListenAddr, port, reverse, reply.ARN)
+	startCommand := daemon.StartCommand(config.DefaultListenAddr, port)
+	if reverse {
+		startCommand += wording.RestartReverseFlag
+	}
+	return daemon.RestartRemedy(startCommand, "", reply.ARN)
 }
 
 // caveatIf appends the reverse caveat when the quoted command carries --allow-adb-reverse.
@@ -79,7 +83,7 @@ func safeValue(value string) string {
 	return out.String()
 }
 
-// reverseOffHint restarts the daemon with reverse on, its port and device kept, then states the caveat.
+// reverseOffHint restarts the daemon on its port with reverse on, adds its device again, then states the caveat.
 func reverseOffHint(reply control.Response) string {
 	return caveatIf(fmt.Sprintf(wording.DoctorHintDaemonReverseOffFormat, restartWith(reply, reply.Port, true)), true)
 }
@@ -144,11 +148,11 @@ func heldPortPair(listenAddr string, port int) (summary, hint string) {
 		daemon.HeldPortText(listenAddr, port)
 }
 
-// otherPortDaemonHint moves the running daemon to the probed port, its flags and device kept, or
-// points adb at the port it holds.
+// otherPortDaemonHint moves the running daemon to the probed port, its reverse flag kept and its
+// device added again, or points adb at the port it holds.
 func otherPortDaemonHint(reply control.Response, port int) string {
 	return caveatIf(fmt.Sprintf(wording.DoctorHintDaemonOnOtherPortFormat,
-		reply.Port, port, restartWith(reply, port, reply.ReverseEnabled), port, reply.Port), reply.ReverseEnabled)
+		reply.Port, port, port, restartWith(reply, port, reply.ReverseEnabled), reply.Port), reply.ReverseEnabled)
 }
 
 // runState is what earlier checks leave for later ones.
@@ -306,8 +310,8 @@ func programVersionClause(bridgeProgramVersion string) string {
 	return fmt.Sprintf(wording.DoctorDetailDaemonOtherProgramVersionClauseFormat, safeValue(bridgeProgramVersion), version.String())
 }
 
-// otherProgramVersionHint restarts the bridge with its own port, session and reverse setting, so
-// it runs this command's version.
+// otherProgramVersionHint restarts the bridge with its own port and reverse setting and adds its
+// device again, so it runs this command's version.
 func otherProgramVersionHint(reply control.Response) string {
 	return caveatIf(fmt.Sprintf(wording.DoctorHintDaemonOtherProgramVersionFormat,
 		restartWith(reply, reply.Port, reply.ReverseEnabled)), reply.ReverseEnabled)

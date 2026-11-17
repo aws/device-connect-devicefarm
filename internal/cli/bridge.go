@@ -13,7 +13,6 @@ import (
 	"github.com/aws/device-connect-devicefarm/internal/control"
 	"github.com/aws/device-connect-devicefarm/internal/failure"
 	"github.com/aws/device-connect-devicefarm/internal/report"
-	"github.com/aws/device-connect-devicefarm/internal/session"
 	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
@@ -43,19 +42,10 @@ func newBridgeCommand(state *rootState) *cobra.Command {
 	return bridge
 }
 
-// newBridgeStartCommand launches the background daemon and, when a session ARN is
-// supplied, attaches that device. It first stops a running bridge in this runtime
-// directory (restartBridge), so the flags and this shell's AWS settings always
-// apply. It validates the configuration up front so a misconfigured
-// invocation fails before a child is ever spawned. --session-arn is optional:
-// with it, "bridge start" runs the attach logic immediately after the daemon is
-// up (the daemon resolves the ARN); without it, this command attaches nothing
-// and a later "device add" connects one.
-//
-// A malformed --session-arn is refused with the ARN fix before anything stops or starts, so it
-// never stops a working bridge. The daemon resolves the ARN, so a session that does
-// not resolve fails only after the listener is up. By design the listener stays up
-// with no device, as on the no-ARN path, and the error carries the daemon's fix.
+// newBridgeStartCommand launches the background daemon and attaches no device:
+// "device add" does. It validates the configuration first, so a bad invocation
+// stops and spawns nothing. Then it stops a running bridge in this runtime
+// directory (restartBridge), so the flags and this shell's AWS settings always apply.
 func newBridgeStartCommand(state *rootState) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "start",
@@ -65,20 +55,8 @@ func newBridgeStartCommand(state *rootState) *cobra.Command {
 			if err := state.cfg.Validate(); err != nil {
 				return usageError(cmd, err)
 			}
-			if blankSessionArn(cmd, state) {
-				return usageError(cmd, errors.New(wording.ProblemSessionARNBlank))
-			}
-			if state.sessionARN != "" {
-				if err := session.ValidateSessionARN(state.sessionARN); err != nil {
-					return failure.WithFix(err, wording.FixPassRunningSessionARN)
-				}
-			}
 			if err := restartBridge(cmd, state); err != nil {
 				return err
-			}
-
-			if state.sessionARN != "" {
-				return attachDevice(cmd, state, wording.ProblemStartedButNotAttached)
 			}
 
 			// The port comes from the daemon, not the flags: only the daemon knows
@@ -98,7 +76,6 @@ func newBridgeStartCommand(state *rootState) *cobra.Command {
 	bindListenerFlags(cmd, &state.cfg)
 	bindReverseFlag(cmd, &state.cfg)
 	cmd.Flags().StringVar(&state.cfg.LogPath, "log", state.cfg.LogPath, wording.FlagLogUsage)
-	addSessionArnFlag(cmd, state, wording.FlagSessionARNStartUsage)
 	return cmd
 }
 
