@@ -84,8 +84,8 @@ func TestGivenAMissingProfileWhenResolvedThenTheConfigLoadFails(t *testing.T) {
 	_, resolveErr := ResolveCredentials(context.Background())
 	_, clientErr := NewRemoteAccessClient(context.Background(), nil)
 
-	assert.ErrorContains(t, resolveErr, "load AWS config")
-	assert.ErrorContains(t, clientErr, "load AWS config")
+	assert.ErrorContains(t, resolveErr, "cannot load the AWS configuration")
+	assert.ErrorContains(t, clientErr, "cannot load the AWS configuration")
 }
 
 func TestGivenACredentialProcessPrintingAKeyWhenASessionIsResolvedThenTheErrorHidesTheOutput(t *testing.T) {

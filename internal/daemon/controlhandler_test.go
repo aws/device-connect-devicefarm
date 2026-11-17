@@ -49,9 +49,10 @@ const (
 	fixReachTail = ". If a firewall or a proxy on your network blocks the connection, ask your network administrator to allow " +
 		"direct outbound WebSocket connections (wss) to that host and port. Then run '" + fixAddCommand + "' again. '" +
 		fixDoctorCommand + "' tests the connection."
-	fixOtherVersion = "The running bridge is another version of devicefarm-connect than this command. Restart it: run " +
-		"'devicefarm-connect bridge start' with the options that you started it with. If the error remains, install the " +
-		"latest devicefarm-connect, then run 'devicefarm-connect doctor'. If the doctor does not find the cause, contact AWS Support."
+	// Around the restart in the fix for a command of another version.
+	fixOtherVersionLead = "The running bridge is another version of devicefarm-connect than this command. Restart it: run "
+	fixOtherVersionTail = ". If the error remains, install the latest devicefarm-connect, then run 'devicefarm-connect doctor'. " +
+		"If the doctor does not find the cause, contact AWS Support."
 )
 
 // controlHandlerSuite exercises the daemon's control handler. SetupTest builds the shared
@@ -592,7 +593,16 @@ func (s *controlHandlerSuite) TestShutdownInvokesCancelAndAcks() {
 func (s *controlHandlerSuite) TestUnknownOpRejected() {
 	resp := s.handler(control.Request{Op: "bogus"})
 
-	s.Equal(control.Response{Error: `unknown control operation "bogus"`, Fixes: []string{fixOtherVersion}}, resp)
+	s.Equal(control.Response{Error: `unknown control operation "bogus"`,
+		Fixes: []string{fixOtherVersionLead + "'devicefarm-connect bridge start --port 5037'" + fixOtherVersionTail}}, resp)
+}
+
+func (s *controlHandlerSuite) TestUnknownOpWithADeviceAttachedTheFixAddsItsSessionAfterTheRestart() {
+	s.Require().True(s.handler(addReq(testSessionArnOne)).OK)
+
+	resp := s.handler(control.Request{Op: "bogus"})
+
+	s.Equal([]string{fixOtherVersionLead + fixRestartThenAdd + fixOtherVersionTail}, resp.Fixes)
 }
 
 func (s *controlHandlerSuite) TestListReportsEachAttachedDeviceWithItsSessionARNSerialAndTimes() {

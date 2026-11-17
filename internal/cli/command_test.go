@@ -86,7 +86,9 @@ func serveControl(t *testing.T, paths daemon.Paths, handler control.Handler) {
 // reply; "" reports none, as a bridge from before the field does.
 func serveControlOfProgramVersion(t *testing.T, paths daemon.Paths, programVersion string, handler control.Handler) {
 	t.Helper()
-	server := control.NewLocalSocketServer(paths.ControlSocket, programVersion, slog.New(slog.DiscardHandler))
+	// The commands send no request it cannot decode, so its restart is never worded.
+	server := control.NewLocalSocketServer(paths.ControlSocket, programVersion, func(string) string { return "" },
+		slog.New(slog.DiscardHandler))
 	require.NoError(t, server.Listen())
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -215,7 +217,7 @@ func TestGivenNoBridgeWhenAddDeviceInvokedThenStartsTheBridgeAndAttaches(t *test
 
 func TestGivenBridgeStartFailsWhenAddDeviceInvokedThenErrorsWithTheStartFailure(t *testing.T) {
 	shortRuntimeDir(t)
-	startFailure := errors.New("spawn bridge: exec format error")
+	startFailure := errors.New("cannot start the bridge process: exec format error")
 	stubBridgeStart(t, func(*daemon.DaemonManager) (daemon.StartResult, error) { return daemon.StartResult{}, startFailure })
 
 	out, err := execRoot(t, "device", "add", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
@@ -320,7 +322,7 @@ func TestGivenDaemonClosesWithoutReplyWhenRemoveDeviceInvokedThenSurfacesTranspo
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, control.ErrDaemonNotRunning)
 	assert.ErrorIs(t, err, io.EOF)
-	assert.ErrorContains(t, err, "the bridge did not answer: read control response")
+	assert.ErrorContains(t, err, "the bridge did not answer: cannot read the bridge's reply: EOF")
 }
 
 // fakeDaemonWithPixel is a daemon with one attached device. Ago offsets only grow; the expiry
@@ -619,7 +621,7 @@ func TestGivenRunningDaemonThatHadToBeKilledWhenStartBridgeInvokedThenTheLineSay
 
 func TestGivenRunningDaemonThatSurvivesTheStopWhenStartBridgeInvokedThenErrorsAndStartsNothing(t *testing.T) {
 	fakeRuntimePaths(t)
-	stopFailure := failure.WithFix(errors.New("find bridge process 4242: access is denied"), "stop it from an elevated shell")
+	stopFailure := failure.WithFix(errors.New("cannot get access to the bridge process (PID 4242): access is denied"), "stop it from an elevated shell")
 	fakeBridgeStop(t, daemon.StopResult{}, stopFailure)
 	starts := countingBridgeStart(t)
 
@@ -806,7 +808,7 @@ func TestGivenStopFailsWhenStopBridgeInvokedThenTheFailureNamesTheProblem(t *tes
 
 func TestGivenAnAdbServerWasStoppedWhenTheStartThenFailsThenTheStopNoticeStillPrints(t *testing.T) {
 	shortRuntimeDir(t)
-	startFailure := errors.New("spawn bridge: exec format error")
+	startFailure := errors.New("cannot start the bridge process: exec format error")
 	stubBridgeStart(t, func(*daemon.DaemonManager) (daemon.StartResult, error) {
 		return daemon.StartResult{StoppedAdbServer: "127.0.0.1:5037"}, startFailure
 	})

@@ -245,9 +245,9 @@ func TestGivenAnAdbServerThatAnswersFailOrNothingOrStaysUpWhenStoppedThenTheCaus
 		{name: "no answer", answer: killUnanswered, wantCause: "it answered nothing within 200ms"},
 		{name: "neither OKAY nor FAIL", answer: killGarbled, wantCause: `it answered "WHAT", not OKAY or FAIL`},
 		{name: "OKAY and no exit", answer: killStaysUp, wantCause: "it answered OKAY but port <port> is still held after 200ms; " +
-			"a program that restarts adb, such as Android Studio, can take it back at once"},
+			"a program that restarts adb automatically, such as Android Studio, can take it back at once"},
 		{name: "OKAY and a restart that keeps the port", answer: killRestarted, wantCause: "it answered OKAY but port <port> is " +
-			"still held after 200ms; a program that restarts adb, such as Android Studio, can take it back at once"},
+			"still held after 200ms; a program that restarts adb automatically, such as Android Studio, can take it back at once"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -146,13 +146,13 @@ func (m *DaemonManager) Start() (StartResult, error) {
 
 	self, err := os.Executable()
 	if err != nil {
-		return StartResult{}, fmt.Errorf("locate own executable: %w", err)
+		return StartResult{}, fmt.Errorf(wording.StartNoProgramFileFormat, err)
 	}
 
 	// openNoFollow refuses a symlink where the OS can.
 	logOut, err := os.OpenFile(m.paths.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND|openNoFollow, 0o600)
 	if err != nil {
-		return StartResult{}, fmt.Errorf("open bridge log file %q: %w", m.paths.LogFile, err)
+		return StartResult{}, fmt.Errorf(wording.StartOpenLogFormat, m.paths.LogFile, err)
 	}
 	// The child inherits the underlying fd, so closing the parent's handle after
 	// the spawn does not affect the child's logging.
@@ -167,7 +167,7 @@ func (m *DaemonManager) Start() (StartResult, error) {
 	args := append([]string{DaemonSubcommand}, m.config.AsDaemonArgs()...)
 	child, exited, err := spawnDaemon(self, args, logOut)
 	if err != nil {
-		return StartResult{StoppedAdbServer: stoppedAdbServer}, fmt.Errorf("spawn bridge: %w", err)
+		return StartResult{StoppedAdbServer: stoppedAdbServer}, fmt.Errorf(wording.StartLaunchFormat, err)
 	}
 
 	if err := m.waitUntilRunning(startupTimeout, exited); err != nil {
@@ -200,7 +200,6 @@ func (m *DaemonManager) unlessRunning(stoppedAdbServer string, err error) (Start
 }
 
 // listenErrorPrefix starts the child's error when its TCP bind fails (bridge.AdbProxyServer.Listen).
-// The address tells it from the control socket's own "listen on" error.
 func listenErrorPrefix(listenAddr string, port int) string {
 	return "listen on " + net.JoinHostPort(listenAddr, strconv.Itoa(port)) + ": "
 }
@@ -274,7 +273,7 @@ func (m *DaemonManager) Stop() (StopResult, error) {
 		// Windows fails here for a dead pid; Unix never does. The lock decides:
 		// released means exited, held means out of reach.
 		if m.stillRunning(pid) {
-			lookupFailed := fmt.Errorf("find bridge process %d: %w", pid, err)
+			lookupFailed := fmt.Errorf(wording.StopNoProcessAccessFormat, pid, err)
 			if errors.Is(err, os.ErrPermission) {
 				return StopResult{}, failure.WithFix(lookupFailed, wording.StopFromElevatedShell)
 			}
@@ -407,7 +406,7 @@ func (m *DaemonManager) RunForeground(ctx context.Context) error {
 	}
 	defer server.Close()
 
-	controlServer := control.NewLocalSocketServer(m.paths.ControlSocket, version.String(), m.logger)
+	controlServer := control.NewLocalSocketServer(m.paths.ControlSocket, version.String(), m.quotedRestart, m.logger)
 	if err := controlServer.Listen(); err != nil {
 		return err
 	}
@@ -610,8 +609,11 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 			return control.Response{OK: true}
 
 		default:
-			// A command of another version sent it.
-			return refusedReply(failure.WithFix(fmt.Errorf(wording.RefusalUnknownOpFormat, req.Op), wording.FixOtherVersionBridge))
+			// A command of another version sent it. The restart drops the attached device, so
+			// the fix adds it again.
+			attached, _ := device.Current()
+			return refusedReply(failure.WithFix(fmt.Errorf(wording.RefusalUnknownOpFormat, req.Op),
+				fmt.Sprintf(wording.FixOtherVersionBridgeFormat, m.quotedRestart(attached.ARN))))
 		}
 	}
 }

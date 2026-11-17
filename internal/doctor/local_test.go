@@ -76,7 +76,9 @@ func fakeDaemonOfProgramVersion(t *testing.T, programVersion string, reply contr
 		assert.Equal(t, control.OpStatus, request.Op, "the doctor must only ask for status")
 		return reply
 	}
-	server := control.NewLocalSocketServer(paths.ControlSocket, programVersion, slog.New(slog.DiscardHandler))
+	// It answers status alone, which the server never refuses, so its restart is never worded.
+	server := control.NewLocalSocketServer(paths.ControlSocket, programVersion, func(string) string { return "" },
+		slog.New(slog.DiscardHandler))
 	require.NoError(t, server.Listen())
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -229,7 +231,7 @@ func TestGivenAnUnusableRuntimeDirWhenCheckedThenItFailsNamingTheEnvVar(t *testi
 			base := t.TempDir()
 			require.NoError(t, os.WriteFile(filepath.Join(base, config.BinaryName), []byte("not a dir"), 0o600))
 			return base
-		}, wantSummary: "cannot use the working directory: create runtime dir"},
+		}, wantSummary: "cannot use the working directory: cannot create the working directory"},
 		{name: "a socket path over the limit, with a newline in the path", runtimeBase: func(t *testing.T) string {
 			return filepath.Join(t.TempDir(), strings.Repeat("x", maxControlSocketPath)+"\n[PASS] forged")
 		}, wantSummary: `\n[PASS] forged/` + config.BinaryName + " is "},
@@ -638,14 +640,14 @@ func TestGivenAReasonOrAnAskedSessionWithAControlCharacterWhenRenderedThenTheRow
 
 func TestGivenAControlErrorWhenTheSocketPathIsDroppedThenTheCauseStays(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), config.BinaryName+".sock")
-	timeout := fmt.Errorf("read control response: %w", &net.OpError{Op: "read", Net: "unix",
+	timeout := fmt.Errorf("cannot read the bridge's reply: %w", &net.OpError{Op: "read", Net: "unix",
 		Addr: &net.UnixAddr{Name: socketPath, Net: "unix"}, Err: os.ErrDeadlineExceeded})
 	require.Contains(t, timeout.Error(), socketPath, "the raw error names the socket")
 
 	cause := causeWithoutSocketPath(timeout)
 	assert.Contains(t, cause, "i/o timeout")
 	assert.NotContains(t, cause, socketPath)
-	assert.Equal(t, "read control response: EOF", causeWithoutSocketPath(fmt.Errorf("read control response: %w", io.EOF)),
+	assert.Equal(t, "cannot read the bridge's reply: EOF", causeWithoutSocketPath(fmt.Errorf("cannot read the bridge's reply: %w", io.EOF)),
 		"an error with no socket address reads verbatim")
 }
 
@@ -677,7 +679,7 @@ func TestGivenALockedPidfileWhoseDaemonDoesNotAnswerOrRefusesStatusWhenCheckedTh
 				}
 			}()
 			return paths
-		}, wantSummary: "is registered but did not report its status: read control response"},
+		}, wantSummary: "is registered but did not report its status: cannot read the bridge's reply: EOF"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -694,6 +696,18 @@ func TestGivenALockedPidfileWhoseDaemonDoesNotAnswerOrRefusesStatusWhenCheckedTh
 			assert.False(t, reply.OK, "a failed row leaves no status for later checks")
 		})
 	}
+}
+
+func TestGivenASessionAskedWhenTheBridgeReportsNoStatusThenTheHintAddsThatSessionAfterTheRestart(t *testing.T) {
+	inputs := localInputs(t)
+	inputs.SessionARN = testSessionARN
+	state := &runState{paths: fakeDaemon(t, control.Response{OK: false, Error: "boom"})}
+
+	result := runLocal(t, inputs, state, checkDaemon)
+
+	assert.Equal(t, "a bridge is registered but did not report its status. Run 'devicefarm-connect bridge start' with "+
+		"the options that you started it with, then run 'devicefarm-connect device add --session-arn "+testSessionARN+
+		"'. The start ends that bridge and launches a new one.", result.Hint)
 }
 
 func TestGivenTheListenPortWhenCheckedThenTheRowNamesItsOccupant(t *testing.T) {
@@ -787,9 +801,9 @@ func TestGivenAListenAddressWithControlCharactersWhenCheckedThenTheSummaryStaysO
 
 func TestGivenAnAdbServerOnTheDefaultPortWhenItsHintIsBuiltThenTheFixQuitsTheProgramThatRestartsAdb(t *testing.T) {
 	assert.Equal(t, "an adb server is listening on 127.0.0.1:5037, so the bridge cannot bind it until that server stops. Run "+
-		"'devicefarm-connect bridge start --port 5037': it stops that server first, as 'adb kill-server' would. If a program that "+
-		"restarts adb, such as Android Studio, takes the port back, quit that program, run 'devicefarm-connect bridge start --port 5037' "+
-		"again, then open it: it then uses the bridge as its adb server on port 5037.",
+		"'devicefarm-connect bridge start --port 5037': it stops that server first (via 'adb kill-server'). If a program that "+
+		"restarts adb automatically, such as Android Studio, takes the port back, quit that program, run "+
+		"'devicefarm-connect bridge start --port 5037' again, then open it: it then uses the bridge as its adb server on port 5037.",
 		adbServerHint(config.DefaultListenAddr, config.DefaultListenPort))
 }
 

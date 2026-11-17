@@ -33,7 +33,8 @@ var chmod = os.Chmod
 
 // Handler processes one control request and returns the response to send back.
 // The daemon supplies it; keeping the transport ignorant of operation semantics
-// lets the daemon own the device state and decide which ops stop it.
+// lets the daemon own the device state and decide which ops stop it. The server
+// knows only that a status reply names the attached session.
 type Handler func(Request) Response
 
 // LocalSocketServer accepts control connections on a Unix-domain socket and dispatches
@@ -43,18 +44,22 @@ type Handler func(Request) Response
 type LocalSocketServer struct {
 	socketPath     string
 	programVersion string
+	restart        func(sessionARN string) string
 	logger         *slog.Logger
 	listener       net.Listener
 }
 
 // NewLocalSocketServer builds a control server bound to socketPath once Listen is
-// called. It stamps programVersion, the daemon's own, on every reply. A nil logger
+// called. It stamps programVersion, the daemon's own, on every reply. It refuses a
+// request it cannot decode. The fix quotes restart(sessionARN): the start command
+// with the daemon's flags, then the add of sessionARN when not empty. A nil logger
 // defaults to slog.Default.
-func NewLocalSocketServer(socketPath, programVersion string, logger *slog.Logger) *LocalSocketServer {
+func NewLocalSocketServer(socketPath, programVersion string, restart func(sessionARN string) string,
+	logger *slog.Logger) *LocalSocketServer {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &LocalSocketServer{socketPath: socketPath, programVersion: programVersion, logger: logger}
+	return &LocalSocketServer{socketPath: socketPath, programVersion: programVersion, restart: restart, logger: logger}
 }
 
 // Listen binds the Unix-domain socket and sets its mode to 0600. A stale socket
@@ -68,7 +73,7 @@ func (s *LocalSocketServer) Listen() error {
 	}
 	listener, err := net.Listen("unix", s.socketPath)
 	if err != nil {
-		return fmt.Errorf("listen on control socket %q: %w", s.socketPath, err)
+		return fmt.Errorf(wording.ControlSocketListenFormat, s.socketPath, err)
 	}
 	// net.Listen creates the socket file under the umask (0755 with the usual
 	// 022), and connect(2) needs write permission on it. The 0700 runtime dir is
@@ -76,7 +81,7 @@ func (s *LocalSocketServer) Listen() error {
 	// file on failure.
 	if err := chmod(s.socketPath, 0o600); err != nil {
 		listener.Close()
-		return fmt.Errorf("chmod control socket %q: %w", s.socketPath, err)
+		return fmt.Errorf(wording.ControlSocketPermissionsFormat, s.socketPath, err)
 	}
 	s.listener = listener
 	return nil
@@ -130,8 +135,11 @@ func (s *LocalSocketServer) handleConn(conn net.Conn, handler Handler) {
 	var req Request
 	if err := json.NewDecoder(conn).Decode(&req); err != nil {
 		s.logger.Warn("malformed control request", "error", err)
+		// The restart drops the attached device, so the fix adds it again: the handler's status
+		// names its session.
+		attachedARN := handler(Request{Op: OpStatus}).ARN
 		_ = s.writeReply(conn, Response{OK: false, Error: wording.RefusalMalformedRequest,
-			Fixes: []string{wording.FixMalformedRequest}})
+			Fixes: []string{fmt.Sprintf(wording.FixRestartThenInstallLatestFormat, s.restart(attachedARN))}})
 		return
 	}
 
@@ -152,7 +160,7 @@ func (server *LocalSocketServer) writeReply(conn net.Conn, resp Response) error 
 // the bind error.
 func removeStaleSocket(path string) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove stale control socket %q: %w", path, err)
+		return fmt.Errorf(wording.ControlSocketRemoveOldFormat, path, err)
 	}
 	return nil
 }

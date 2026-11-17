@@ -260,7 +260,7 @@ func loadConfig(ctx context.Context) (aws.Config, error) {
 		config.WithLogger(logging.Nop{}),
 	)
 	if err != nil {
-		return aws.Config{}, fmt.Errorf("load AWS config: %w", err)
+		return aws.Config{}, fmt.Errorf(wording.SessionLoadConfigFormat, err)
 	}
 	if cfg.Credentials != nil {
 		cfg.Credentials = markedCredentials{provider: cfg.Credentials}

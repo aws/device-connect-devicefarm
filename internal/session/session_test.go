@@ -237,7 +237,7 @@ func TestGivenASessionWithNoEndpointWhenResolvedThenTheErrorForksOnWhetherItIsRu
 			_, err := newClient(&fakeGetter{out: out}).GetSession(context.Background(), testSessionARN)
 
 			require.EqualError(t, err, wantText)
-			assert.ErrorIs(t, err, ErrNoEndpointYet, "the doctor and the detach reasons match the sentinel")
+			assert.ErrorIs(t, err, ErrNoEndpointYet, "the add's fix and the detach reasons match the sentinel")
 			var noEndpoint *NoEndpointError
 			require.ErrorAs(t, err, &noEndpoint)
 			assert.Equal(t, status == running, noEndpoint.Running())

@@ -83,8 +83,9 @@ func sessionEndedHint(inputs Inputs) string {
 	return fmt.Sprintf(wording.DoctorHintSessionEndedFormat, safeValue(inputs.SessionARN))
 }
 
-func notRunningHint(inputs Inputs) string {
-	return fmt.Sprintf(wording.DoctorHintSessionNotReadyFormat, safeValue(inputs.SessionARN), doctorRerun(inputs))
+// notRunningHint: the session is not RUNNING yet, so a wait helps. status is NoEndpointError.Status.
+func notRunningHint(inputs Inputs, status string) string {
+	return fmt.Sprintf(wording.DoctorHintSessionNotReadyFormat, status, safeValue(inputs.SessionARN), doctorRerun(inputs))
 }
 
 // noEndpointHint: the service says RUNNING but gives no endpoint, so a wait does not help.
@@ -227,10 +228,11 @@ func sessionHint(err error, inputs Inputs) string {
 		return unsupportedDeviceHint(inputs)
 	case errors.Is(err, session.ErrSessionEnded):
 		return sessionEndedHint(inputs)
-	case errors.As(err, &noEndpoint) && noEndpoint.Running():
-		return noEndpointHint(inputs)
-	case errors.Is(err, session.ErrNoEndpointYet):
-		return notRunningHint(inputs)
+	case errors.As(err, &noEndpoint):
+		if noEndpoint.Running() {
+			return noEndpointHint(inputs)
+		}
+		return notRunningHint(inputs, noEndpoint.Status)
 	case errors.Is(err, session.ErrRequestRejected):
 		return requestRejectedHint(inputs)
 	}

@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net"
 	"time"
+
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // dialTimeout bounds connecting to the control socket, and requestTimeout bounds
@@ -50,15 +52,15 @@ func (c *DaemonClient) Send(req Request) (Response, error) {
 	// hung handler) would block the decode below forever. This mirrors the
 	// per-connection deadline the server sets on its side.
 	if err := conn.SetDeadline(time.Now().Add(requestTimeout)); err != nil {
-		return Response{}, fmt.Errorf("set control connection deadline: %w", err)
+		return Response{}, fmt.Errorf(wording.ControlSetDeadlineFormat, err)
 	}
 
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
-		return Response{}, fmt.Errorf("send control request: %w", err)
+		return Response{}, fmt.Errorf(wording.ControlSendFormat, err)
 	}
 	var resp Response
 	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		return Response{}, fmt.Errorf("read control response: %w", err)
+		return Response{}, fmt.Errorf(wording.ControlReadReplyFormat, err)
 	}
 	return resp, nil
 }

@@ -116,39 +116,54 @@ func TestGivenCommandLineMistakesWhenExecutedThenEachNamesTheCommandsHelp(t *tes
 	}
 }
 
-// otherVersionFix is the command's own fix for a refusal with no fix, unless the bridge reports
-// this program's version.
-const otherVersionFix = "The running bridge is another version of devicefarm-connect than this command. Restart it: run " +
-	"'devicefarm-connect bridge start' with the options that you started it with. If the error remains, install the latest " +
-	"devicefarm-connect, then run 'devicefarm-connect doctor'. If the doctor does not find the cause, contact AWS Support."
+// yourOptionsRestart is the restart a command quotes: it cannot read the bridge's flags.
+const yourOptionsRestart = "'devicefarm-connect bridge start' with the options that you started it with"
+
+// otherVersionFixLine is the command's own fix line for a refusal with no fix, unless the bridge
+// reports this program's version.
+func otherVersionFixLine(restart string) string {
+	return "  fix:   The running bridge is another version of devicefarm-connect than this command. Restart it: run " +
+		restart + ". If the error remains, install the latest devicefarm-connect, then run 'devicefarm-connect doctor'. " +
+		"If the doctor does not find the cause, contact AWS Support.\n"
+}
 
 func TestGivenTheBridgeRefusesWhenEachCommandExecutesThenItPrintsTheBridgesFixOrTheRestartFixForAnotherVersionWithNone(t *testing.T) {
 	const sessionARN = "arn:aws:devicefarm:us-west-2:1:session:a/b/0"
 	commands := []struct {
 		args    []string
 		problem string
+		// restart is the restart the command's own fix quotes; an add's also quotes the add of its session.
+		restart string
 	}{
-		{[]string{"device", "add", "--session-arn", sessionARN}, "could not attach the device"},
-		{[]string{"device", "list"}, "could not list the devices"},
-		{[]string{"device", "remove"}, "could not detach the device"},
+		{[]string{"device", "add", "--session-arn", sessionARN}, "could not attach the device",
+			yourOptionsRestart + ", then run 'devicefarm-connect device add --session-arn " + sessionARN + "'"},
+		{[]string{"device", "list"}, "could not list the devices", yourOptionsRestart},
+		{[]string{"device", "remove"}, "could not detach the device", yourOptionsRestart},
 	}
 	const noVersion, otherVersion = "", "v0.0.1"
 	replies := []struct {
 		name           string
 		programVersion string
 		fixes          []string
-		// fixLines is every fix line the command prints, or "" for none.
-		fixLines string
+		// ownFix: the command prints its own restart fix. Else it prints the bridge's fix, if any.
+		ownFix bool
 	}{
-		{"a fix from a bridge of this version", version.String(), []string{"Run this."}, "  fix:   Run this.\n"},
-		{"a fix from a bridge that reports no version", noVersion, []string{"Run this."}, "  fix:   Run this.\n"},
-		{"a fix from a bridge of another version", otherVersion, []string{"Run this."}, "  fix:   Run this.\n"},
-		{"no fix from a bridge that reports no version, as an older bridge", noVersion, nil, "  fix:   " + otherVersionFix + "\n"},
-		{"no fix from a bridge of another version", otherVersion, nil, "  fix:   " + otherVersionFix + "\n"},
-		{"no fix from a bridge of this version", version.String(), nil, ""},
+		{"a fix from a bridge of this version", version.String(), []string{"Run this."}, false},
+		{"a fix from a bridge that reports no version", noVersion, []string{"Run this."}, false},
+		{"a fix from a bridge of another version", otherVersion, []string{"Run this."}, false},
+		{"no fix from a bridge that reports no version, as an older bridge", noVersion, nil, true},
+		{"no fix from a bridge of another version", otherVersion, nil, true},
+		{"no fix from a bridge of this version", version.String(), nil, false},
 	}
 	for _, command := range commands {
 		for _, reply := range replies {
+			fixLines := ""
+			switch {
+			case reply.ownFix:
+				fixLines = otherVersionFixLine(command.restart)
+			case len(reply.fixes) > 0:
+				fixLines = "  fix:   Run this.\n"
+			}
 			t.Run(strings.Join(command.args[:2], " ")+", "+reply.name, func(t *testing.T) {
 				serveControlOfProgramVersion(t, fakeRuntimePaths(t), reply.programVersion, func(control.Request) control.Response {
 					return control.Response{OK: false, Error: "refused", Fixes: reply.fixes}
@@ -157,7 +172,7 @@ func TestGivenTheBridgeRefusesWhenEachCommandExecutesThenItPrintsTheBridgesFixOr
 				code, out := runExecute(t, command.args...)
 
 				assert.Equal(t, 1, code)
-				assert.Equal(t, config.BinaryName+": error: "+command.problem+"\n"+"  cause: refused\n"+reply.fixLines, out)
+				assert.Equal(t, config.BinaryName+": error: "+command.problem+"\n"+"  cause: refused\n"+fixLines, out)
 			})
 		}
 	}
@@ -229,11 +244,11 @@ func TestGivenDaemonBodyCannotLoadAwsConfigWhenExecutedThenLogsTheFailureAndPrin
 
 	assert.Equal(t, 1, code)
 	assert.Contains(t, out, `level=ERROR msg="`+config.BinaryName+` daemon failed"`)
-	assert.Contains(t, out, "load AWS config")
+	assert.Contains(t, out, "cannot load the AWS configuration")
 	assert.NotContains(t, out, config.BinaryName+": error:")
 }
 
-func TestGivenUnusableRuntimeDirWhenExecutedThenPrintsTheWorkingDirectoryProblemAndItsCause(t *testing.T) {
+func TestGivenUnusableRuntimeDirWhenExecutedThenPrintsTheWorkingDirectoryProblemItsCauseAndTheDoctorFix(t *testing.T) {
 	// A regular file where the runtime dir's parent must be: the dir cannot be created.
 	blocker := filepath.Join(t.TempDir(), "file")
 	require.NoError(t, os.WriteFile(blocker, nil, 0o600))
@@ -242,9 +257,20 @@ func TestGivenUnusableRuntimeDirWhenExecutedThenPrintsTheWorkingDirectoryProblem
 	code, out := runExecute(t, "bridge", "status")
 
 	assert.Equal(t, 1, code)
-	assert.Contains(t, out, config.BinaryName+": error: cannot use the working directory\n  cause: create runtime dir ")
-	assert.Contains(t, out, ": not a directory\n")
-	assert.NotContains(t, out, "cause: mkdir", "a plain error chain is one cause line")
+	assert.Equal(t, config.BinaryName+": error: cannot use the working directory\n"+
+		"  cause: cannot create the working directory \""+filepath.Join(blocker, config.BinaryName)+"\": mkdir "+blocker+": not a directory\n"+
+		"  fix:   run 'devicefarm-connect doctor' to see how to fix the working directory\n", out)
+}
+
+func TestGivenAWorkingDirectoryCauseWithItsOwnFixWhenWordedThenOnlyThatFixPrints(t *testing.T) {
+	cause := failure.WithFix(errors.New(`working directory "/tmp/d" is owned by UID 0, not 1000`), "set XDG_RUNTIME_DIR to a private directory")
+
+	var out strings.Builder
+	failure.Write(&out, config.BinaryName, workingDirectoryFailure(cause))
+
+	assert.Equal(t, config.BinaryName+": error: cannot use the working directory\n"+
+		"  cause: working directory \"/tmp/d\" is owned by UID 0, not 1000\n"+
+		"  fix:   set XDG_RUNTIME_DIR to a private directory\n", out.String())
 }
 
 func TestGivenCommandSucceedsWhenExecutedThenReturnsZero(t *testing.T) {

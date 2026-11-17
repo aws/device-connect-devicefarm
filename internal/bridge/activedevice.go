@@ -95,7 +95,8 @@ type AttachmentParams struct {
 	NotifierBackoffMax        time.Duration
 
 	// ReverseEnabled off: no notifier for the attachment, and the accept seam refuses the
-	// reverse family. ListenPort is the daemon's own adb port, kept only for the reverse port screen.
+	// reverse family. ListenPort is the daemon's own adb port, kept for the reverse port screen and
+	// the reverse-off refusal.
 	ReverseEnabled bool
 	ListenPort     int
 
@@ -128,6 +129,7 @@ type attachmentFeatures struct {
 	reverseRules *reverseRules
 	// reverseEnabled off: the seam refuses the reverse family; see refuseReverseFamily
 	reverseEnabled bool
+	listenPort     int             // the daemon's own adb port; see screenReverseRule and refuseReverseFamily
 	hostReplies    *hostReplyCache // the server's host replies the seam answers from; see answerHostQuery
 	sessionLookups *refusalGate    // the daemon's session lookups after refused connections; see refusalGate
 	ctx            context.Context
@@ -282,6 +284,7 @@ func (device *ActiveDevice) buildFeaturesLocked() {
 	features := &attachmentFeatures{ctx: ctx, cancel: cancel, budget: budget,
 		reverseRules:   newReverseRules(config.params.MaxReverseRules),
 		reverseEnabled: config.params.ReverseEnabled,
+		listenPort:     config.params.ListenPort,
 		sessionLookups: &refusalGate{handler: device.refusalHandler, device: device}}
 	fetcher := &hostReplyFetcher{device: device, dialer: config.dialer, arn: device.info.ARN}
 	features.hostReplies = newHostReplyCache(fetcher.fetch)
