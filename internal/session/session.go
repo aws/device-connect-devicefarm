@@ -12,7 +12,7 @@
 // AWS-backed implementation), the Err sentinels a GetSession failure carries,
 // with SessionEndedError for the status word, RequestRejectedError for the
 // service's error code and UnsupportedDeviceError for the refused device,
-// ValidateSessionARN (bridge start and the add handler run it first),
+// ValidateSessionARN (the add handler runs it first),
 // and ResolveCredentials with its CredentialSummary (the credential chain's
 // source, for the doctor). Everything else - the
 // SDK-shaped getter, the config loading - is internal to this
@@ -343,8 +343,8 @@ func (c awsRemoteAccessClient) GetSession(ctx context.Context, sessionARN string
 // ValidateSessionARN rejects a session ARN the client cannot serve: one that is
 // malformed, outside the aws partition, not a Device Farm ARN, in a region other
 // than the one the client was built for, or whose resource is not a session (a
-// project or device ARN). Every refusal matches ErrInvalidARN. A typo fails fast (a
-// usage error or the daemon's add error) rather than as an opaque AWS error, and an ARN from a region Device Farm may add later
+// project or device ARN). Every refusal matches ErrInvalidARN. A typo fails fast
+// rather than as an opaque AWS error, and an ARN from a region Device Farm may add later
 // fails loudly rather than being sent to the wrong regional endpoint (the SDK
 // would otherwise synthesize a plausible-looking endpoint for it).
 func ValidateSessionARN(sessionARN string) error {

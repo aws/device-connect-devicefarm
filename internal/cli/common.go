@@ -191,8 +191,8 @@ func sendToBridge(cmd *cobra.Command, state *rootState, req control.Request) (co
 
 // attachDevice sends the add for --session-arn, starting the daemon when none
 // runs, and prints the listening line. The daemon resolves the ARN; its refusal
-// becomes the cause under problem, the command's own words.
-func attachDevice(cmd *cobra.Command, state *rootState, problem string) error {
+// becomes the cause under the command's problem.
+func attachDevice(cmd *cobra.Command, state *rootState) error {
 	if state.sessionARN == "" {
 		return usageError(cmd, errors.New(wording.ProblemSessionARNRequired))
 	}
@@ -201,7 +201,7 @@ func attachDevice(cmd *cobra.Command, state *rootState, problem string) error {
 		return err
 	}
 	if !resp.OK {
-		return &failure.Explained{Problem: problem, Cause: daemonRefusal(resp)}
+		return &failure.Explained{Problem: wording.ProblemAttachFailed, Cause: daemonRefusal(resp)}
 	}
 	printListeningLine(cmd, resp)
 	if resp.ARN != "" && resp.ARN != state.sessionARN {

@@ -699,15 +699,15 @@ func differentDeviceAttached(label, sessionARN string) error {
 		fmt.Sprintf(wording.FixRemoveOtherDeviceFormat, sessionARN))
 }
 
-// quotedRestart is the quoted start command that replaces this bridge and attaches sessionARN.
-// It never names --allow-adb-reverse, which needs its caveat: with reverse on it adds
-// FixOtherOptionsClause.
+// quotedRestart is the quoted start command that replaces this bridge, then the add that attaches
+// sessionARN when not empty. It never names --allow-adb-reverse, which needs its caveat: with
+// reverse on it adds FixOtherOptionsClause.
 func (manager *DaemonManager) quotedRestart(sessionARN string) string {
-	quoted := "'" + RestartCommand(manager.config.ListenAddr, manager.config.ListenPort, false, sessionARN) + "'"
+	clause := ""
 	if manager.config.ReverseEnabled {
-		quoted += wording.FixOtherOptionsClause
+		clause = wording.FixOtherOptionsClause
 	}
-	return quoted
+	return RestartRemedy(StartCommand(manager.config.ListenAddr, manager.config.ListenPort), clause, sessionARN)
 }
 
 // doctorCommand is the doctor run for sessionARN on this bridge's port and listen address.

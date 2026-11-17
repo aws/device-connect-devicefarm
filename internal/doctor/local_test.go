@@ -302,7 +302,7 @@ func TestGivenARunningDaemonWhenCheckedThenTheRowReportsItsStatusAndReverseState
 		reply      control.Response
 		wantStatus Status
 		wantTail   string
-		// wantRestart is the command the WARN hint quotes.
+		// wantRestart is the restart the WARN hint quotes, then the add when a device is attached.
 		wantRestart string
 	}{
 		{name: "reverse on with a device",
@@ -312,9 +312,11 @@ func TestGivenARunningDaemonWhenCheckedThenTheRowReportsItsStatusAndReverseState
 			wantStatus: Pass, wantTail: "on port 6000; no device; reverse on"},
 		{name: "reverse off with a device", reply: control.Response{OK: true, Port: 5037, DeviceLabel: "Pixel 9 (OS 16)", ARN: "arn:2"},
 			wantStatus: Warn, wantTail: "on port 5037; device Pixel 9 (OS 16), session arn:2; reverse off",
-			wantRestart: wording.BridgeStartCommand + " --port 5037 --allow-adb-reverse --session-arn arn:2"},
+			wantRestart: "'devicefarm-connect bridge start --port 5037 --allow-adb-reverse', then run " +
+				"'devicefarm-connect device add --session-arn arn:2'"},
 		{name: "reverse off with no device", reply: control.Response{OK: true, Port: 6000},
-			wantStatus: Warn, wantTail: "on port 6000; no device; reverse off", wantRestart: wording.BridgeStartCommand + " --port 6000 --allow-adb-reverse"},
+			wantStatus: Warn, wantTail: "on port 6000; no device; reverse off",
+			wantRestart: "'devicefarm-connect bridge start --port 6000 --allow-adb-reverse'"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -325,8 +327,8 @@ func TestGivenARunningDaemonWhenCheckedThenTheRowReportsItsStatusAndReverseState
 			assert.Equal(t, tc.wantStatus, result.Status)
 			assert.Equal(t, fmt.Sprintf("running (PID %d) %s", os.Getpid(), tc.wantTail), result.Summary)
 			if tc.wantStatus == Warn {
-				assert.Contains(t, result.Hint, "'"+tc.wantRestart+"'", "the hint quotes the restart with the reported port and session")
-				assert.Contains(t, result.Hint, wording.DoctorHintReverseCaveat)
+				assert.Equal(t, "the bridge runs with adb reverse off, so every 'adb reverse' fails. To start it again with reverse on, run "+
+					tc.wantRestart+". "+wording.DoctorHintReverseCaveat, result.Hint)
 			} else {
 				assert.Empty(t, result.Hint)
 			}
@@ -390,10 +392,11 @@ func TestGivenABridgeOfAnotherProgramVersionWhenCheckedThenTheRowWarnsFirstWithT
 	command := version.String()
 	// A reply to which every later WARN applies: a detach reason, the asked session not attached, reverse off.
 	detached := control.Response{OK: true, Port: 6000, LastDetachReason: endedReason}
-	hintLead := "the bridge runs another version of devicefarm-connect than this command, so a command can fail. Run '"
-	hintTail := "' to start it again with this command's version of devicefarm-connect. The restart drops an attached device with " +
-		"its forward rules and open adb connections, and its reverse rules no longer reach this machine; the device comes back " +
-		"when the command names its session."
+	hintLead := "the bridge runs another version of devicefarm-connect than this command, so a command can fail. To start it again " +
+		"with this command's version of devicefarm-connect, run "
+	hintTail := ". The restart drops an attached device with its forward rules and open adb connections, and its reverse rules " +
+		"no longer reach this machine."
+	addCommand := ", then run 'devicefarm-connect device add --session-arn " + testSessionARN + "'"
 	caveat := " '--allow-adb-reverse' lets the device open connections to this machine, so use it only with a device you trust; " +
 		"a public physical device can run software you do not control."
 	tests := []struct {
@@ -407,20 +410,20 @@ func TestGivenABridgeOfAnotherProgramVersionWhenCheckedThenTheRowWarnsFirstWithT
 		{name: "no version reported, a session, reverse on", askedARN: testSessionARN, reply: attachedReply(testSessionARN, true),
 			wantTail: "device Pixel 9 (OS 16), session " + testSessionARN + "; reverse on; the bridge runs an earlier version of " +
 				"devicefarm-connect than this command (" + command + ")",
-			wantHint: hintLead + "devicefarm-connect bridge start --port 5037 --allow-adb-reverse --session-arn " + testSessionARN + hintTail + caveat},
+			wantHint: hintLead + "'devicefarm-connect bridge start --port 5037 --allow-adb-reverse'" + addCommand + hintTail + caveat},
 		{name: "no version reported, a session, reverse off", reply: attachedReply(testSessionARN, false),
 			wantTail: "device Pixel 9 (OS 16), session " + testSessionARN + "; reverse off; the bridge runs an earlier version of " +
 				"devicefarm-connect than this command (" + command + ")",
-			wantHint: hintLead + "devicefarm-connect bridge start --port 5037 --session-arn " + testSessionARN + hintTail},
+			wantHint: hintLead + "'devicefarm-connect bridge start --port 5037'" + addCommand + hintTail},
 		{name: "another version, no session, reverse on", bridgeProgramVersion: otherVersion,
 			reply: control.Response{OK: true, Port: 6000, ReverseEnabled: true},
 			wantTail: "no device; reverse on; the bridge runs another version of devicefarm-connect (" + otherVersion +
 				") than this command (" + command + ")",
-			wantHint: hintLead + "devicefarm-connect bridge start --port 6000 --allow-adb-reverse" + hintTail + caveat},
+			wantHint: hintLead + "'devicefarm-connect bridge start --port 6000 --allow-adb-reverse'" + hintTail + caveat},
 		{name: "another version, every later finding", bridgeProgramVersion: otherVersion, askedARN: testSessionARN, reply: detached,
 			wantTail: "no device; reverse off; the bridge runs another version of devicefarm-connect (" + otherVersion +
 				") than this command (" + command + "); the bridge detached the last device; session " + testSessionARN + " is not attached",
-			wantHint: hintLead + "devicefarm-connect bridge start --port 6000" + hintTail},
+			wantHint: hintLead + "'devicefarm-connect bridge start --port 6000'" + hintTail},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -499,8 +502,8 @@ func TestGivenTheAskedSessionAttachedWhenCheckedThenTheRowKeepsItsReverseVerdict
 func TestGivenTheServiceReturnsAnotherArnForTheAskedSessionWhenTheBridgeIsCheckedThenThatArnNamesTheAskedSession(t *testing.T) {
 	// The session still runs: the bridge lost its credentials, this shell has its own.
 	expiredReason := "the AWS credentials the bridge started with have expired, so it can no longer read remote access session " +
-		returnedSessionARN + "; refresh the credentials, then from that shell run 'devicefarm-connect bridge start --port 5037 " +
-		"--session-arn " + returnedSessionARN + "'"
+		returnedSessionARN + "; refresh the credentials, then from that shell run 'devicefarm-connect bridge start --port 5037', " +
+		"then run 'devicefarm-connect device add --session-arn " + returnedSessionARN + "'"
 	notAttached := "; session " + testSessionARN + " is not attached"
 	tests := []struct {
 		name        string
@@ -818,9 +821,12 @@ func TestGivenAPortProblemWhenItsHintIsBuiltThenEveryCommandCarriesTheRealPortOn
 		{name: "an address with control characters", hint: listenAddrHint("203.0.113.1\n[PASS] forged\x1b[0m", port),
 			wantQuoted: []string{`'203.0.113.1\n[PASS] forged\x1b[0m'`}, wantAbsent: "\x1b"},
 		{name: "the daemon on another port with reverse on", hint: otherPortDaemonHint(reverseDaemon, port),
-			wantQuoted: []string{"'" + wording.BridgeStartCommand + " --port 5555 --allow-adb-reverse --session-arn arn:1'", "'adb -P 6000'", wording.DoctorHintReverseCaveat}},
+			wantQuoted: []string{"the running bridge listens on port 6000, not 5555. To move it to port 5555, run '" +
+				wording.BridgeStartCommand + " --port 5555 --allow-adb-reverse', then run 'devicefarm-connect device add " +
+				"--session-arn arn:1'. Or point adb at it with 'adb -P 6000'. " + wording.DoctorHintReverseCaveat}},
 		{name: "the daemon on another port with reverse off", hint: otherPortDaemonHint(control.Response{OK: true, Port: 6000}, port),
-			wantQuoted: []string{"'" + wording.BridgeStartCommand + " --port 5555'", "'adb -P 6000'"}, wantAbsent: wording.DoctorHintReverseCaveat},
+			wantQuoted: []string{"the running bridge listens on port 6000, not 5555. To move it to port 5555, run '" +
+				wording.BridgeStartCommand + " --port 5555'. Or point adb at it with 'adb -P 6000'."}, wantAbsent: wording.DoctorHintReverseCaveat},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

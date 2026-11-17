@@ -584,22 +584,6 @@ func countingBridgeStart(t *testing.T) *int {
 	return &startCalls
 }
 
-func TestGivenNoSessionARNWhenStartBridgeInvokedThenStartsWithoutAttaching(t *testing.T) {
-	// The daemon's control handler must never see an add when no ARN is given.
-	fakeRestart(t, func(req control.Request) control.Response {
-		if req.Op == control.OpAdd {
-			t.Error("bridge start without --session-arn must not attach a device")
-		}
-		return control.Response{OK: true, Port: 6000}
-	}, daemon.StopResult{PID: 4242, WasRunning: true})
-
-	out, err := execRoot(t, "bridge", "start", "--port", "5038")
-
-	require.NoError(t, err, "bridge start must not require --session-arn")
-	assert.Contains(t, out.String(), "listening on port 6000 with no device attached")
-	assert.NotContains(t, out.String(), "5038", "the port must come from the daemon, not the --port flag")
-}
-
 func TestGivenRunningDaemonWhenStartBridgeInvokedThenStopsItSaysSoThenStarts(t *testing.T) {
 	stops, starts := fakeRestart(t, func(control.Request) control.Response {
 		return control.Response{OK: true, Port: 5037}
@@ -700,7 +684,8 @@ func TestGivenRunningDaemonWhenListDevicesInvokedThenNeitherStopNorStartIsCalled
 	assert.Equal(t, 0, *starts)
 }
 
-func TestGivenRunningDaemonWhenStartBridgeInvokedWithoutARNThenPrintsTheNewDaemonsStatus(t *testing.T) {
+func TestGivenRunningDaemonWhenStartBridgeInvokedThenItAsksOnlyForStatusAndPrintsTheNewDaemonsStatus(t *testing.T) {
+	// The port and the device come from the daemon's status, not the flags; the command sends no add.
 	fakeRestart(t, func(request control.Request) control.Response {
 		assert.Equal(t, control.OpStatus, request.Op)
 		return control.Response{OK: true, DeviceLabel: "Google Pixel 9 (OS 16)", Port: 6000}
@@ -726,18 +711,6 @@ func TestGivenNoBridgeWhenStartBridgeInvokedThenStartsItAndPrintsTheListeningLin
 	assert.Contains(t, out.String(), "listening on port 5037 with no device attached")
 }
 
-func TestGivenBridgeStartFailsWhenStartBridgeInvokedWithARNThenErrorsWithTheStartFailureOnly(t *testing.T) {
-	// The start error must not be dressed up as "bridge started but attaching failed".
-	shortRuntimeDir(t)
-	startFailure := errors.New("spawn bridge: exec format error")
-	stubBridgeStart(t, func(*daemon.DaemonManager) (daemon.StartResult, error) { return daemon.StartResult{}, startFailure })
-
-	_, err := execRoot(t, "bridge", "start", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
-
-	require.ErrorIs(t, err, startFailure)
-	assert.NotContains(t, err.Error(), "bridge started")
-}
-
 func TestGivenPidfileButNoControlSocketWhenStartBridgeInvokedThenReturnsNotListening(t *testing.T) {
 	// The restart stops the stale record's daemon and starts anew; the status
 	// call then finds no socket.
@@ -749,45 +722,6 @@ func TestGivenPidfileButNoControlSocketWhenStartBridgeInvokedThenReturnsNotListe
 
 	require.ErrorIs(t, err, errNotListening)
 	assert.NotContains(t, out.String(), "listening on port")
-}
-
-func TestGivenPidfileButNoControlSocketWhenStartBridgeInvokedWithARNThenReturnsNotListeningOnly(t *testing.T) {
-	// The restarted daemon never binds its socket; the add finds none. Not a refused attach.
-	fakeRuntimePaths(t)
-	fakeBridgeStop(t, daemon.StopResult{PID: 4242, WasRunning: true}, nil)
-	countingBridgeStart(t)
-
-	_, err := execRoot(t, "bridge", "start", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
-
-	require.ErrorIs(t, err, errNotListening)
-	assert.NotContains(t, err.Error(), "bridge started")
-}
-
-func TestGivenSessionARNWhenStartBridgeInvokedThenStartsAndAttachesDevice(t *testing.T) {
-	fakeRestart(t, func(req control.Request) control.Response {
-		assert.Equal(t, control.OpAdd, req.Op)
-		return control.Response{OK: true, DeviceLabel: "Google Pixel 9 (OS 16)", Port: 5037}
-	}, daemon.StopResult{PID: 4242, WasRunning: true})
-
-	out, err := execRoot(t, "bridge", "start", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
-
-	require.NoError(t, err)
-	assert.Contains(t, out.String(), "listening on port 5037")
-	assert.Contains(t, out.String(), "Google Pixel 9 (OS 16)")
-}
-
-func TestGivenSessionARNButDaemonCannotResolveWhenStartBridgeInvokedThenErrorsButReportsDaemonUp(t *testing.T) {
-	// The daemon resolves the ARN, so a session that does not resolve fails after the
-	// start. The error says the bridge started.
-	fakeRestart(t, func(control.Request) control.Response {
-		return control.Response{OK: false, Error: "session not RUNNING"}
-	}, daemon.StopResult{PID: 4242, WasRunning: true})
-
-	_, err := execRoot(t, "bridge", "start", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "bridge started")
-	assert.Contains(t, err.Error(), "session not RUNNING")
 }
 
 func TestGivenNoBridgeWhenStartBridgeInvokedThenPrintsThePidAndLogFileAsAPlainLine(t *testing.T) {
@@ -934,14 +868,6 @@ func TestGivenABlankSessionArnWhenRemoveDeviceInvokedThenRefusedAndNothingRemove
 	})
 
 	_, err := execRoot(t, "device", "remove", "--session-arn", "   ")
-
-	require.ErrorContains(t, err, "--session-arn is blank")
-}
-
-func TestGivenABlankSessionArnWhenStartBridgeInvokedThenRefused(t *testing.T) {
-	shortRuntimeDir(t)
-
-	_, err := execRoot(t, "bridge", "start", "--session-arn", "   ")
 
 	require.ErrorContains(t, err, "--session-arn is blank")
 }

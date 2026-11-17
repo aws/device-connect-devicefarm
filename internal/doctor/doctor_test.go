@@ -203,7 +203,7 @@ const (
 	fixtureSessionArn         = "arn:aws:devicefarm:us-west-2:123456789012:session:11111111-2222-3333-4444-555555555555"
 	fixtureNoSessionSkip      = "pass --session-arn to check the session, the device connection, and adb versions"
 	fixturePortHeldHint       = "an adb server is listening on 127.0.0.1:35477, so the bridge cannot bind it until that server stops. Run 'devicefarm-connect bridge start --port 35477': it stops that server first, as 'adb kill-server' would. If a program that restarts adb, such as Android Studio, takes the port back, start the bridge on another port with 'devicefarm-connect bridge start --port <n>' and point adb at it with 'adb -P <n>'."
-	fixtureReverseOffHint     = "the bridge runs with adb reverse off, so every 'adb reverse' fails. Run 'devicefarm-connect bridge start --port 40775 --allow-adb-reverse --session-arn " + fixtureSessionArn + "' to start it again with reverse on. '--allow-adb-reverse' lets the device open connections to this machine, so use it only with a device you trust; a public physical device can run software you do not control."
+	fixtureReverseOffHint     = "the bridge runs with adb reverse off, so every 'adb reverse' fails. To start it again with reverse on, run 'devicefarm-connect bridge start --port 40775 --allow-adb-reverse', then run 'devicefarm-connect device add --session-arn " + fixtureSessionArn + "'. '--allow-adb-reverse' lets the device open connections to this machine, so use it only with a device you trust; a public physical device can run software you do not control."
 	fixtureVersionSkewHint    = "the local adb is 1.0.39 and the remote adb server is 1.0.41, so every adb command fails: that adb tries to start its own adb server on the bridge's port and cannot. Install platform-tools whose adb is 1.0.41, such as platform-tools 37, or put such an adb first on PATH, then rerun 'devicefarm-connect doctor --session-arn " + fixtureSessionArn + " --port 37537'. Until then no adb command reaches the device. The remote adb server is not affected."
 	fixtureCredentialsSummary = `this shell has no usable AWS credentials: failed to refresh cached credentials, no EC2 IMDS role found, operation error ec2imds: GetMetadata, access disabled to EC2 IMDS via client option, or "AWS_EC2_METADATA_DISABLED" environment variable`
 	fixtureCredentialsHint    = "the AWS config did not load or its credential chain resolved nothing, so every Device Farm call fails. Set 'AWS_PROFILE' to a profile with Device Farm access, run 'aws sso login --profile <name>' for a profile that uses SSO, or export 'AWS_ACCESS_KEY_ID' and 'AWS_SECRET_ACCESS_KEY'. For more information, see https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-authentication.html"
@@ -343,11 +343,12 @@ doctor: 1 of 4 categories passed, 1 warning, 2 not checked
 
 What to do
 1. Local machine, bridge: the bridge runs with adb reverse off, so every
-   'adb reverse' fails. Run
-   'devicefarm-connect bridge start --port 40775 --allow-adb-reverse --session-arn arn:aws:devicefarm:us-west-2:123456789012:session:11111111-2222-3333-4444-555555555555'
-   to start it again with reverse on. '--allow-adb-reverse' lets the device open
-   connections to this machine, so use it only with a device you trust; a public
-   physical device can run software you do not control.
+   'adb reverse' fails. To start it again with reverse on, run
+   'devicefarm-connect bridge start --port 40775 --allow-adb-reverse', then run
+   'devicefarm-connect device add --session-arn arn:aws:devicefarm:us-west-2:123456789012:session:11111111-2222-3333-4444-555555555555'.
+   '--allow-adb-reverse' lets the device open connections to this machine, so
+   use it only with a device you trust; a public physical device can run
+   software you do not control.
 2. Dependencies, adb versions: the local adb is 1.0.39 and the remote adb server
    is 1.0.41, so every adb command fails: that adb tries to start its own adb
    server on the bridge's port and cannot. Install platform-tools whose adb is
