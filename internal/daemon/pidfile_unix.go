@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // pathLockSuffix names the lock file beside the pidfile. Never removed: an
@@ -30,7 +32,7 @@ const pathLockSuffix = ".lock"
 func (p *PidFile) Write() error {
 	file, err := os.CreateTemp(filepath.Dir(p.path), "."+filepath.Base(p.path)+".")
 	if err != nil {
-		return fmt.Errorf("create PID file %q: %w", p.path, err)
+		return fmt.Errorf(wording.PidFileCreateFormat, p.path, err)
 	}
 	linked := false
 	defer func() {
@@ -42,10 +44,10 @@ func (p *PidFile) Write() error {
 		_ = os.Remove(file.Name())
 	}()
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return fmt.Errorf("lock PID file %q: %w", p.path, err)
+		return fmt.Errorf(wording.PidFileLockFormat, p.path, err)
 	}
 	if _, err := file.WriteString(strconv.Itoa(os.Getpid())); err != nil {
-		return fmt.Errorf("write PID file %q: %w", p.path, err)
+		return fmt.Errorf(wording.PidFileWriteFormat, p.path, err)
 	}
 	pathLock, err := p.lockPath()
 	if err != nil {
@@ -54,7 +56,7 @@ func (p *PidFile) Write() error {
 	defer pathLock.Close()
 	p.probe() // clears a leftover so link can take the path
 	if err := os.Link(file.Name(), p.path); err != nil {
-		return fmt.Errorf("publish PID file %q: %w", p.path, err)
+		return fmt.Errorf(wording.PidFilePublishFormat, p.path, err)
 	}
 	linked = true
 	p.lock = file
@@ -104,7 +106,7 @@ func (p *PidFile) lockPath() (*os.File, error) {
 	// O_NOFOLLOW: a planted link cannot make O_CREATE create a file elsewhere.
 	file, err := os.OpenFile(lockFilePath, os.O_RDONLY|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("open PID file lock %q: %w", lockFilePath, err)
+		return nil, fmt.Errorf(wording.PidFileOpenLockFormat, lockFilePath, err)
 	}
 	// A signal interrupts a blocking flock; retry.
 	for {
@@ -115,7 +117,7 @@ func (p *PidFile) lockPath() (*os.File, error) {
 	}
 	if err != nil {
 		file.Close()
-		return nil, fmt.Errorf("lock PID file lock %q: %w", lockFilePath, err)
+		return nil, fmt.Errorf(wording.PidFileTakeLockFormat, lockFilePath, err)
 	}
 	return file, nil
 }

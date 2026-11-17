@@ -23,7 +23,7 @@ import (
 const reverseNotReadyFail = "FAIL0043the device's reverse rules are not ready yet; run the command again"
 
 // reverseSlotHeldFail is wording.AdbFailReverseHeld as the client reads it, framed.
-const reverseSlotHeldFail = "FAIL0099adb reverse on this device is held by another adb client, or by this client's previous connection for a short while; stop the other client or retry later"
+const reverseSlotHeldFail = "FAIL0095adb reverse on this device is held by another bridge, or by this bridge's previous connection for a short while; stop the other bridge or retry later"
 
 // framedKillforwardAll is the attach clear's kill as one websocket message.
 var framedKillforwardAll = string(framed("reverse:killforward-all"))

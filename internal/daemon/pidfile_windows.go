@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"syscall"
 	"time"
+
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // errorSharingViolation is the Windows error ERROR_SHARING_VIOLATION, which
@@ -40,7 +42,7 @@ const publishRetryTimeout = time.Second
 func (p *PidFile) Write() error {
 	name, err := syscall.UTF16PtrFromString(p.path)
 	if err != nil {
-		return fmt.Errorf("publish PID file %q: %w", p.path, err)
+		return fmt.Errorf(wording.PidFileCreateFormat, p.path, err)
 	}
 	deadline := time.Now().Add(publishRetryTimeout)
 	var handle syscall.Handle
@@ -51,7 +53,7 @@ func (p *PidFile) Write() error {
 			break
 		}
 		if !errors.Is(err, errorSharingViolation) || !time.Now().Before(deadline) {
-			return fmt.Errorf("publish PID file %q: %w", p.path, err)
+			return fmt.Errorf(wording.PidFileCreateFormat, p.path, err)
 		}
 		time.Sleep(startupPollInterval)
 	}
@@ -59,7 +61,7 @@ func (p *PidFile) Write() error {
 	if _, err := file.WriteString(strconv.Itoa(os.Getpid())); err != nil {
 		file.Close()
 		_ = os.Remove(p.path)
-		return fmt.Errorf("write PID file %q: %w", p.path, err)
+		return fmt.Errorf(wording.PidFileWriteFormat, p.path, err)
 	}
 	p.lock = file
 	return nil

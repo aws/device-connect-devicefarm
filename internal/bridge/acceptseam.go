@@ -321,7 +321,8 @@ func respondForwardLocally(tcpConn net.Conn, clientOpening opening, forwarding *
 const reverseServicePrefix = "reverse:"
 
 // refuseReverseFamily answers every `reverse:` request the seam reads with a FAIL while reverse
-// is off; real adb has no such setting. It keys on the prefix alone, so a malformed request is
+// is off; real adb has no such setting. The FAIL quotes the doctor run on the daemon's listen
+// port. It keys on the prefix alone, so a malformed request is
 // refused too. One behind a select the seam did not read (a device-selecting prefix, or a serial
 // grammar the parser refuses), or alone behind a host prefix it cannot parse, rides the byte pipe
 // to the server, which denies reverse with no notifier. It runs after
@@ -332,7 +333,8 @@ func refuseReverseFamily(tcpConn net.Conn, clientOpening opening, forwarding *at
 	if forwarding == nil || forwarding.reverseEnabled || !clientOpening.reverseFamily() {
 		return false
 	}
-	refuseOpening(tcpConn, wording.AdbFailReverseOff, "could not refuse a reverse request", logger)
+	reason := fmt.Sprintf(wording.AdbFailReverseOffFormat, forwarding.listenPort)
+	refuseOpening(tcpConn, reason, "could not refuse a reverse request", logger)
 	return true
 }
 
@@ -436,7 +438,7 @@ func screenReverseRule(tcpConn net.Conn, clientOpening opening, forwarding *atta
 	rules := forwarding.reverseRules
 	// Before begin: a refusal holds no rule slot. A kill names no customer port. Port 0 is unknown;
 	// refuseCustomerPort then refuses every announce.
-	listenPort := forwarding.notifier.cfg.params.ListenPort
+	listenPort := forwarding.listenPort
 	if listenPort > 0 && customerPort == listenPort {
 		logger.Debug("refused a reverse rule: its target is the daemon's own listen port", "listenPort", listenPort)
 		refuseOpening(tcpConn, fmt.Sprintf(wording.AdbFailReverseOntoListenPortFormat, listenPort), "could not refuse a reverse rule", logger)

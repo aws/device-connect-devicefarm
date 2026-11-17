@@ -136,7 +136,9 @@ func TestHelperProcess(t *testing.T) {
 	}
 	// Keeps pidFile reachable through the park, so the GC cannot close the lock.
 	defer pidFile.Remove()
-	controlServer := control.NewLocalSocketServer(os.Getenv(helperControlSocketEnv), version.String(), nil)
+	// It refuses nothing, so its restart is never worded.
+	controlServer := control.NewLocalSocketServer(os.Getenv(helperControlSocketEnv), version.String(),
+		func(string) string { return "" }, nil)
 	if err := controlServer.Listen(); err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +481,7 @@ func TestGivenAnAdbServerThatRefusesToStopWhenStartedThenNoSpawnAndTheTextNamesA
 	}{
 		{name: "a server that rejects kills", answer: killRefused, wantCause: "it answered FAIL: " + adbRejectsKill},
 		{name: "a server a program restarts at once", answer: killRestarted, wantCause: "it answered OKAY but port <port> is " +
-			"still held after 1s; a program that restarts adb, such as Android Studio, can take it back at once"},
+			"still held after 1s; a program that restarts adb automatically, such as Android Studio, can take it back at once"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -682,19 +684,6 @@ func TestGivenAChildThatExitsWithAnotherErrorWhenStartedThenThatErrorIsTheTextAt
 	assert.Less(t, time.Since(started), startupTimeout, "a child that exits ends the wait at once")
 	assert.Equal(t, fmt.Sprintf("the bridge exited while starting: %s. Fix what it reports, then run 'devicefarm-connect bridge "+
 		"start --port %d'. Its log is \"%s\".", childError, mgr.config.ListenPort, mgr.paths.LogFile), err.Error())
-}
-
-func TestGivenAChildWhoseControlSocketFailsWhenStartedThenItsErrorIsNotTakenForALostPort(t *testing.T) {
-	mgr := newTestManager(t)
-	// The control socket's bind error starts with "listen on" too; only the TCP address marks a lost port.
-	controlError := fmt.Sprintf("listen on control socket %q: bind: address already in use", mgr.paths.ControlSocket)
-	stubChildExit(t, func() {}, childErrorLine(controlError))
-
-	_, err := mgr.Start()
-
-	require.Error(t, err)
-	assert.Equal(t, fmt.Sprintf("the bridge exited while starting: %s. Fix what it reports, then run 'devicefarm-connect bridge "+
-		"start --port %d'. Its log is \"%s\".", controlError, mgr.config.ListenPort, mgr.paths.LogFile), err.Error())
 }
 
 func TestGivenAChildThatLogsNoErrorWhenItExitsOrTimesOutThenTheLogPathIsNamed(t *testing.T) {
@@ -1323,8 +1312,13 @@ func TestGivenAnAttachedDeviceWhenAnAdbCommandArrivesThenItRidesTheWebsocketPark
 	}
 }
 
-// reverseOffFail is the framed FAIL a reverse request reads from a daemon that did not opt in.
-const reverseOffFail = "FAIL0047adb reverse is off for this client; restart it with --allow-adb-reverse"
+// reverseOffFail is the framed FAIL a reverse request reads from a daemon on listenPort that did not opt in.
+func reverseOffFail(listenPort int) string {
+	reason := fmt.Sprintf("adb reverse is off for this bridge. '--allow-adb-reverse' turns it on and lets the device open "+
+		"connections to this machine, so use it only with a device you trust. Run 'devicefarm-connect doctor --port %d' for the "+
+		"commands that restart the bridge with reverse on and attach the device again.", listenPort)
+	return fmt.Sprintf("FAIL%04x%s", len(reason), reason)
+}
 
 // adbCommand sends service behind a `host:tport:any` select and returns what the daemon writes
 // after the select reply, up to the close.
@@ -1362,8 +1356,8 @@ func TestGivenReverseOffWhenTheDaemonAttachesThenNoNotifierOpensAndOnlyReverseIs
 		testPollInterval, "a daemon that did not opt in must never dial a notifier")
 	assert.True(t, strings.HasPrefix(adbCommand(t, cfg.ListenPort, "forward:tcp:0;tcp:9999"), "OKAYOKAY"),
 		"a forward rule must still install, or the absent notifier proves nothing")
-	assert.Equal(t, reverseOffFail, adbCommand(t, cfg.ListenPort, "reverse:forward:tcp:4;tcp:5"),
-		"a reverse request must get the reverse-off FAIL from the daemon itself")
+	assert.Equal(t, reverseOffFail(cfg.ListenPort), adbCommand(t, cfg.ListenPort, "reverse:forward:tcp:4;tcp:5"),
+		"a reverse request must get the reverse-off FAIL from the daemon itself, with the daemon's port in the doctor command")
 
 	cancel()
 

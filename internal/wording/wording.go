@@ -26,8 +26,8 @@ const (
 	RestartQuotedFormat = "'%s'%s"
 	// The restart, then the attach. Last verb: the session ARN.
 	RestartThenAttachFormat = RestartQuotedFormat + ", then " + DetachReattachLead + " %s'"
-	// The restart, quoted, for a text that cannot read the bridge's flags.
-	StartWithYourOptionsClause = "'" + BridgeStartCommand + "' with the options that you started it with"
+	// Follows the quoted start in a text that cannot read the bridge's flags.
+	YourOptionsClause = " with the options that you started it with"
 	// The address follows. A quoted command names it only off the default address.
 	ListenAddrFlagLead = " --listen-addr "
 )
@@ -202,8 +202,14 @@ const (
 	ProblemDoctorOneCheckFailed     = "doctor: 1 check failed"
 	ProblemDoctorChecksFailedFormat = "doctor: %d checks failed"
 	FixRunHelpFormat                = "run '%s --help' for usage"
-	CauseRuntimeDirOwnerFormat      = "working directory %q is owned by UID %d, not %d"
+	// A path prints in plain quotes, not with %q: a Windows path keeps single backslashes.
+	CauseRuntimeDirOwnerFormat      = "working directory \"%s\" is owned by UID %d, not %d"
+	CauseRuntimeDirCreateFormat     = "cannot create the working directory \"%s\": %w"
+	CauseRuntimeDirCheckOwnerFormat = "cannot check the owner of the working directory \"%s\": %w"
+	CauseRuntimeDirLocateFormat     = "cannot find a location for the working directory: %w"
 	FixRuntimeDirEnvVarFormat       = "set %s to a private directory"
+	// For a working directory cause with no fix of its own. The doctor's working directory row has the steps.
+	FixRuntimeDirDoctor = "run '" + DoctorCommand + "' to see how to fix the working directory"
 )
 
 // Control refusals: the bridge's reply, printed as the command's cause.
@@ -282,11 +288,12 @@ const (
 		DetachReattachLead + " %s' again. '%s' tests the connection."
 	// Verb: the restart.
 	FixInstallLatestFormat = "Install the latest " + BinaryName + ", then run %s."
-	FixMalformedRequest    = "Restart the bridge: run " + StartWithYourOptionsClause + ". If the error remains, install the latest " + BinaryName + "."
+	// Verb: the restart, then the add of the attached session.
+	FixRestartThenInstallLatestFormat = "Restart the bridge: run %s. If the error remains, install the latest " + BinaryName + "."
 	// Also the command's own fix for a refusal with no fix, when the bridge reports another version
-	// of this program or no version.
-	FixOtherVersionBridge = "The running bridge is another version of " + BinaryName + " than this command. Restart it: run " +
-		StartWithYourOptionsClause + ". If the error remains, install the latest " + BinaryName + ", then run '" + DoctorCommand +
+	// of this program or no version. Verb: the restart, then the add of the session to attach again.
+	FixOtherVersionBridgeFormat = "The running bridge is another version of " + BinaryName + " than this command. Restart it: run " +
+		"%s. If the error remains, install the latest " + BinaryName + ", then run '" + DoctorCommand +
 		"'. If the doctor does not find the cause, contact AWS Support."
 	FixSeeDeviceList  = "Run '" + BinaryName + " device list' to see what the bridge holds and why the last device detached."
 	FixSeeAttachedARN = "Run '" + BinaryName + " device list --json' to see the ARN of the attached session. " +
@@ -341,6 +348,7 @@ const (
 	// Last verb: the region a session ARN names.
 	SessionNotSessionARNFormat = "%w: ARN %q is not a remote access session ARN (resource %q); a session ARN looks like " +
 		"arn:aws:devicefarm:%s:<account>:session:<ids>"
+	SessionLoadConfigFormat      = "cannot load the AWS configuration: %w"
 	SessionCallFailedFormat      = "GetRemoteAccessSession %q: %w"
 	SessionNotFoundCauseFormat   = "session %w: %w"
 	SessionNotFoundFormat        = "remote access session %q %w"
@@ -370,6 +378,34 @@ const (
 	StartNotReadyFormat      = "the bridge did not report ready within %s and logged no error, so it was stopped. Check \"%s\", then run '%s'."
 	StopFromElevatedShell    = "stop it from an elevated shell"
 	StopSurvivedKillFormat   = "bridge (PID %d) survived kill after %s; PID file left in place"
+	// Causes. Last verb of each: the system's own error.
+	StartNoProgramFileFormat  = "cannot find the " + BinaryName + " program file: %w"
+	StartOpenLogFormat        = "cannot open the bridge log file \"%s\": %w"
+	StartLaunchFormat         = "cannot start the bridge process: %w"
+	StopNoProcessAccessFormat = "cannot get access to the bridge process (PID %d): %w"
+)
+
+// What a starting bridge logs when it cannot set up its PID file or control socket;
+// StartExitedFormat quotes it.
+// Verbs: the file's path, the system's own error.
+const (
+	PidFileCreateFormat            = "cannot create the PID file \"%s\": %w"
+	PidFileLockFormat              = "cannot lock the PID file \"%s\": %w"
+	PidFileWriteFormat             = "cannot write the PID file \"%s\": %w"
+	PidFilePublishFormat           = "cannot put the PID file \"%s\" in place: %w"
+	PidFileOpenLockFormat          = "cannot open the PID file's lock file \"%s\": %w"
+	PidFileTakeLockFormat          = "cannot lock the PID file's lock file \"%s\": %w"
+	ControlSocketRemoveOldFormat   = "cannot remove the old control socket \"%s\": %w"
+	ControlSocketListenFormat      = "cannot listen on the control socket \"%s\": %w"
+	ControlSocketPermissionsFormat = "cannot set the permissions of the control socket \"%s\": %w"
+)
+
+// A command's exchange with the bridge: causes under ProblemBridgeNoAnswer and in the doctor's
+// bridge row. Verb: the system's own error.
+const (
+	ControlSetDeadlineFormat = "cannot set a time limit on the connection to the bridge: %w"
+	ControlSendFormat        = "cannot send the request to the bridge: %w"
+	ControlReadReplyFormat   = "cannot read the bridge's reply: %w"
 )
 
 // Listen port failures and their fixes.
@@ -396,7 +432,7 @@ const (
 	PortStopBadReplyFormat        = "it answered %q, not OKAY or FAIL"
 	PortStopFailed                = "it answered FAIL"
 	PortStopFailedLead            = PortStopFailed + ": "
-	PortStopStillHeldFormat       = "it answered OKAY but port %d is still held after %s; a program that restarts adb, such as Android Studio, can take it back at once"
+	PortStopStillHeldFormat       = "it answered OKAY but port %d is still held after %s; a program that restarts adb automatically, such as Android Studio, can take it back at once"
 	PortAdbServerDidNotStopFormat = "an adb server on %s was asked to stop (via 'adb kill-server') and did not (%v). %s"
 	PortAdbServerTookPortFormat   = "an adb server took %s before the bridge could bind it. Programs that restart adb automatically, such as Android Studio, are known to do this. %s"
 	// Fix for an adb server that keeps the port, on a non-default port.
@@ -411,13 +447,15 @@ const (
 
 // The bridge's own FAIL texts; adb prints them after "error: ".
 const (
-	// Names the flag that turns reverse on.
-	AdbFailReverseOff      = "adb reverse is off for this client; restart it with --allow-adb-reverse"
+	// Names the flag that turns reverse on, with the short caveat. Verb: the bridge's port. The
+	// doctor run prints the restart, then the add of the attached device.
+	AdbFailReverseOffFormat = "adb reverse is off for this bridge. '--allow-adb-reverse' turns it on and " + ReverseCaveatClause +
+		". Run '" + PortDoctorCommandFormat + "' for the commands that restart the bridge with reverse on and attach the device again."
 	AdbFailReverseNotReady = "the device's reverse rules are not ready yet; run the command again"
 	// A reverse install onto the bridge's own listen port. Verb: that port.
 	AdbFailReverseOntoListenPortFormat = "cannot reverse to tcp:%d: the bridge listens on that port"
 	// The server's refusal does not say which holder, so the text names both.
-	AdbFailReverseHeld               = "adb reverse on this device is held by another adb client, or by this client's previous connection for a short while; stop the other client or retry later"
+	AdbFailReverseHeld               = "adb reverse on this device is held by another bridge, or by this bridge's previous connection for a short while; stop the other bridge or retry later"
 	AdbFailTooManyConnectionsFormat  = "too many adb connections (limit %d)"
 	AdbFailTooManyForwardRulesFormat = "too many forward rules (limit %d)"
 	AdbFailTooManyReverseRulesFormat = "too many reverse rules (limit %d)"
@@ -488,9 +526,10 @@ const (
 
 // The reverse flag's caveat.
 const (
-	// Follows every mention of --allow-adb-reverse.
-	DoctorHintReverseCaveat = "'--allow-adb-reverse' lets the device open connections to this machine, so use it only with a " +
-		"device you trust; a public physical device can run software you do not control."
+	// The short form. AdbFailReverseOffFormat carries it.
+	ReverseCaveatClause = "lets the device open connections to this machine, so use it only with a device you trust"
+	// The full form. Follows every other mention of --allow-adb-reverse.
+	DoctorHintReverseCaveat = "'--allow-adb-reverse' " + ReverseCaveatClause + "; a public physical device can run software you do not control."
 )
 
 // Doctor check: bridge.
@@ -518,8 +557,9 @@ const (
 	DoctorDetailDaemonNoStatusFormat      = "a bridge (PID %d) is registered but did not report its status: %s"
 	DoctorDetailDaemonStatusRefusedFormat = "a bridge (PID %d) is registered but refused to report its status: %s"
 
-	DoctorHintDaemonNoStatus = "a bridge is registered but did not report its status. Run " + StartWithYourOptionsClause +
-		". The start ends that bridge and launches a new one."
+	// Verb: the restart, then the add of the asked session, if any.
+	DoctorHintDaemonNoStatusFormat = "a bridge is registered but did not report its status. Run %s. " +
+		"The start ends that bridge and launches a new one."
 	// Verb: the restart with the bridge's own port and reverse setting, then the add of its session.
 	DoctorHintDaemonOtherProgramVersionFormat = "the bridge runs another version of " + BinaryName + " than this command, so a command can " +
 		"fail. To start it again with this command's version of " + BinaryName + ", run %s. The restart drops an attached device with its " +
@@ -562,7 +602,7 @@ const (
 
 	// Verbs: address, its start command, the fix when a program takes the port back. That fix ends the sentence.
 	DoctorHintAdbServerOnPortFormat = "an adb server is listening on %s, so the bridge cannot bind it until that server stops. Run '%s': it stops that " +
-		"server first, as 'adb kill-server' would. If a program that restarts adb, such as Android Studio, takes the port back, %s"
+		"server first (via 'adb kill-server'). If a program that restarts adb automatically, such as Android Studio, takes the port back, %s"
 
 	DoctorHintPortNeedsAdminFormat = "this user cannot bind port %d; ports below 1024 need administrator rights on most systems. " +
 		"Run '" + BridgeStartCommand + " --port <n>' with a port above 1023 and " + PointAdbAtPortClause + ". The bridge then listens on that port instead of %d."
@@ -629,7 +669,7 @@ const (
 	// Ends the new-session step of hints below.
 	DoctorHintPassNewARNClause = "and pass its ARN with '--session-arn'"
 
-	// Session hints. First verb: the ARN.
+	// Session hints. First verb: the ARN, unless noted.
 
 	DoctorHintARNInvalidFormat = "'%s' is not a Device Farm remote access session ARN in us-west-2. Pass '--session-arn' the ARN that the " +
 		"Device Farm console or '" + DoctorCreateSessionCommand + "' printed. The bridge reaches the device through that ARN and refuses any other."
@@ -648,10 +688,9 @@ const (
 		"The bridge refuses the %s device at attach time too."
 	DoctorHintSessionEndedFormat = "session '%s' has ended, so nothing can attach to it. Start a new remote access session in the Device Farm " +
 		"console or with '" + DoctorCreateSessionCommand + "', " + DoctorHintPassNewARNClause + ". A bridge attached to a session that ends drops the device within a few minutes."
-	// Second verb: the quoted rerun.
-	DoctorHintSessionNotReadyFormat = "this session has no interactive endpoint yet (it is still starting, or not RUNNING), so the bridge " +
-		"cannot attach it. Wait until 'aws devicefarm get-remote-access-session --arn %s --region us-west-2' reports status " +
-		"RUNNING with an endpoint, then rerun %s."
+	// Verbs: the status, the ARN, the quoted rerun.
+	DoctorHintSessionNotReadyFormat = "this session is not running yet (status %s), so the bridge cannot attach it. Wait until " +
+		"'aws devicefarm get-remote-access-session --arn %s --region us-west-2' reports status RUNNING, then rerun %s."
 	// Second verb: the quoted rerun.
 	DoctorHintSessionNoEndpointFormat = "Device Farm reports session '%s' RUNNING but returned no interactive endpoint for it, so the " +
 		"bridge cannot attach it. Rerun %s once. If the endpoint stays missing, contact AWS Support."
@@ -705,13 +744,13 @@ const (
 	DoctorDetailReverseOnInDaemon = "the running bridge has adb reverse on for this session"
 	DoctorDetailReverseAvailable  = "adb reverse is available on this session"
 	// Replaces the refusal's own text, which names the mechanism.
-	DoctorDetailReverseInUse           = "another client, or an earlier run of this client, still uses adb reverse on this session"
+	DoctorDetailReverseInUse           = "another bridge, or an earlier run of this bridge, still uses adb reverse on this session"
 	DoctorDetailReverseUnavailableLead = "adb reverse is not available on this session: "
 
 	// Verb: the quoted rerun.
-	DoctorHintReverseInUseFormat = "another client still uses adb reverse on this session, so Device Farm would refuse 'adb reverse' through " +
-		"the bridge. Stop that client with '" + BridgeStopCommand + "' on the machine where it runs, or wait for Device Farm to release it, then rerun " +
-		"%s. Device Farm lets one client at a time use adb reverse on a device."
+	DoctorHintReverseInUseFormat = "another bridge still uses adb reverse on this session, so Device Farm would refuse 'adb reverse' through " +
+		"the bridge. Stop that bridge with '" + BridgeStopCommand + "' on the machine where it runs, or wait for Device Farm to release it, then rerun " +
+		"%s. Device Farm lets one bridge at a time use adb reverse on a device."
 )
 
 // Doctor check: adb versions.

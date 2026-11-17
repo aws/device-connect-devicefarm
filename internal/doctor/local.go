@@ -254,21 +254,28 @@ func checkRunningDaemon(ctx context.Context, inputs Inputs, state *runState) Res
 		return Result{Status: Pass, Summary: wording.DoctorDetailDaemonNotRunning}
 	}
 	reply, err := control.NewDaemonClient(state.paths.ControlSocket).Send(control.Request{Op: control.OpStatus})
+	askedARN := strings.TrimSpace(inputs.SessionARN)
 	switch {
 	case errors.Is(err, control.ErrDaemonNotRunning):
 		return Result{Status: Fail, Summary: fmt.Sprintf(wording.DoctorDetailDaemonSilentFormat, pid, causeWithoutSocketPath(err)),
-			Hint: wording.DoctorHintDaemonNoStatus}
+			Hint: noStatusHint(askedARN)}
 	case err != nil:
 		return Result{Status: Fail, Summary: fmt.Sprintf(wording.DoctorDetailDaemonNoStatusFormat, pid, causeWithoutSocketPath(err)),
-			Hint: wording.DoctorHintDaemonNoStatus}
+			Hint: noStatusHint(askedARN)}
 	case !reply.OK:
 		return Result{Status: Fail, Summary: fmt.Sprintf(wording.DoctorDetailDaemonStatusRefusedFormat, pid, reply.Error),
-			Hint: wording.DoctorHintDaemonNoStatus}
+			Hint: noStatusHint(askedARN)}
 	}
 	state.setDaemon(reply, pid)
-	askedARN := strings.TrimSpace(inputs.SessionARN)
 	returnedARN := lookUpReturnedARN(ctx, inputs, state, askedARN, reply)
 	return bridgeRowResult(askedARN, returnedARN, reply, pid)
+}
+
+// noStatusHint words the restart of a bridge that reports no status, then the add of the asked
+// session, if any. The doctor cannot read that bridge's flags or device.
+func noStatusHint(askedARN string) string {
+	return fmt.Sprintf(wording.DoctorHintDaemonNoStatusFormat,
+		daemon.RestartRemedy(wording.BridgeStartCommand, wording.YourOptionsClause, safeValue(askedARN)))
 }
 
 // lookUpReturnedARN is the ARN the service returns for the asked session; askedARN with no
