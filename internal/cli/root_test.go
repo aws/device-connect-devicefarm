@@ -148,8 +148,8 @@ func TestGivenHelpSubcommandWhenInvokedForACommandThenPrintsThatCommandsHelp(t *
 	out, err := runRoot(t, "help", "bridge", "start")
 
 	require.NoError(t, err)
-	assert.Contains(t, out.String(), "Start the bridge, optionally")
-	assert.Contains(t, out.String(), "--session-arn")
+	assert.Contains(t, out.String(), "Start the bridge, or restart a running one")
+	assert.Contains(t, out.String(), "--port")
 	assert.Contains(t, out.String(), "-h, --help", "help must list the same flags as --help")
 }
 
@@ -233,28 +233,22 @@ func TestGivenDeviceAddWithoutARNWhenInvokedThenFailsRequestingARN(t *testing.T)
 
 func TestGivenListenerFlagsAfterBridgeStartPathWhenInvokedThenParsed(t *testing.T) {
 	// Callers invoke the binary as
-	// `devicefarm-connect bridge start --port N --log P --session-arn ...`: the
+	// `devicefarm-connect bridge start --port N --log P`: the
 	// listener/log flags are flags of `bridge start`, not global. This test guards
 	// that contract. fakeDaemon writes a live pidfile, so `bridge start` restarts
 	// through the faked stop and start;
-	// reaching the add request over the control socket proves the flags parsed and
-	// `bridge start` ran.
-	addSeen := false
-	fakeDaemon(t, func(req control.Request) control.Response {
-		if req.Op == control.OpAdd {
-			addSeen = true
-			assert.Equal(t, "arn:aws:devicefarm:us-west-2:1:session:a/b/0", req.ARN)
-		}
-		return control.Response{OK: true, DeviceLabel: "Pixel", Port: 5599}
+	// the listening line proves the flags parsed and `bridge start` ran.
+	fakeDaemon(t, func(control.Request) control.Response {
+		return control.Response{OK: true, Port: 5599}
 	})
 	fakeBridgeStop(t, daemon.StopResult{PID: 4242, WasRunning: true}, nil)
 	countingBridgeStart(t)
 
-	_, err := execRoot(t, "bridge", "start", "--port", "5599", "--listen-addr", "127.0.0.1",
-		"--log", t.TempDir()+"/d.log", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
+	out, err := execRoot(t, "bridge", "start", "--port", "5599", "--listen-addr", "127.0.0.1",
+		"--log", t.TempDir()+"/d.log")
 
-	require.NoError(t, err, "bridge start must parse its flags and attach through the control channel")
-	assert.True(t, addSeen, "bridge start must have parsed its flags and forwarded the add to the daemon")
+	require.NoError(t, err, "bridge start must parse its flags")
+	assert.Contains(t, out.String(), "listening on port 5599 with no device attached")
 }
 
 func TestGivenListenerFlagOnScopedCommandWhenInvokedThenRejected(t *testing.T) {
@@ -365,7 +359,7 @@ func TestGivenUnknownFlagWhenInvokedThenFails(t *testing.T) {
 }
 
 func TestGivenInvalidPortWhenBridgeStartInvokedThenValidationFails(t *testing.T) {
-	_, err := runRoot(t, "bridge", "start", "--port", "0", "--session-arn", "arn:aws:devicefarm:us-west-2:1:session:a/b/0")
+	_, err := runRoot(t, "bridge", "start", "--port", "0")
 
 	require.Error(t, err)
 }

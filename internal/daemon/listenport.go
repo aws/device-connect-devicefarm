@@ -206,17 +206,14 @@ func StartCommand(listenAddr string, port int) string {
 	return command
 }
 
-// RestartCommand is the command that restarts the bridge with these settings. 'bridge start'
-// stops a running bridge first, so no 'bridge stop' comes before it.
-func RestartCommand(listenAddr string, port int, reverse bool, sessionARN string) string {
-	command := StartCommand(listenAddr, port)
-	if reverse {
-		command += wording.RestartReverseFlag
+// RestartRemedy is the restart as fixes and hints quote it: startCommand in quotes, then clause,
+// then the add of sessionARN when not empty. 'bridge start' stops a running bridge first, so no
+// 'bridge stop' comes before it.
+func RestartRemedy(startCommand, clause, sessionARN string) string {
+	if sessionARN == "" {
+		return fmt.Sprintf(wording.RestartQuotedFormat, startCommand, clause)
 	}
-	if sessionARN != "" {
-		command += wording.RestartSessionFlagLead + sessionARN
-	}
-	return command
+	return fmt.Sprintf(wording.RestartThenAttachFormat, startCommand, clause, sessionARN)
 }
 
 // DoctorCommand is the doctor run on port, for sessionARN when it is not empty. --listen-addr as

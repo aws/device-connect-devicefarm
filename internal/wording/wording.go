@@ -20,9 +20,12 @@ const (
 	BridgeStartCommand = BinaryName + " bridge start"
 	BridgeStopCommand  = BinaryName + " bridge stop"
 	DoctorCommand      = BinaryName + " doctor"
-	// Flags RestartCommand appends. The reverse flag needs DoctorHintReverseCaveat beside it.
-	RestartReverseFlag     = " --allow-adb-reverse"
-	RestartSessionFlagLead = " --session-arn "
+	// The doctor's restart appends it. It needs DoctorHintReverseCaveat beside it.
+	RestartReverseFlag = " --allow-adb-reverse"
+	// The restart as fixes and hints quote it. Verbs: the start command, a clause that follows it or nothing.
+	RestartQuotedFormat = "'%s'%s"
+	// The restart, then the attach. Last verb: the session ARN.
+	RestartThenAttachFormat = RestartQuotedFormat + ", then " + DetachReattachLead + " %s'"
 	// The restart, quoted, for a text that cannot read the bridge's flags.
 	StartWithYourOptionsClause = "'" + BridgeStartCommand + "' with the options that you started it with"
 	// The address follows. A quoted command names it only off the default address.
@@ -46,7 +49,7 @@ const (
 	HelpUsage = "Help about any command"
 
 	HelpBridge       = "Manage the background bridge"
-	HelpBridgeStart  = "Start the bridge, optionally attaching a Device Farm remote access device"
+	HelpBridgeStart  = "Start the bridge, or restart a running one, with the options given"
 	HelpBridgeStop   = "Stop the running bridge"
 	HelpBridgeStatus = "Report whether the bridge is running and how many devices are attached"
 
@@ -114,7 +117,6 @@ const (
 	FlagLogUsage             = "bridge log file path (defaults to the per-user runtime directory)"
 
 	FlagSessionARNUsage       = "AWS Device Farm remote access session ARN"
-	FlagSessionARNStartUsage  = FlagSessionARNUsage + " (optional; attaches the device on start)"
 	FlagSessionARNRemoveUsage = FlagSessionARNUsage + " (optional; without it, the attached device is detached)"
 	FlagSessionARNDoctorUsage = FlagSessionARNUsage + " (optional; defaults to the one attached session; also checks the session, the connection to the device, and the adb versions)"
 
@@ -192,13 +194,11 @@ const (
 	ProblemStopRunningFailed        = "could not stop the running bridge"
 	ProblemBridgeNotListening       = "the bridge is not listening"
 	ProblemBridgeNoAnswer           = "the bridge did not answer"
-	ProblemStartedButNotAttached    = "the bridge started but could not attach the device"
 	ProblemAttachFailed             = "could not attach the device"
 	ProblemListFailed               = "could not list the devices"
 	ProblemDetachFailed             = "could not detach the device"
 	ProblemSessionARNRequired       = "--session-arn is required"
-	ProblemSessionARNBlank          = "--session-arn is blank"
-	ProblemSessionARNBlankRemove    = ProblemSessionARNBlank + "; omit it to detach the attached device"
+	ProblemSessionARNBlankRemove    = "--session-arn is blank; omit it to detach the attached device"
 	ProblemDoctorOneCheckFailed     = "doctor: 1 check failed"
 	ProblemDoctorChecksFailedFormat = "doctor: %d checks failed"
 	FixRunHelpFormat                = "run '%s --help' for usage"
@@ -246,8 +246,8 @@ const (
 )
 
 // Fixes the bridge sends with a refused request, one each: whole sentences that name the command
-// to run. The restart verb: the quoted start command, then FixOtherOptionsClause for a bridge with
-// reverse on.
+// to run. The restart verb: the quoted start command, with FixOtherOptionsClause for a bridge with
+// reverse on, then the add of the refused session (RestartThenAttachFormat).
 const (
 	// Verb: the refused session's ARN.
 	FixRemoveOtherDeviceFormat = "Remove that device with '" + BinaryName + " device remove', then " + DetachReattachLead + " %s' again."
@@ -302,7 +302,7 @@ const (
 	DetachSessionEndedFormat = "remote access session %s %s; " + DetachNewSessionFix
 	// The websocket relay's session-stopping close: the cause of a refused add. DetachSessionEndedFormat is its detach reason.
 	DetachSessionStoppingFormat = "remote access session %s " + DetachStoppingClause
-	// Verbs: the session ARN, the restart as the fixes quote it.
+	// Verbs: the session ARN, the restart then the add as the fixes quote them.
 	DetachCredentialsExpiredFormat = "the AWS credentials the bridge started with have expired, so it can no longer read remote access " +
 		"session %s; refresh the credentials, then from that shell run %s"
 	// A session the bridge can no longer read. Verbs: the session ARN, the failure's class. Each format adds its class's advice.
@@ -519,14 +519,13 @@ const (
 
 	DoctorHintDaemonNoStatus = "a bridge is registered but did not report its status. Run " + StartWithYourOptionsClause +
 		". The start ends that bridge and launches a new one."
-	// Verb: the restart with the bridge's own port, session and reverse setting.
+	// Verb: the restart with the bridge's own port and reverse setting, then the add of its session.
 	DoctorHintDaemonOtherProgramVersionFormat = "the bridge runs another version of " + BinaryName + " than this command, so a command can " +
-		"fail. Run '%s' to start it again with this command's version of " + BinaryName + ". The restart drops an attached device with its " +
-		"forward rules and open adb connections, and its reverse rules no longer reach this machine; the device comes back when the " +
-		"command names its session."
-	// Verb: the restart with the reverse flag.
-	DoctorHintDaemonReverseOffFormat = "the bridge runs with adb reverse off, so every 'adb reverse' fails. Run '%s' to start it again " +
-		"with reverse on."
+		"fail. To start it again with this command's version of " + BinaryName + ", run %s. The restart drops an attached device with its " +
+		"forward rules and open adb connections, and its reverse rules no longer reach this machine."
+	// Verb: the restart with the reverse flag, then the add of the bridge's session.
+	DoctorHintDaemonReverseOffFormat = "the bridge runs with adb reverse off, so every 'adb reverse' fails. To start it again with " +
+		"reverse on, run %s."
 	// Verb: the bridge's detach reason, which names the fix.
 	DoctorHintDaemonDetachedFormat = "the bridge detached the device, so adb finds no device: %s."
 
@@ -556,9 +555,9 @@ const (
 		"'--listen-addr' a non-empty address with no port or brackets, as in '" + BridgeStartCommand + " --port 5037 --listen-addr 127.0.0.1'. The bridge " +
 		"binds exactly that address, so point adb at the same port."
 
-	// Verbs: bridge's port, asked port, restart, asked port, bridge's port.
+	// Verbs: bridge's port, asked port twice, the restart then the add of the bridge's session, bridge's port.
 	DoctorHintDaemonOnOtherPortFormat = "the running bridge listens on port %d, not %d. " +
-		"Run '%s' to move it to port %d, or point adb at it with 'adb -P %d'."
+		"To move it to port %d, run %s. Or point adb at it with 'adb -P %d'."
 
 	// Verbs: address, its start command, the fix when a program takes the port back. That fix ends the sentence.
 	DoctorHintAdbServerOnPortFormat = "an adb server is listening on %s, so the bridge cannot bind it until that server stops. Run '%s': it stops that " +
