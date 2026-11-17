@@ -918,8 +918,13 @@ func TestGivenADetachWhileTheSwitchIsPendingWhenDecliningThenTheConnectionEndsAt
 	assert.ErrorIs(t, readErr, io.EOF, "the detach must end the connection instead of waiting")
 }
 
+// reverseOffListenPort is the listen port the reverse-off attachment is told; the FAIL quotes it.
+const reverseOffListenPort = 6100
+
 // reverseOffFail is the framed FAIL every reverse request reads while reverse is off.
-const reverseOffFail = "FAIL0047adb reverse is off for this client; restart it with --allow-adb-reverse"
+const reverseOffFail = "FAIL0125adb reverse is off for this bridge. '--allow-adb-reverse' turns it on and lets the device open " +
+	"connections to this machine, so use it only with a device you trust. Run 'devicefarm-connect doctor --port 6100' for the " +
+	"commands that restart the bridge with reverse on and attach the device again."
 
 // reverseFamily holds one request of each form in adb's reverse family, plus a malformed one.
 var reverseFamily = []string{
@@ -938,7 +943,7 @@ func startReverseOffProxy(t *testing.T) (proxyAddress string, mock *testsupport.
 	t.Helper()
 	mock = switchReplyMock(t, "OKAY")
 	params := forwardingParams()
-	params.ReverseEnabled = false
+	params.ReverseEnabled, params.ListenPort = false, reverseOffListenPort
 	device = newAttachedDevice(t, params)
 	require.True(t, device.Set(DeviceInfo{ARN: "arn:test", Endpoint: mock.URL, Label: "Test Device - OS 1", Serial: "dev-1"}))
 	proxyAddress, _ = runProxy(t, device, testPolicy())

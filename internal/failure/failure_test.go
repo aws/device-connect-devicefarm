@@ -25,9 +25,9 @@ func TestGivenPlainErrorWhenWrittenThenOneLineWithTheProgramPrefix(t *testing.T)
 }
 
 func TestGivenPlainWrappedChainWhenWrittenThenOneLine(t *testing.T) {
-	err := fmt.Errorf("create runtime dir \"/x/d\": %w", fmt.Errorf("mkdir /x/d: %w", fs.ErrNotExist))
+	err := fmt.Errorf("cannot create the working directory \"/x/d\": %w", fmt.Errorf("mkdir /x/d: %w", fs.ErrNotExist))
 
-	assert.Equal(t, "prog: error: create runtime dir \"/x/d\": mkdir /x/d: file does not exist\n", render(err))
+	assert.Equal(t, "prog: error: cannot create the working directory \"/x/d\": mkdir /x/d: file does not exist\n", render(err))
 }
 
 func TestGivenExplainedWithCauseAndFixWhenWrittenThenProblemCauseFixLines(t *testing.T) {
@@ -46,12 +46,12 @@ func TestGivenExplainedWithCauseAndFixWhenWrittenThenProblemCauseFixLines(t *tes
 func TestGivenExplainedOverAPlainChainWhenWrittenThenTheChainIsOneCauseLine(t *testing.T) {
 	err := &Explained{
 		Problem: "cannot use the working directory",
-		Cause:   fmt.Errorf("create runtime dir \"/x/d\": %w", fmt.Errorf("mkdir /x/d: %w", errors.New("not a directory"))),
+		Cause:   fmt.Errorf("cannot create the working directory \"/x/d\": %w", fmt.Errorf("mkdir /x/d: %w", errors.New("not a directory"))),
 	}
 
 	assert.Equal(t,
 		"prog: error: cannot use the working directory\n"+
-			"  cause: create runtime dir \"/x/d\": mkdir /x/d: not a directory\n",
+			"  cause: cannot create the working directory \"/x/d\": mkdir /x/d: not a directory\n",
 		render(err))
 }
 

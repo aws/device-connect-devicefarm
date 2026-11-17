@@ -92,7 +92,7 @@ func newRootCommandWithState(state *rootState) *cobra.Command {
 			initLogging(cmd, state.cfg.Debug)
 			paths, err := daemon.DefaultPaths()
 			if err != nil {
-				return &failure.Explained{Problem: wording.ProblemWorkingDirectory, Cause: err}
+				return workingDirectoryFailure(err)
 			}
 			// Resolve the effective logfile once: an explicit --log overrides the
 			// default runtime-dir logfile. Done here so newManager stays a pure
@@ -114,6 +114,16 @@ func newRootCommandWithState(state *rootState) *cobra.Command {
 		newDoctorCommand(state),
 	)
 	return root
+}
+
+// workingDirectoryFailure words a working directory that no command can use. A cause with no
+// fix of its own gets the doctor, whose working directory row has the steps.
+func workingDirectoryFailure(cause error) error {
+	failed := &failure.Explained{Problem: wording.ProblemWorkingDirectory, Cause: cause}
+	if _, fixes := failure.Split(cause); len(fixes) == 0 {
+		failed.Fix = wording.FixRuntimeDirDoctor
+	}
+	return failed
 }
 
 // hiddenHelpCommand replaces cobra's help command with a hidden one. cobra's command

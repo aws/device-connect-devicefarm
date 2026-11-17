@@ -266,7 +266,8 @@ func TestGivenAResolverWhenTheSessionCheckRunsThenTheRowFollowsTheResolverOutcom
 			wantHint: func(inputs Inputs) string { return nonAndroidDeviceHint(inputs, "WATCH") }, wantQuoted: "'" + wording.DoctorCreateSessionCommand + "'"},
 		{name: "ended", err: fmt.Errorf("session %w (status COMPLETED)", session.ErrSessionEnded), wantHint: sessionEndedHint,
 			wantQuoted: "'" + wording.DoctorCreateSessionCommand + "'"},
-		{name: "not running yet", err: fmt.Errorf("session %w (status PENDING)", session.ErrNoEndpointYet), wantHint: notRunningHint,
+		{name: "not running yet", err: &session.NoEndpointError{SessionARN: testSessionARN, Status: "PENDING"},
+			wantHint:   func(inputs Inputs) string { return notRunningHint(inputs, "PENDING") },
 			wantQuoted: "'aws devicefarm get-remote-access-session --arn " + testSessionARN + " --region us-west-2'"},
 		{name: "running with no endpoint", err: &session.NoEndpointError{SessionARN: testSessionARN, Status: "RUNNING"},
 			wantHint: noEndpointHint, wantQuoted: "contact AWS Support"},
@@ -307,6 +308,19 @@ func TestGivenAResolverWhenTheSessionCheckRunsThenTheRowFollowsTheResolverOutcom
 	}
 }
 
+func TestGivenASessionNotRunningYetWhenTheSessionCheckRunsThenTheSummaryAndTheHintNameTheStatus(t *testing.T) {
+	inputs := Inputs{Config: config.Default(), SessionARN: testSessionARN,
+		Resolver: &fakeResolver{err: &session.NoEndpointError{SessionARN: testSessionARN, Status: "PREPARING"}}}
+
+	result := runRemote(t, inputs, &runState{}, checkSession)
+
+	assert.Equal(t, Result{Status: Fail,
+		Summary: `remote access session "` + testSessionARN + `" is not running yet (status PREPARING)`,
+		Hint: "this session is not running yet (status PREPARING), so the bridge cannot attach it. Wait until " +
+			"'aws devicefarm get-remote-access-session --arn " + testSessionARN + " --region us-west-2' reports status RUNNING, " +
+			"then rerun '" + wording.DoctorCommand + " --session-arn " + testSessionARN + " --port 5037'."}, result)
+}
+
 func TestGivenNoResolverAndAMissingProfileWhenTheSessionCheckRunsThenTheClientBuildFails(t *testing.T) {
 	testsupport.HermeticAWSEnv(t)
 	t.Setenv("AWS_PROFILE", "no-such-profile")
@@ -314,7 +328,7 @@ func TestGivenNoResolverAndAMissingProfileWhenTheSessionCheckRunsThenTheClientBu
 	result := runRemote(t, Inputs{SessionARN: testSessionARN}, &runState{}, checkSession)
 
 	assert.Equal(t, Fail, result.Status)
-	assert.Contains(t, result.Summary, "load AWS config")
+	assert.Contains(t, result.Summary, "cannot load the AWS configuration")
 	assert.Equal(t, wording.DoctorHintNoCredentials, result.Hint)
 }
 
@@ -352,7 +366,8 @@ func TestGivenAnArnWithControlCharactersWhenAHintIsBuiltThenTheHintStaysOnOneLin
 	builders := map[string]func(Inputs) string{"invalid arn": invalidArnHint, "access denied": accessDeniedHint,
 		"not found": sessionGoneHint, "unsupported device": unsupportedDeviceHint, "ended": sessionEndedHint,
 		"ios device":      func(inputs Inputs) string { return nonAndroidDeviceHint(inputs, "iOS") },
-		"not running yet": notRunningHint, "no endpoint": noEndpointHint, "rejected": requestRejectedHint,
+		"not running yet": func(inputs Inputs) string { return notRunningHint(inputs, "PENDING") },
+		"no endpoint":     noEndpointHint, "rejected": requestRejectedHint,
 		"network": sessionNetworkHint, "rerun": doctorRerun}
 	for name, build := range builders {
 		t.Run(name, func(t *testing.T) {
@@ -615,7 +630,8 @@ func TestGivenTheReverseSlotWhenTheRowRunsThenTheRowFollowsWhoHoldsIt(t *testing
 		{name: "daemon on this session under the ARN the service returned, with reverse on",
 			daemon: control.Response{OK: true, ARN: returnedSessionARN, ReverseEnabled: true}, returnedARN: returnedSessionARN,
 			wantStatus: Pass, wantText: wording.DoctorDetailReverseOnInDaemon, wantNoProbe: true},
-		{name: "slot held elsewhere", rival: true, wantStatus: Fail, wantText: wording.DoctorDetailReverseInUse, wantHint: slotHeldHint},
+		{name: "slot held elsewhere", rival: true, wantStatus: Fail,
+			wantText: "another bridge, or an earlier run of this bridge, still uses adb reverse on this session", wantHint: slotHeldHint},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

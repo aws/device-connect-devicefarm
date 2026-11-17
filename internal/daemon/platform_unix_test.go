@@ -55,15 +55,18 @@ func TestGivenNoXDGRuntimeDirWhenDefaultPathsResolvedThenFallsBackToTempDir(t *t
 
 func TestGivenRuntimeDirPathOccupiedByFileWhenDefaultPathsResolvedThenErrors(t *testing.T) {
 	// A regular file where the per-user runtime dir should be created makes
-	// MkdirAll fail, which DefaultPaths must surface rather than swallow.
-	base := t.TempDir()
+	// MkdirAll fail, which DefaultPaths must surface rather than swallow. The backslash in
+	// the path must print once, as a Windows path does.
+	base := filepath.Join(t.TempDir(), `back\slash`)
+	require.NoError(t, os.Mkdir(base, 0o700))
 	collision := filepath.Join(base, "devicefarm-connect")
 	require.NoError(t, os.WriteFile(collision, []byte("not a dir"), 0o600))
 	t.Setenv("XDG_RUNTIME_DIR", base)
 
 	_, err := DefaultPaths()
 
-	require.Error(t, err)
+	require.ErrorContains(t, err, `cannot create the working directory "`+collision+`": mkdir `)
+	assert.ErrorIs(t, err, syscall.ENOTDIR, "the system's error stays in the chain")
 }
 
 func TestGivenWideRuntimeDirOwnedByUserWhenDefaultPathsResolvedThenAcceptedAsFound(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/aws/device-connect-devicefarm/internal/config"
+	"github.com/aws/device-connect-devicefarm/internal/wording"
 )
 
 // detachedProcessAttributes gives the daemon child no console; closing the
@@ -30,11 +31,11 @@ const RuntimeDirEnvVar = "LocalAppData"
 func defaultRuntimeDir() (string, error) {
 	base, err := os.UserCacheDir()
 	if err != nil {
-		return "", fmt.Errorf("resolve runtime dir: %w", err)
+		return "", fmt.Errorf(wording.CauseRuntimeDirLocateFormat, err)
 	}
 	runtimeDir := filepath.Join(base, config.BinaryName)
 	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
-		return "", fmt.Errorf("create runtime dir %q: %w", runtimeDir, err)
+		return "", fmt.Errorf(wording.CauseRuntimeDirCreateFormat, runtimeDir, err)
 	}
 	return runtimeDir, nil
 }

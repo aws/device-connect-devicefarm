@@ -201,7 +201,7 @@ func attachDevice(cmd *cobra.Command, state *rootState) error {
 		return err
 	}
 	if !resp.OK {
-		return &failure.Explained{Problem: wording.ProblemAttachFailed, Cause: daemonRefusal(resp)}
+		return &failure.Explained{Problem: wording.ProblemAttachFailed, Cause: daemonRefusal(resp, state.sessionARN)}
 	}
 	printListeningLine(cmd, resp)
 	if resp.ARN != "" && resp.ARN != state.sessionARN {
@@ -213,12 +213,15 @@ func attachDevice(cmd *cobra.Command, state *rootState) error {
 // daemonRefusal rebuilds the daemon's error from a refused reply: its text wrapped in each
 // fix, so failure.Write prints them as fix lines. A reply with no fix gets the restart fix
 // when the bridge runs another version of this program, or reports none as an older bridge
-// does. A bridge of this version sends a fix with every refusal.
-func daemonRefusal(resp control.Response) error {
+// does. A bridge of this version sends a fix with every refusal. sessionARN is the session of
+// a refused add, which the restart fix adds again; empty for any other command, which cannot
+// read what the bridge holds.
+func daemonRefusal(resp control.Response, sessionARN string) error {
 	refusal := errors.New(resp.Error)
 	fixes := resp.Fixes
 	if len(fixes) == 0 && resp.ProgramVersion != version.String() {
-		fixes = []string{wording.FixOtherVersionBridge}
+		restart := daemon.RestartRemedy(wording.BridgeStartCommand, wording.YourOptionsClause, sessionARN)
+		fixes = []string{fmt.Sprintf(wording.FixOtherVersionBridgeFormat, restart)}
 	}
 	for _, fix := range fixes {
 		refusal = failure.WithFix(refusal, fix)

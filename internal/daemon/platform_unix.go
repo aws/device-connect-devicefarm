@@ -51,11 +51,11 @@ func defaultRuntimeDir() (string, error) {
 // it. Mode and type are not checked: only the owner or root can change them.
 func ensureRuntimeDir(dir string, uid int) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create runtime dir %q: %w", dir, err)
+		return fmt.Errorf(wording.CauseRuntimeDirCreateFormat, dir, err)
 	}
 	info, err := os.Lstat(dir)
 	if err != nil {
-		return fmt.Errorf("stat runtime dir %q: %w", dir, err)
+		return fmt.Errorf(wording.CauseRuntimeDirCheckOwnerFormat, dir, err)
 	}
 	// Sys is *syscall.Stat_t on unix.
 	owner := int(info.Sys().(*syscall.Stat_t).Uid)

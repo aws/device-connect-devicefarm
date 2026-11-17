@@ -75,7 +75,7 @@ func newDeviceListCommand(state *rootState) *cobra.Command {
 				return err
 			}
 			if !resp.OK {
-				return &failure.Explained{Problem: wording.ProblemListFailed, Cause: daemonRefusal(resp)}
+				return &failure.Explained{Problem: wording.ProblemListFailed, Cause: daemonRefusal(resp, "")}
 			}
 			stdout, now := cmd.OutOrStdout(), time.Now()
 			switch {
@@ -174,7 +174,7 @@ func newDeviceRemoveCommand(state *rootState) *cobra.Command {
 				return err
 			}
 			if !resp.OK {
-				return &failure.Explained{Problem: wording.ProblemDetachFailed, Cause: daemonRefusal(resp)}
+				return &failure.Explained{Problem: wording.ProblemDetachFailed, Cause: daemonRefusal(resp, "")}
 			}
 
 			cmd.Printf(wording.OutputRemovedFormat+"\n", resp.DeviceLabel)
