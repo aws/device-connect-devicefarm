@@ -1,5 +1,15 @@
 # Device Connect for AWS Device Farm
 
+```text
+                               .-----.
+  .----------.             .--(       )--.             .-----.
+  |          |           .(               ).           |  o  |
+  |  $ adb   |==========(  AWS Device Farm  )=========>|     |
+  |__________|           '-----------------'           |     |
+ / :::::::::: \                                        | ___ |
+'--------------'                                       '-----'
+```
+
 Device Connect for AWS Device Farm connects adb on your computer to the Android device of a Device Farm remote
 access session. You can use it to run `adb`, Android Studio, and all other Android tests as though the device
 was plugged in locally.
