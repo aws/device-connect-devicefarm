@@ -34,9 +34,9 @@ const (
 	fixAddCommand    = "devicefarm-connect device add --session-arn " + testSessionArnOne
 	fixDoctorCommand = "devicefarm-connect doctor --session-arn " + testSessionArnOne + " --port 5037"
 	// The restart, then the add, quoted.
-	fixRestartThenAdd = "'devicefarm-connect bridge start --port 5037', then run '" + fixAddCommand + "'"
-	fixNewSession     = "Start a new remote access session, then run 'devicefarm-connect device add --session-arn <new ARN>'."
-	fixOtherDevice    = "Start a remote access session on another device, then run 'devicefarm-connect device add " +
+	fixRestartThenAdd   = "'devicefarm-connect bridge start --port 5037', then run '" + fixAddCommand + "'"
+	fixNewSession       = "Start a new remote access session, then run 'devicefarm-connect device add --session-arn <new ARN>'."
+	fixSupportedSession = "Start a remote access session that Device Connect supports, then run 'devicefarm-connect device add " +
 		"--session-arn <new ARN>'. If the error remains, contact AWS Support."
 	fixPassRunningARN = "Pass the ARN of a running remote access session. To list your sessions, run " +
 		"'aws devicefarm list-remote-access-sessions --arn <project ARN> --region us-west-2'."
@@ -129,7 +129,7 @@ func (s *controlHandlerSuite) TestSerialFetchFailsTheReplyNamesWhatFailedAndTheL
 			cause:  "cannot connect to Device Farm at 127.0.0.1:1: dial tcp 127.0.0.1:1: connect: connection refused",
 			fix:    "Check that this machine can reach 127.0.0.1 on TCP port 1" + fixReachTail,
 			logged: "fetch the device serial: " + testsupport.ScrubbedDialText + "adb: dial tcp 127.0.0.1:1"},
-		{name: "the service closes with a reason", endpoint: closing.URL, fix: fixOtherDevice,
+		{name: "the service closes with a reason", endpoint: closing.URL, fix: fixSupportedSession,
 			cause:  "Device Farm refused the connection to the device: Device Connect is not supported on this device (close code 1008)",
 			logged: "fetch the device serial: read the devices reply: websocket closed by the peer: code 1008"},
 		{name: "the server refuses the session", endpoint: refusing.URL, fix: fixRetryThenDoctor,
@@ -155,6 +155,34 @@ func (s *controlHandlerSuite) TestSerialFetchFailsTheReplyNamesWhatFailedAndTheL
 			}
 			_, present := s.device.Current()
 			s.False(present, "nothing must be attached when the serial fetch fails")
+		})
+	}
+}
+
+func (s *controlHandlerSuite) TestGivenEachReasonOfTheSessionNotServedCloseWhenADeviceIsAddedThenTheCauseCarriesTheReasonAndTheFixBlamesNoDevice() {
+	// The relay sends one close code with every reason below.
+	reasons := []struct {
+		name   string
+		reason string
+	}{
+		{"the device", "Device Connect is not supported on this device"},
+		{"a private device", "Device Connect is not supported with private devices. Create a session with public devices and " +
+			"the METERED billing method."},
+		{"the billing method", "Device Connect is not supported with this billing method. Create a session using the METERED " +
+			"billing method and try again."},
+	}
+	for _, testCase := range reasons {
+		s.Run(testCase.name, func() {
+			s.mock.CloseNewConnections(1008, testCase.reason)
+
+			resp := s.handler(addReq(testSessionArnOne))
+
+			s.False(resp.OK)
+			s.Equal("Device Farm refused the connection to the device: "+testCase.reason+" (close code 1008)", resp.Error)
+			s.Equal([]string{fixSupportedSession}, resp.Fixes)
+			s.NotContains(resp.Error+strings.Join(resp.Fixes, " "), "another device")
+			_, present := s.device.Current()
+			s.False(present, "nothing must be attached when the relay refuses the session")
 		})
 	}
 }
@@ -508,9 +536,9 @@ func TestGivenEachKindOfFailedConnectionWhenItsFixIsPickedThenItIsTheFixOfItsCla
 		fix    string
 	}{
 		{"a close with a reason", bridge.ConnectionFailure{Kind: bridge.FailureServiceRefused, CloseCode: 1013}, fixRetryThenDoctor},
-		{"the close for a device the service does not serve", bridge.ConnectionFailure{Kind: bridge.FailureServiceRefused, CloseCode: 1008},
-			fixOtherDevice},
-		{"that close with no reason", bridge.ConnectionFailure{Kind: bridge.FailureServiceClosed, CloseCode: 1008}, fixOtherDevice},
+		{"the close for a session the service does not serve", bridge.ConnectionFailure{Kind: bridge.FailureServiceRefused, CloseCode: 1008},
+			fixSupportedSession},
+		{"that close with no reason", bridge.ConnectionFailure{Kind: bridge.FailureServiceClosed, CloseCode: 1008}, fixSupportedSession},
 		{"the catch-all close", bridge.ConnectionFailure{Kind: bridge.FailureServiceClosed, CloseCode: 1011}, fixRetryThenDoctor},
 		{"a rejected upgrade", bridge.ConnectionFailure{Kind: bridge.FailureUpgradeRefused, Host: "device.example"}, fixRetryThenDoctor},
 		{"a dial that ran out of time", bridge.ConnectionFailure{Kind: bridge.FailureAttachDeadline, Host: "device.example"}, fixRetryThenDoctor},
