@@ -26,12 +26,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/arn"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/devicefarm"
 	"github.com/aws/aws-sdk-go-v2/service/devicefarm/types"
@@ -50,6 +52,25 @@ import (
 // the sleeps come up short. The caller bounds wall time. An error past the budget
 // detaches the device.
 const maxRetryAttempts = 4
+
+// LookupOption adjusts one GetSession call.
+type LookupOption int
+
+// CappedBackoff makes the lookup sleep at most maxRetryBackoff before each retry, for a
+// caller that ends the lookup at a short bound and shows its failure to a person: the SDK's
+// own sleeps can outlast such a bound, and the SDK then returns the canceled sleep, not the
+// failure. The capped attempts start within a few seconds, so a longer throttle fails them.
+const CappedBackoff LookupOption = 1
+
+// maxRetryBackoff is the cap of CappedBackoff. At this cap the SDK sleeps the cap itself,
+// with no jitter. The cap does not cover the adaptive mode's wait for an attempt token
+// after a throttle, nor the retries of a credential provider's own client.
+const maxRetryBackoff = time.Second
+
+// MaxCappedBackoff is the most the Device Farm client sleeps in backoff during one
+// GetSession call with CappedBackoff. The caller's bound must leave room past it for the
+// attempts and for the adaptive mode's token waits.
+const MaxCappedBackoff = (maxRetryAttempts - 1) * maxRetryBackoff
 
 // clientRegion is the region the Device Farm client is built for. Device Farm's
 // remote access control plane is only offered in us-west-2 today, so every
@@ -120,9 +141,8 @@ func (rejected *RequestRejectedError) CredentialsExpired() bool {
 	return expiredCredentialCodes[rejected.Code]
 }
 
-// throttleErrorCodes are the API error codes the SDK treats as throttles: aws/retry
-// DefaultThrottleErrorCodes (standard.go) in aws-sdk-go-v2 v1.41.12, copied so the retry package
-// stays out of this package's imports.
+// throttleErrorCodes are the API error codes the SDK treats as throttles, copied from aws/retry
+// DefaultThrottleErrorCodes (standard.go) in aws-sdk-go-v2 v1.41.12.
 var throttleErrorCodes = map[string]bool{
 	"Throttling":                             true,
 	"ThrottlingException":                    true,
@@ -198,7 +218,7 @@ func (info RemoteAccessInfo) ReturnedARN(askedARN string) string {
 // implementation talks to AWS (NewRemoteAccessClient); tests supply a fake, so no
 // AWS SDK type leaks into the daemon or its tests.
 type RemoteAccessClient interface {
-	GetSession(ctx context.Context, sessionARN string) (RemoteAccessInfo, error)
+	GetSession(ctx context.Context, sessionARN string, options ...LookupOption) (RemoteAccessInfo, error)
 }
 
 // remoteAccessGetter is the subset of the generated Device Farm client the
@@ -246,6 +266,20 @@ func newRemoteAccessClient(ctx context.Context, logger *slog.Logger,
 		return nil, err
 	}
 	return awsRemoteAccessClient{getter: devicefarm.NewFromConfig(cfg, clientOptions...), logger: logger}, nil
+}
+
+// clientOptionsFor are the client options of one API call that the lookup options ask for.
+func clientOptionsFor(options []LookupOption) []func(*devicefarm.Options) {
+	if slices.Contains(options, CappedBackoff) {
+		return []func(*devicefarm.Options){capRetryBackoff}
+	}
+	return nil
+}
+
+// capRetryBackoff wraps the client's retryer for one call and replaces only its backoff, so
+// the call keeps the client's attempt budget and the adaptive mode's pacing after a throttle.
+func capRetryBackoff(options *devicefarm.Options) {
+	options.Retryer = retry.AddWithMaxBackoffDelay(options.Retryer, maxRetryBackoff)
 }
 
 // loadConfig is the AWS config the Device Farm client and ResolveCredentials share.
@@ -313,14 +347,15 @@ func classifyAPIError(err error) error {
 // UnsupportedDeviceError (only the response names the device) before the endpoint
 // check, so a session still PREPARING on such a device is refused at once, not
 // after a wait and a retry. Only a RUNNING session with an endpoint resolves.
-func (c awsRemoteAccessClient) GetSession(ctx context.Context, sessionARN string) (RemoteAccessInfo, error) {
+func (c awsRemoteAccessClient) GetSession(ctx context.Context, sessionARN string,
+	options ...LookupOption) (RemoteAccessInfo, error) {
 	if err := ValidateSessionARN(sessionARN); err != nil {
 		return RemoteAccessInfo{}, err
 	}
 
 	out, err := c.getter.GetRemoteAccessSession(ctx, &devicefarm.GetRemoteAccessSessionInput{
 		Arn: aws.String(sessionARN),
-	})
+	}, clientOptionsFor(options)...)
 	if err != nil {
 		return RemoteAccessInfo{}, fmt.Errorf(wording.SessionCallFailedFormat, sessionARN, classifyAPIError(err))
 	}
