@@ -538,7 +538,7 @@ func (m *DaemonManager) controlHandler(ctx context.Context, device *bridge.Activ
 				m.logger.Warn("failed to attach the device on add",
 					"error", fmt.Errorf("resolve session: %w", err), "arn", req.ARN)
 				// The SDK's retries after a throttle can outlive the bound, and its canceled
-				// backoff drops the throttle text, so the reply words the timeout. The daemon's
+				// wait drops the throttle text, so the reply words the timeout. The daemon's
 				// own end is not a timeout: that lookup keeps its error.
 				if resolveCtx.Err() != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
 					return refusedReply(m.lookupTimedOut(req.ARN))
@@ -666,9 +666,10 @@ func (m *DaemonManager) readSessionTimes(ctx context.Context, dialer *bridge.WSD
 // the ARN it was sent, so a differing answer gets one more lookup, never a third.
 // The returned ARN is the answer's (the asked one when the answer has none); the
 // attachment and the refresh loop key on it.
+// A client waits under resolveTimeout, so both lookups cap their backoff.
 func (m *DaemonManager) resolveForAttach(ctx context.Context,
 	typedARN string) (session.RemoteAccessInfo, string, error) {
-	resolved, err := m.remoteAccessClient.GetSession(ctx, typedARN)
+	resolved, err := m.remoteAccessClient.GetSession(ctx, typedARN, session.CappedBackoff)
 	if err != nil {
 		return session.RemoteAccessInfo{}, "", err
 	}
@@ -677,7 +678,7 @@ func (m *DaemonManager) resolveForAttach(ctx context.Context,
 		askedARN = resolved.ARN
 		m.logger.Info("the service names this session by another ARN; resolving once more",
 			"typed", typedARN, "returned", askedARN)
-		if resolved, err = m.remoteAccessClient.GetSession(ctx, askedARN); err != nil {
+		if resolved, err = m.remoteAccessClient.GetSession(ctx, askedARN, session.CappedBackoff); err != nil {
 			return session.RemoteAccessInfo{}, "", err
 		}
 	}
@@ -688,6 +689,7 @@ func (m *DaemonManager) resolveForAttach(ctx context.Context,
 // device: a RUNNING session carries its renewed endpoint; a failure carries the one-line reason
 // the user gets and whether the session is gone for good (see detachReason). The refresh tick
 // and the refusal handler share it; each picks its bound and what it does with a kept device.
+// The lookup keeps the SDK's own backoff, whose longer sleeps outlast a longer throttle.
 func (m *DaemonManager) lookUpSession(ctx context.Context, sessionARN string,
 	timeout time.Duration) (bridge.SessionVerdict, error) {
 	resolveCtx, cancel := context.WithTimeout(ctx, timeout)

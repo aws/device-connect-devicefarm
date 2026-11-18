@@ -6,6 +6,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"time"
 
@@ -48,6 +49,8 @@ type fakeRemoteAccessClient struct {
 	err      error
 	delay    time.Duration
 	arns     []string
+	// options holds the lookup options of each GetSession call, in call order.
+	options [][]session.LookupOption
 	// returnedArns maps an asked ARN to the ARN the answer names. An ARN not in the
 	// map answers with no ARN, so the add makes one lookup.
 	returnedArns map[string]string
@@ -93,9 +96,18 @@ func (f *fakeRemoteAccessClient) delayAnswersBy(delay time.Duration) {
 	f.delay = delay
 }
 
-func (f *fakeRemoteAccessClient) GetSession(ctx context.Context, sessionARN string) (session.RemoteAccessInfo, error) {
+// lookupOptions returns the options of each GetSession call, in order.
+func (f *fakeRemoteAccessClient) lookupOptions() [][]session.LookupOption {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.options)
+}
+
+func (f *fakeRemoteAccessClient) GetSession(ctx context.Context, sessionARN string,
+	options ...session.LookupOption) (session.RemoteAccessInfo, error) {
 	f.mu.Lock()
 	f.arns = append(f.arns, sessionARN)
+	f.options = append(f.options, options)
 	endpoint, label, err, delay := f.endpoint, f.label, f.err, f.delay
 	returnedARN := f.returnedArns[sessionARN]
 	f.mu.Unlock()
@@ -120,9 +132,10 @@ type attachDuringResolve struct {
 	attach func()
 }
 
-func (a *attachDuringResolve) GetSession(ctx context.Context, sessionARN string) (session.RemoteAccessInfo, error) {
+func (a *attachDuringResolve) GetSession(ctx context.Context, sessionARN string,
+	options ...session.LookupOption) (session.RemoteAccessInfo, error) {
 	a.attach()
-	return a.inner.GetSession(ctx, sessionARN)
+	return a.inner.GetSession(ctx, sessionARN, options...)
 }
 
 // failSecondLookup delegates the first GetSession and fails every later one, so a
@@ -132,10 +145,11 @@ type failSecondLookup struct {
 	calls int
 }
 
-func (failing *failSecondLookup) GetSession(ctx context.Context, sessionARN string) (session.RemoteAccessInfo, error) {
+func (failing *failSecondLookup) GetSession(ctx context.Context, sessionARN string,
+	options ...session.LookupOption) (session.RemoteAccessInfo, error) {
 	failing.calls++
 	if failing.calls > 1 {
 		return session.RemoteAccessInfo{}, errors.New("second lookup failed for the test")
 	}
-	return failing.inner.GetSession(ctx, sessionARN)
+	return failing.inner.GetSession(ctx, sessionARN, options...)
 }

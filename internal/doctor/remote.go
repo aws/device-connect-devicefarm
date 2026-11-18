@@ -176,7 +176,7 @@ func (state *runState) lookUpSession(ctx context.Context, inputs Inputs) session
 				return
 			}
 		}
-		info, err := resolver.GetSession(lookupCtx, sessionARN)
+		info, err := resolver.GetSession(lookupCtx, sessionARN, session.CappedBackoff)
 		state.lookup = sessionLookup{info: info, err: err}
 	})
 	return state.lookup

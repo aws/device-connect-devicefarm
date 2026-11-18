@@ -8,7 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -237,7 +240,7 @@ func (s *controlHandlerSuite) TestSerialFetchHangsAddFailsAtTheResolveTimeoutAnd
 }
 
 func (s *controlHandlerSuite) TestSessionLookupOutlivesTheResolveTimeoutAddFailsWithTheTimeoutCauseAndTheRetryFix() {
-	// The SDK's retries under a throttle can outlive the attach bound, and its canceled backoff
+	// The SDK's retries under a throttle can outlive the attach bound, and its canceled wait
 	// drops the throttle text, so the add words the timeout for the user, inside the bound.
 	shrinkLookupBounds(s.T(), 200*time.Millisecond, refreshLookupTimeout)
 	s.client.delayAnswersBy(time.Minute)
@@ -266,6 +269,43 @@ func (s *controlHandlerSuite) TestDaemonShutdownDuringTheLookupAddFailsWithoutTh
 	s.Equal("context canceled", resp.Error)
 	_, present := s.device.Current()
 	s.False(present)
+}
+
+func TestGivenTheAttachBoundWhenALookupSleepsItsWholeCappedBackoffThenMoreThanHalfOfTheBoundIsLeft(t *testing.T) {
+	assert.Less(t, 2*session.MaxCappedBackoff, resolveTimeout,
+		"the rest of the bound is for the attempts and for adaptive mode's token waits")
+}
+
+func (s *controlHandlerSuite) TestOnlyTheLookupsOfAnAddAskForTheCappedBackoff() {
+	// The refresh tick and the lookup after a refused adb connection keep the SDK's backoff.
+	s.client.returnArnFor(testSessionArnOne, testSessionArnTwo)
+	s.Require().True(s.handler(addReq(testSessionArnOne)).OK, "the add looks the session up twice")
+	s.Require().True(s.mgr.refreshEndpointOnce(context.Background(), s.device))
+	s.mgr.refusalHandler(context.Background())(testSessionArnTwo)
+
+	s.Equal([][]session.LookupOption{{session.CappedBackoff}, {session.CappedBackoff}, nil, nil}, s.client.lookupOptions())
+}
+
+func TestGivenAnEndpointThatFailsEveryAttemptWhenADeviceIsAddedThenEveryAttemptIsMadeAndTheReplyKeepsTheCause(t *testing.T) {
+	// The real client and the real sleeps of its capped backoff, under the real attach bound.
+	testsupport.HermeticAWSEnv(t)
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		writer.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("AWS_ENDPOINT_URL_DEVICE_FARM", server.URL)
+	client, err := session.NewRemoteAccessClient(context.Background(), nil)
+	require.NoError(t, err)
+	manager := newTestManagerWithClient(t, config.Default(), client)
+	handler := manager.controlHandler(context.Background(), bridge.NewActiveDevice(), manager.newDialer(), func() {})
+
+	response := handler(addReq(testSessionArnOne))
+
+	assert.False(t, response.OK)
+	assert.Contains(t, response.Error, "StatusCode: 503", "the reply keeps the cause of the last attempt, not the timeout")
+	assert.Equal(t, int32(4), requests.Load(), "the whole attempt budget is spent inside the attach bound")
 }
 
 func (s *controlHandlerSuite) TestDeviceListNamesNoDeviceAddRejectedAndNothingAttached() {
