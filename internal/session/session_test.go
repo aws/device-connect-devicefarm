@@ -96,21 +96,23 @@ func newThrottlingClient(t *testing.T, throttles int) (RemoteAccessClient, *thro
 
 // fakeGetter is a remoteAccessGetter that returns canned output, so the session
 // mapping is exercised without a real AWS call. It records the ARN it was asked
-// for and counts calls.
+// for and the client options of the last call, and counts calls.
 type fakeGetter struct {
 	out *devicefarm.GetRemoteAccessSessionOutput
 	err error
 
-	gotARN string
-	calls  int
+	gotARN      string
+	callOptions []func(*devicefarm.Options)
+	calls       int
 }
 
 func (f *fakeGetter) GetRemoteAccessSession(
 	_ context.Context,
 	params *devicefarm.GetRemoteAccessSessionInput,
-	_ ...func(*devicefarm.Options),
+	callOptions ...func(*devicefarm.Options),
 ) (*devicefarm.GetRemoteAccessSessionOutput, error) {
 	f.gotARN = aws.ToString(params.Arn)
+	f.callOptions = callOptions
 	f.calls++
 	return f.out, f.err
 }
@@ -381,6 +383,84 @@ func TestGivenPinnedEnvWhenClientBuiltThenRegionAndRetryConfigured(t *testing.T)
 	assert.Equal(t, aws.RetryModeAdaptive, options.RetryMode)
 	assert.Equal(t, maxRetryAttempts, options.RetryMaxAttempts)
 	assert.Same(t, slog.Default(), awsClient.logger, "a nil logger must default to the process logger")
+}
+
+// realGetter builds the production client and returns its Device Farm client.
+func realGetter(t *testing.T) *devicefarm.Client {
+	t.Helper()
+	testsupport.HermeticAWSEnv(t)
+	client, err := NewRemoteAccessClient(context.Background(), nil)
+	require.NoError(t, err)
+	awsClient, ok := client.(awsRemoteAccessClient)
+	require.True(t, ok)
+	getter, ok := awsClient.getter.(*devicefarm.Client)
+	require.True(t, ok)
+	return getter
+}
+
+// lookupRetryer returns the retryer that one GetSession call on getter runs under: the
+// client's own retryer after the call's client options, applied as the SDK does.
+func lookupRetryer(t *testing.T, getter *devicefarm.Client, lookupOptions ...LookupOption) aws.RetryerV2 {
+	t.Helper()
+	recording := &fakeGetter{out: sessionOutput("wss://host.example/ws", "Pixel", "16")}
+	_, err := newClient(recording).GetSession(context.Background(), testSessionARN, lookupOptions...)
+	require.NoError(t, err)
+	callSettings := getter.Options()
+	for _, apply := range recording.callOptions {
+		apply(&callSettings)
+	}
+	retryer, ok := callSettings.Retryer.(aws.RetryerV2)
+	require.True(t, ok)
+	return retryer
+}
+
+// longestSleeps returns the longest sleep the retryer asks for before each retry it can
+// make. The SDK's backoff can be random, so each sleep is drawn many times.
+func longestSleeps(t *testing.T, retryer aws.RetryerV2) []time.Duration {
+	t.Helper()
+	const draws = 200
+	longest := make([]time.Duration, retryer.MaxAttempts()-1)
+	for index := range longest {
+		for range draws {
+			sleep, err := retryer.RetryDelay(index+1, errors.New("the attempt failed"))
+			require.NoError(t, err)
+			longest[index] = max(longest[index], sleep)
+		}
+	}
+	return longest
+}
+
+func TestGivenALookupWithCappedBackoffWhenItsRetryerIsAskedForEveryRetrySleepThenNoneExceedsTheCapAndTheirTotalStaysInsideMaxCappedBackoff(t *testing.T) {
+	var total time.Duration
+	for index, longest := range longestSleeps(t, lookupRetryer(t, realGetter(t), CappedBackoff)) {
+		assert.LessOrEqual(t, longest, maxRetryBackoff, "the sleep after attempt %d", index+1)
+		total += longest
+	}
+
+	assert.LessOrEqual(t, total, MaxCappedBackoff, "callers size their bounds on this total")
+}
+
+func TestGivenALookupWithNoOptionWhenItsRetryerIsAskedForEveryRetrySleepThenTheLastOneCanExceedTheCap(t *testing.T) {
+	// The refresh tick's lookup. It keeps the SDK's sleeps, which outlast a longer throttle.
+	sleeps := longestSleeps(t, lookupRetryer(t, realGetter(t)))
+
+	assert.Greater(t, sleeps[len(sleeps)-1], maxRetryBackoff)
+}
+
+func TestGivenALookupWithCappedBackoffWhenItsAttemptIsThrottledThenEveryLaterLookupWaitsForAToken(t *testing.T) {
+	// One client, so one adaptive limiter: a throttle of a capped lookup paces every lookup.
+	getter := realGetter(t)
+	release, err := lookupRetryer(t, getter, CappedBackoff).GetAttemptToken(context.Background())
+	require.NoError(t, err, "no token wait before the first throttle")
+	require.NoError(t, release(&smithy.GenericAPIError{Code: "ThrottlingException", Message: "Rate exceeded"}))
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for _, lookupOptions := range [][]LookupOption{{CappedBackoff}, nil} {
+		_, err = lookupRetryer(t, getter, lookupOptions...).GetAttemptToken(ended)
+
+		assert.ErrorIs(t, err, context.Canceled, "the ended context cuts the token wait of a lookup with %v", lookupOptions)
+	}
 }
 
 func TestGivenRepeatedCallsWhenSessionsFetchedThenOneGetterServesEveryCall(t *testing.T) {

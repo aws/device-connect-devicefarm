@@ -33,15 +33,19 @@ import (
 
 const testSessionARN = "arn:aws:devicefarm:us-west-2:123456789012:session:abc/def/00000"
 
-// fakeResolver answers GetSession with canned values and records the ARNs it was asked for.
+// fakeResolver answers GetSession with canned values and records the ARNs it was asked for
+// and the lookup options of the last call.
 type fakeResolver struct {
-	info session.RemoteAccessInfo
-	err  error
-	arns []string
+	info    session.RemoteAccessInfo
+	err     error
+	arns    []string
+	options []session.LookupOption
 }
 
-func (resolver *fakeResolver) GetSession(_ context.Context, sessionARN string) (session.RemoteAccessInfo, error) {
+func (resolver *fakeResolver) GetSession(_ context.Context, sessionARN string,
+	options ...session.LookupOption) (session.RemoteAccessInfo, error) {
 	resolver.arns = append(resolver.arns, sessionARN)
+	resolver.options = options
 	return resolver.info, resolver.err
 }
 
@@ -347,6 +351,21 @@ func TestGivenNoResolverWhenTheSessionCheckRunsThenTheRealClientIsBuiltAndCalls(
 	assert.Equal(t, Fail, result.Status)
 	assert.Contains(t, result.Summary, "connection refused", "the real client dialed the endpoint")
 	assert.Equal(t, sessionNetworkHint(inputs), result.Hint)
+}
+
+func TestGivenTheLookupBoundWhenALookupSleepsItsWholeCappedBackoffThenMoreThanHalfOfTheBoundIsLeft(t *testing.T) {
+	assert.Less(t, 2*session.MaxCappedBackoff, remoteTimeout,
+		"the rest of the bound is for the attempts and for adaptive mode's token waits")
+}
+
+func TestGivenAResolverWhenTheSessionCheckRunsThenItsLookupAsksForTheCappedBackoff(t *testing.T) {
+	resolver := &fakeResolver{info: session.RemoteAccessInfo{Endpoint: "wss://host.example/ws", Label: "Pixel 9 (OS 16)"}}
+	inputs := Inputs{Config: config.Default(), SessionARN: testSessionARN, Resolver: resolver}
+
+	result := runRemote(t, inputs, &runState{}, checkSession)
+
+	require.Equal(t, Pass, result.Status)
+	assert.Equal(t, []session.LookupOption{session.CappedBackoff}, resolver.options)
 }
 
 func TestGivenTheRunFlagsWhenTheRerunIsQuotedThenItKeepsThePortAndANonDefaultListenAddress(t *testing.T) {
