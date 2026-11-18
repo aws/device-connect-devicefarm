@@ -49,6 +49,7 @@ func TestGivenAttachedDevicesWhenTabledThenTheSessionCellHoldsTheStartAndTheExpi
 }
 
 func TestGivenDaemonRepliesWhenRenderedAsJSONThenDevicesIsAlwaysAnArrayAndUnknownTimesAndLastDetachAppearOnlyWhenKnown(t *testing.T) {
+	// README contract: `device list --json` fields. Do not break.
 	attachedAt := time.Date(2026, 6, 26, 11, 48, 0, 0, time.UTC)
 	tests := []struct {
 		name     string
