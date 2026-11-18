@@ -22,22 +22,18 @@ import (
 // StreamOpener carries an accepted local connection onto the transport as one
 // forwarded stream. Implementations take ownership of conn and must close it.
 // Each call runs on its own goroutine, so an implementation may block for the
-// stream's whole lifetime; the accept loop is never held up. An implementation
-// sends the device service only after turn.Ready closes, and calls turn.Done
-// once that service's status word is read or the open ends.
+// stream's whole lifetime; the accept loop is never held up.
 type StreamOpener interface {
-	OpenStream(conn net.Conn, target adbwire.AdbSpec, turn OpenTurn)
+	OpenStream(conn net.Conn, target adbwire.AdbSpec)
 }
 
 // rule is one installed forward. The listener and its accept goroutine live as
 // long as the rule; remote is re-pointed in place by a rebind, so the accept
-// loop re-reads it under the table mutex at every accept. turns outlives a
-// rebind and is read only for a remote that is not tcp.
+// loop re-reads it under the table mutex at every accept.
 type rule struct {
 	local    adbwire.AdbSpec
 	remote   adbwire.AdbSpec
 	listener net.Listener
-	turns    openOrder
 }
 
 // ForwardRulesTable owns the forward rules and their listening sockets, the
@@ -82,11 +78,11 @@ func (table *ForwardRulesTable) Install(localText, remoteText string, noRebind b
 		return AdbInstallResult{Status: AdbInstallCannotBind, FailReason: adbwire.MsgNoDevices}
 	}
 
-	local, port, failReason := parseLocalSpec(localText)
+	local, port, failReason := parseTCPSpec(localText)
 	if failReason != "" {
 		return AdbInstallResult{Status: AdbInstallCannotBind, FailReason: adbwire.FailCannotBind(failReason)}
 	}
-	remote, failReason := parseRemoteSpec(remoteText)
+	remote, _, failReason := parseTCPSpec(remoteText)
 	if failReason != "" {
 		return AdbInstallResult{Status: AdbInstallUnsupportedRemote, FailReason: failReason}
 	}
@@ -227,9 +223,7 @@ const (
 // acceptLoop serves one rule's listener until it closes. Every accepted
 // connection copies the rule's current destination under the table mutex (a
 // rebind re-points future accepts, never past ones) and is handed off on its
-// own goroutine so a slow open never stalls the door. A remote that is not tcp
-// also takes the rule's next turn under the same lock, because a device server
-// may tell its sockets apart only by accept order. A tcp remote never waits.
+// own goroutine so a slow open never stalls the door.
 func (table *ForwardRulesTable) acceptLoop(forwardRule *rule) {
 	var delay time.Duration
 	for {
@@ -246,20 +240,16 @@ func (table *ForwardRulesTable) acceptLoop(forwardRule *rule) {
 		delay = 0
 		table.rulesMutex.Lock()
 		target := forwardRule.remote
-		turn := ImmediateTurn()
-		if target.Kind != "tcp" {
-			turn = forwardRule.turns.next()
-		}
 		table.rulesMutex.Unlock()
-		go table.opener.OpenStream(conn, target, turn)
+		go table.opener.OpenStream(conn, target)
 	}
 }
 
-// parseLocalSpec validates the local end of a forward rule: it must parse and
-// be tcp. failReason is empty on success, else the adbwire text. Every non-tcp
-// kind gets adb's unknown-kind text, even the unix-socket kinds adb listens on
-// under Linux: this daemon listens on tcp only.
-func parseLocalSpec(text string) (spec adbwire.AdbSpec, port int, failReason string) {
+// parseTCPSpec validates one end of a forward rule: it must parse and be tcp.
+// failReason is empty on success and otherwise carries the adbwire text; every
+// non-tcp kind gets adb's unknown-kind text, including the unix-socket kinds
+// adb itself serves on Linux, because this daemon serves only tcp.
+func parseTCPSpec(text string) (spec adbwire.AdbSpec, port int, failReason string) {
 	spec, err := adbwire.ParseSpec(text)
 	if err != nil {
 		return adbwire.AdbSpec{}, 0, err.Error()
@@ -272,37 +262,6 @@ func parseLocalSpec(text string) (spec adbwire.AdbSpec, port int, failReason str
 		return adbwire.AdbSpec{}, 0, err.Error()
 	}
 	return spec, port, ""
-}
-
-// deviceSocketKinds are the remote kinds allowed besides tcp: the device's
-// unix socket kinds and jdwp. Each goes to the device as spelled: adb's host
-// server stores any remote and adbd refuses a bad name or pid per connection.
-// Every other kind fails at install: dev: and dev-raw: open character devices,
-// vsock: reaches a VM, acceptfd: cannot connect, local: is an alias that names
-// a different namespace on each side, and a bare service (shell:, exec:) is
-// no socket.
-var deviceSocketKinds = []string{"localabstract", "localreserved", "localfilesystem", "jdwp"}
-
-// parseRemoteSpec validates the device end of a forward rule: tcp with a valid
-// port (adb's texts), or one of deviceSocketKinds with any value, empty
-// included. failReason is empty on success; every other kind gets adb's
-// unknown-kind text. TCPPort on another kind returns a guard text that must
-// never reach a client.
-func parseRemoteSpec(text string) (spec adbwire.AdbSpec, failReason string) {
-	spec, err := adbwire.ParseSpec(text)
-	if err != nil {
-		return adbwire.AdbSpec{}, err.Error()
-	}
-	if spec.Kind == "tcp" {
-		if _, err := spec.TCPPort(); err != nil {
-			return adbwire.AdbSpec{}, err.Error()
-		}
-		return spec, ""
-	}
-	if slices.Contains(deviceSocketKinds, spec.Kind) {
-		return spec, ""
-	}
-	return adbwire.AdbSpec{}, adbwire.FailUnknownSpec(text)
 }
 
 // canonicalKey renders a raw local spec text the way Install renders the spec
