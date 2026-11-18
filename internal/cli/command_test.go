@@ -490,6 +490,7 @@ func TestGivenPidfileButNoControlSocketWhenStatusInvokedThenNotRunningIsOnStdout
 }
 
 func TestGivenRunningDaemonWhenStatusInvokedWithJSONThenOneObjectCarriesRunningPidPortReverseAndDevices(t *testing.T) {
+	// README contract: `bridge status --json` fields. Do not break.
 	pixel := control.AttachedDevice{SessionARN: "arn:aws:devicefarm:us-west-2:1:session:a/b/0", Label: "Google Pixel 8 (OS 15)"}
 	fakeDaemon(t, func(control.Request) control.Response {
 		return control.Response{OK: true, Port: 5037, ReverseEnabled: false, Devices: []control.AttachedDevice{pixel}}
@@ -532,6 +533,7 @@ func TestGivenLastDetachWhenStatusInvokedWithJSONThenLastDetachCarriesReasonAndT
 }
 
 func TestGivenPidfileButNoControlSocketWhenStatusInvokedWithJSONThenRunningIsFalse(t *testing.T) {
+	// README contract: `bridge status --json` fields. Do not break.
 	// The trickiest state: a live pidfile over a dead socket must fold into the
 	// same exact object as no daemon at all, with no pid member.
 	fakeRuntimePaths(t)
@@ -544,6 +546,7 @@ func TestGivenPidfileButNoControlSocketWhenStatusInvokedWithJSONThenRunningIsFal
 }
 
 func TestGivenNoDaemonWhenStatusInvokedWithJSONThenRunningIsFalseAndDevicesIsAnEmptyArray(t *testing.T) {
+	// README contract: `bridge status --json` fields. Do not break.
 	shortRuntimeDir(t)
 
 	stdout, stderr, err := statusRoot(t, "--json")

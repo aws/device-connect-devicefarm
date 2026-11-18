@@ -277,6 +277,7 @@ func TestGivenListenerAndSessionFlagsWhenParsedOnDoctorThenTheyBindToTheStateAnd
 }
 
 func TestGivenJSONRequestedWhenDoctorRunsThenStdoutIsExactlyOneObjectWithTheSameExitCode(t *testing.T) {
+	// README contract: `doctor --json` fields. Do not break without a new major version.
 	notADir := filepath.Join(t.TempDir(), "not-a-dir")
 	require.NoError(t, os.WriteFile(notADir, nil, 0o600))
 	tests := []struct {

@@ -564,6 +564,7 @@ doctor: 0 of 4 categories passed, 4 not checked
 }
 
 func TestGivenMixedResultsWhenWrittenAsJSONThenOneCompactObjectCarriesEveryRow(t *testing.T) {
+	// README contract: `doctor --json` fields. Do not break without a new major version.
 	report := Report{SessionARN: "arn:aws:devicefarm:us-west-2:123456789012:session:a/b/0", Rows: []Row{
 		{ID: "local.runtime-dir", Title: "working directory", Category: CategoryLocal,
 			Result: Result{Status: Pass, Summary: "working directory /run/user/1000/devicefarm-connect is writable"}, Elapsed: 1500 * time.Microsecond},
