@@ -168,22 +168,6 @@ func TestGivenARuleInstalledOnOneConnectionWhenAnotherListsThenTheTableIsRendere
 	assertNoWebsocketDialed(t, mock)
 }
 
-func TestGivenALocalabstractRuleWhenAConnectionIsAcceptedThenTheDeviceServiceIsTheSocketSpec(t *testing.T) {
-	// The remote spec goes to the device as the stream's service, as the client spelled
-	// it, after the daemon's own select.
-	mock := newPrologueMock(t, "OKAY", "OKAY")
-	proxyAddress, _ := attachProxyTo(t, mock.SessionMockWSS, testPolicy(), "")
-	installer := dialClient(t, proxyAddress)
-	writeAll(t, installer, framed("host:forward:tcp:0;localabstract:chrome_devtools_remote"))
-	port := readForwardSuccessPort(t, installer)
-
-	dialClient(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
-
-	waitFor(t, func() bool { return len(mock.Frames()) == 2 }, "the forwarded stream's prologue never arrived")
-	assert.Equal(t, []string{canonicalSelect, string(framed("localabstract:chrome_devtools_remote"))}, mock.Frames())
-	assert.Equal(t, 1, mock.SessionsOpened(), "one forwarded connection is one session")
-}
-
 func TestGivenAForwardRequestNamingAnotherDeviceWhenAnsweredThenAdbsMissTextAndTheRuleStays(t *testing.T) {
 	// The seam is asked directly: this pins the refusal itself, the end-to-end case below
 	// pins the wiring that reaches it. adb acquires the transport first, so the miss outranks a

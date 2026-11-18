@@ -21,14 +21,11 @@
 //
 // Nothing here dials the network. Accepted connections leave through the
 // StreamOpener interface, for internal/bridge to implement; spec parsing and
-// reply texts come from internal/adbwire. The local end is tcp only. The
-// remote end is tcp or a device socket kind (localabstract, localreserved,
-// localfilesystem, jdwp), sent as spelled: adbd refuses a bad name or pid per
-// connection. Every other kind (dev:, vsock:, acceptfd:, a bare service) fails
-// at install with adb's unknown-kind text; adb would fail it at connect time,
-// but the daemon keeps rules to sockets it can serve. On a rule whose remote is
-// not tcp, each accepted connection carries an OpenTurn, so the device gets the
-// rule's device services in accept order.
+// reply texts come from internal/adbwire. Only tcp specs are supported on both
+// ends; every other kind fails closed at install with adb's unknown-kind text,
+// including the unix-socket kinds adb itself serves on Linux (adb defers remote
+// validation to connect time, but a rule this daemon can never serve is
+// refused up front).
 //
 // Every name here is the daemon's own; an Adb-prefixed type holds adb's model
 // in its values or fields (see the internal/adbwire package doc). Where a name

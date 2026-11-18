@@ -166,7 +166,7 @@ attach a device, then use `adb` as usual.
    ```
 
 4. Forward a local port to the device, list the forward rules, then remove one. A forward rule sends
-   connections made to a port on your computer on to a port or a socket on the device.
+   connections made to a port on your computer on to a port on the device.
 
    ```sh
    adb -P 5037 forward tcp:8080 tcp:8080
@@ -204,27 +204,17 @@ attach a device, then use `adb` as usual.
 
 ### Rules for forward and reverse
 
-- The local end of a forward rule must be `tcp:<port>`. The device end can be `tcp:<port>`,
-  `localabstract:<name>`, `localreserved:<name>`, `localfilesystem:<path>` or `jdwp:<pid>`. The bridge
-  rejects any other device end, such as `dev:`, and a bad port number when you create the rule.
-- The bridge does not check that the socket or process exists. If nothing listens there, the bridge still
-  creates the rule, and each connection to it closes with no data.
+- Both ends of a rule must be `tcp:<port>`. Other kinds (`localabstract:`, `localfilesystem:`, `dev:`) are
+  rejected.
+- The bridge rejects a bad forward rule when you create it. The remote access service applies the same
+  tcp-only rule to reverse rules and rejects `tcp:0` in them.
 - `tcp:0` as the local end of a forward rule picks a free port and prints it.
-- Both ends of a reverse rule must be `tcp:<port>`. The remote access service rejects other kinds and
-  `tcp:0`.
 - The bridge rejects a reverse rule that targets its own port. adb prints
   `error: cannot reverse to tcp:<port>: the bridge listens on that port`.
 - Forward rules belong to the attached device. `device remove`, `bridge stop`, or a failed refresh of the
   session endpoint removes them all.
 - Reverse rules are stored in the remote access session, so `bridge stop` leaves them in place. Each time you
   attach the device with reverse on, the bridge clears them. Run your `adb reverse` commands again.
-- The USB device discovery of the `chrome://inspect` page of Chrome on your computer does not work through
-  the program. To inspect Chrome on the device, open Chrome there and forward a local port to its socket.
-  Then check that `localhost:9222` is listed under "Discover network targets" on that page, or add it.
-
-  ```sh
-  adb -P 5037 forward tcp:9222 localabstract:chrome_devtools_remote
-  ```
 
 ### Device list
 
@@ -437,7 +427,7 @@ build follows in a later release. If you build the Windows binary yourself:
 ## Limits
 
 - One device at a time.
-- The local end of a forward rule and both ends of a reverse rule are tcp only.
+- Forward and reverse rules are tcp only.
 - Forward rules per device are capped. One more prints `error: too many forward rules (limit <n>)`, where
   `<n>` is the cap. `adb forward --remove` frees a slot.
 - Reverse rules per device are capped. One more prints `error: too many reverse rules (limit <n>)`. The
