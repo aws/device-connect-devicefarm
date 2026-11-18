@@ -15,7 +15,6 @@ import (
 	"golang.org/x/net/websocket"
 
 	"github.com/aws/device-connect-devicefarm/internal/adbwire"
-	"github.com/aws/device-connect-devicefarm/internal/forward"
 	"github.com/aws/device-connect-devicefarm/internal/testsupport"
 )
 
@@ -235,20 +234,12 @@ func newTestDevice(t *testing.T, arn, endpoint string) *ActiveDevice {
 	return device
 }
 
-// openStream opens a forwarded device stream for target, as the stream opener does, with
-// a turn that never waits. It always asks for testDeviceARN, so a caller can bind a
-// different one.
+// openStream opens a forwarded device stream for target, as the stream opener does. It
+// always asks for testDeviceARN, so a caller can bind a different one.
 func openStream(t *testing.T, device *ActiveDevice, target adbwire.AdbSpec, within time.Duration) (*adbConn, []byte, error) {
 	t.Helper()
-	return openStreamOnTurn(t, context.Background(), device, target, within, forward.ImmediateTurn().Ready)
-}
-
-// openStreamOnTurn is openStream under ctx, with ready as the stream's turn.
-func openStreamOnTurn(t *testing.T, ctx context.Context, device *ActiveDevice, target adbwire.AdbSpec,
-	within time.Duration, ready <-chan struct{}) (*adbConn, []byte, error) {
-	t.Helper()
-	conn, leftover, err := openDeviceStream(ctx, newTestDialer(within), device, testDeviceARN, nil,
-		target, ready, fastPolicy(), within, newActivityTracker(nil), noopLogger())
+	conn, leftover, err := openDeviceStream(context.Background(), newTestDialer(within), device, testDeviceARN, nil,
+		target, fastPolicy(), within, newActivityTracker(nil), noopLogger())
 	if conn != nil {
 		t.Cleanup(func() { conn.Close() })
 	}
@@ -285,60 +276,6 @@ func TestGivenANonTCPTargetWhenOpenedThenTheDeviceServiceIsTheSpecTheCustomerNam
 	require.NoError(t, err)
 	// A hardcoded "tcp:" prefix would put tcp:chrome_devtools_remote on the wire.
 	assert.Equal(t, "0024localabstract:chrome_devtools_remote", mock.Frames()[1])
-}
-
-// openOnTurn opens tcp:8080 against a device bound to endpoint, on its own goroutine, under
-// ctx and with ready as its turn. The channel carries the open's error.
-func openOnTurn(t *testing.T, ctx context.Context, endpoint string, ready <-chan struct{}) <-chan error {
-	t.Helper()
-	device := newTestDevice(t, testDeviceARN, endpoint)
-	opened := make(chan error, 1)
-	go func() {
-		_, _, err := openStreamOnTurn(t, ctx, device, adbwire.AdbSpec{Kind: "tcp", Value: "8080"}, testWait, ready)
-		opened <- err
-	}()
-	return opened
-}
-
-// awaitOpen waits for an open run by openOnTurn to return.
-func awaitOpen(t *testing.T, opened <-chan error) error {
-	t.Helper()
-	select {
-	case err := <-opened:
-		return err
-	case <-time.After(testTimeout):
-		t.Fatal("the open never returned")
-		return nil
-	}
-}
-
-func TestGivenAReadyChannelWhenTheProloguePlaysThenTheDeviceServiceWaitsForIt(t *testing.T) {
-	mock := newPrologueMock(t, "OKAY", "OKAY")
-	ready := make(chan struct{})
-
-	opened := openOnTurn(t, context.Background(), mock.URL, ready)
-
-	waitFor(t, func() bool { return len(mock.Frames()) >= 1 }, "the transport select never arrived")
-	assert.Never(t, func() bool { return len(mock.Frames()) > 1 }, notifierSettle, notifierPoll,
-		"the device service must wait for its turn")
-	close(ready)
-	require.NoError(t, awaitOpen(t, opened))
-	assert.Equal(t, []string{"0012host:transport-any", "0008tcp:8080"}, mock.Frames())
-}
-
-func TestGivenAnOpenWaitingForItsTurnWhenTheContextIsCanceledThenItEndsWithoutADeviceService(t *testing.T) {
-	mock := newPrologueMock(t, "OKAY", "OKAY")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	opened := openOnTurn(t, ctx, mock.URL, make(chan struct{}))
-	waitFor(t, func() bool { return len(mock.Frames()) >= 1 }, "the transport select never arrived")
-
-	cancel()
-
-	require.ErrorIs(t, awaitOpen(t, opened), errAdbConnClosed)
-	assert.Equal(t, []string{"0012host:transport-any"}, mock.Frames(), "a canceled wait must send no device service")
-	waitFor(t, func() bool { return !mock.Sessions()[0].Send([]byte("x")) },
-		"a canceled wait must close the websocket, not leak it")
 }
 
 func TestGivenBothOkaysCoalescedWithPayloadWhenOpenedThenLeftoverIsReturnedNotLost(t *testing.T) {

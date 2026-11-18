@@ -432,10 +432,7 @@ func checkListenPortFree(inputs Inputs, state *runState) Result {
 // closingOpener stands in for the device-stream opener: it closes every accepted connection.
 type closingOpener struct{}
 
-func (closingOpener) OpenStream(conn net.Conn, _ adbwire.AdbSpec, turn forward.OpenTurn) {
-	conn.Close()
-	turn.Done()
-}
+func (closingOpener) OpenStream(conn net.Conn, _ adbwire.AdbSpec) { conn.Close() }
 
 // checkForwardTableBinds installs one tcp:0 rule, dials its listener and closes the table. No IPv6
 // row: forward binds 127.0.0.1 only; the reverse connector tries ::1 only after a refused IPv4 connect.

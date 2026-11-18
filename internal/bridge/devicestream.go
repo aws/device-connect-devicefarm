@@ -113,16 +113,15 @@ var deviceTransportRequest, _ = adbwire.EncodeRequest(deviceTransportService)
 // pipe starts. On any failure the connection is closed and nothing is returned, so the
 // caller closes the app socket with zero bytes written, as a real adb host does.
 //
-// ctx bounds the dial and the wait for ready (see playPrologue); each prologue read is bounded
-// by statusTimeout. features: the attachment's parked websocket and refusal gate (see
-// openSession); nil dials cold and asks nothing. target is the forward rule's device spec.
-// activity is one tracker per stream, never shared: a write blocked on one
+// ctx bounds the dial only; each prologue read is bounded by statusTimeout. features: the
+// attachment's parked websocket and refusal gate (see openSession); nil dials cold and asks
+// nothing. target is the forward rule's device spec. activity is one tracker per stream, never shared: a write blocked on one
 // stream would otherwise hold every sharer's refresher off its quiet window. It must not be nil,
 // because every mark dereferences it. errAdbConnClosed also covers a detach before the dial: the
 // caller closes the app socket as it does for a refusal.
 func openDeviceStream(ctx context.Context, dialer *WSDialer, device *ActiveDevice, arn string,
-	features *attachmentFeatures, target adbwire.AdbSpec, ready <-chan struct{}, policy WSRefreshPolicy,
-	statusTimeout time.Duration, activity *activityTracker, logger *slog.Logger) (*adbConn, []byte, error) {
+	features *attachmentFeatures, target adbwire.AdbSpec, policy WSRefreshPolicy, statusTimeout time.Duration,
+	activity *activityTracker, logger *slog.Logger) (*adbConn, []byte, error) {
 	// target.String(), not a hardcoded "tcp:" prefix: the request the remote adb server
 	// must see is the spec the customer named, whatever its kind. The error arm is a guard,
 	// not a path: no parsed spec is empty or 64 KiB.
@@ -134,9 +133,7 @@ func openDeviceStream(ctx context.Context, dialer *WSDialer, device *ActiveDevic
 	var leftover []byte
 	open := func(endpoint string, useParked bool) (*adbConn, error) {
 		var warm *warmSocketKeeper
-		// An open that must wait for its turn dials. A parked socket would idle through the
-		// wait, with no resume before its first reply, so it goes to an open that sends at once.
-		if useParked && turnHasCome(ready) {
+		if useParked {
 			warm = features.warmSockets()
 		}
 		return warm.openConn(ctx, dialer, endpoint, func(ws WSConn, sessionUUID string, openedAt time.Time) (*adbConn, error) {
@@ -145,7 +142,7 @@ func openDeviceStream(ctx context.Context, dialer *WSDialer, device *ActiveDevic
 			conn := newAdbConn(dialer, device, arn, RouteAdb, ws, openedAt, policy, activity, logger,
 				withTerminalSessionGone(), withRefusalGate(features.refusalGate()), withSelectedSession(sessionUUID))
 			var err error
-			if leftover, err = playPrologue(ctx, conn, deviceService, statusTimeout, ready); err != nil {
+			if leftover, err = playPrologue(conn, deviceService, statusTimeout); err != nil {
 				conn.Close()
 				return nil, err
 			}
@@ -186,24 +183,13 @@ func selectTransport(conn *adbConn, within time.Duration) ([]byte, error) {
 // playPrologue plays the transport select, unless the park already did, then the device service,
 // consuming each one's status word, and returns the bytes left after the last word. within bounds
 // each word, so a taken socket that died unseen fails the stream instead of hanging it.
-//
-// The device service waits for ready, this stream's turn in the rule's open order. The wait
-// comes after the select, because the server mints the session from the first frame and reaps
-// a websocket that sends nothing. A parked socket never waits: openDeviceStream takes one only
-// once the turn has come. A canceled ctx ends the wait with errAdbConnClosed.
-func playPrologue(ctx context.Context, conn *adbConn, deviceService []byte, within time.Duration,
-	ready <-chan struct{}) ([]byte, error) {
+func playPrologue(conn *adbConn, deviceService []byte, within time.Duration) ([]byte, error) {
 	var leftover []byte
 	var err error
 	if !conn.preSelected {
 		if leftover, err = selectTransport(conn, within); err != nil {
 			return nil, err
 		}
-	}
-	select {
-	case <-ready:
-	case <-ctx.Done():
-		return nil, fmt.Errorf("%w: canceled while waiting for an earlier connection's device service", errAdbConnClosed)
 	}
 
 	// A second frame, never pipelined into the first: the real adb server strands the
@@ -216,14 +202,4 @@ func playPrologue(ctx context.Context, conn *adbConn, deviceService []byte, with
 		return nil, fmt.Errorf("device service: %w", err)
 	}
 	return leftover, nil
-}
-
-// turnHasCome reports whether ready is closed, without waiting.
-func turnHasCome(ready <-chan struct{}) bool {
-	select {
-	case <-ready:
-		return true
-	default:
-		return false
-	}
 }
