@@ -759,8 +759,9 @@ func (m *DaemonManager) addFix(err error, sessionARN string) string {
 	return fmt.Sprintf(wording.FixDoctorThenRestartFormat, m.doctorCommand(sessionARN), m.quotedRestart(sessionARN))
 }
 
-// deviceNotServedCloseCode is the websocket relay's close for a device the service does not serve.
-const deviceNotServedCloseCode = 1008
+// sessionNotServedCloseCode is the websocket relay's close for a session it does not serve. Its
+// reason, when sent, says why.
+const sessionNotServedCloseCode = 1008
 
 // connectionFix is the fix for an add whose serial fetch failed, by the kind of the failure.
 func (manager *DaemonManager) connectionFix(failed bridge.ConnectionFailure, sessionARN string) string {
@@ -776,8 +777,8 @@ func (manager *DaemonManager) connectionFix(failed bridge.ConnectionFailure, ses
 	case bridge.FailureOtherProtocol:
 		return fmt.Sprintf(wording.FixInstallLatestFormat, manager.quotedRestart(sessionARN))
 	}
-	if failed.CloseCode == deviceNotServedCloseCode {
-		return wording.FixOtherDevice
+	if failed.CloseCode == sessionNotServedCloseCode {
+		return wording.FixSupportedSession
 	}
 	// Any other kind: the next try may work.
 	return fmt.Sprintf(wording.FixRetryThenDoctorFormat, sessionARN, doctor)

@@ -275,7 +275,9 @@ const (
 	FixDoctorThenSupportFormat = "Run '%s'. If the doctor does not find the cause, contact AWS Support."
 	// Verb: the oldest Android release this program serves.
 	FixSupportedDeviceFormat = "Start a remote access session on an Android %d or later device, then " + DetachReattachLead + " <new ARN>'."
-	FixOtherDevice           = "Start a remote access session on another device, then " + DetachReattachLead + " <new ARN>'. " +
+	// A session the websocket relay does not serve, whatever its reason. The cause line carries
+	// that reason when the relay sends one.
+	FixSupportedSession = "Start a remote access session that Device Connect supports, then " + DetachReattachLead + " <new ARN>'. " +
 		"If the error remains, contact AWS Support."
 	// Verbs: the session ARN, the doctor command.
 	FixRetryThenDoctorFormat = "Run " + DoctorDeviceAddCommandFormat + " again. If the error remains, run '%s'. " +
