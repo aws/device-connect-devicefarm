@@ -1,0 +1,241 @@
+package bridge
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"strconv"
+	"sync"
+)
+
+// AdbProxyServer presents itself to local adb clients as the adb host, piping each
+// accepted connection over a websocket to the active device. The device is read from
+// the shared *ActiveDevice at accept time and re-read on every websocket swap, so
+// the daemon can attach, detach, or renew the endpoint while the listener stays up.
+//
+// The zero value is not usable; construct with NewAdbProxyServer.
+type AdbProxyServer struct {
+	listenAddr string
+	listenPort int
+	refresh    WSRefreshPolicy
+	dialer     *WSDialer
+	device     *ActiveDevice
+	logger     *slog.Logger
+
+	// mu guards listener, written by Listen and read by Addr/Run from other
+	// goroutines.
+	mu       sync.Mutex
+	listener net.Listener
+}
+
+// NewAdbProxyServer errors on a nil dialer or device; a nil logger defaults to
+// slog.Default. The listener opens only on Listen or Run; call Addr after either to
+// learn the bound address (needed when listenPort is 0 for an ephemeral test port).
+func NewAdbProxyServer(listenAddr string, listenPort int, refresh WSRefreshPolicy, dialer *WSDialer, device *ActiveDevice, logger *slog.Logger) (*AdbProxyServer, error) {
+	if dialer == nil {
+		return nil, errors.New("dialer must not be nil")
+	}
+	if device == nil {
+		return nil, errors.New("device must not be nil")
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &AdbProxyServer{
+		listenAddr: listenAddr,
+		listenPort: listenPort,
+		refresh:    refresh,
+		dialer:     dialer,
+		device:     device,
+		logger:     logger,
+	}, nil
+}
+
+// Addr returns the bound listen address, or nil before Listen/Run opens it. Safe
+// to call from another goroutine.
+func (s *AdbProxyServer) Addr() net.Addr {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listener == nil {
+		return nil
+	}
+	return s.listener.Addr()
+}
+
+// Listen opens the TCP listener. Split from Run so the caller can claim the port
+// and surface EADDRINUSE as a startup error; the daemon binds here before writing
+// its readiness pidfile, so a port clash fails before the parent reports success.
+// Idempotent, so Run calls it unconditionally.
+func (s *AdbProxyServer) Listen() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listener != nil {
+		return nil
+	}
+	address := net.JoinHostPort(s.listenAddr, strconv.Itoa(s.listenPort))
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", address, err)
+	}
+	s.listener = listener
+	return nil
+}
+
+// Close releases the listener without serving, for a caller that binds with
+// Listen but fails before reaching Run. Run also closes it, and a double close is
+// a harmless no-op in Go.
+func (s *AdbProxyServer) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listener == nil {
+		return nil
+	}
+	return s.listener.Close()
+}
+
+// Run serves until ctx is cancelled (SIGINT/SIGTERM), then stops accepting and
+// drains in-flight connections before returning.
+func (s *AdbProxyServer) Run(ctx context.Context) error {
+	if err := s.Listen(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	listener := s.listener
+	s.mu.Unlock()
+	// Always release the listener, even on the genuine-Accept-error path; the
+	// ctx.Done goroutine also closes it.
+	defer listener.Close()
+	s.logger.Info("adb proxy listening", "address", listener.Addr().String())
+
+	// Closing the listener unblocks the Accept call below when ctx ends.
+	go func() {
+		<-ctx.Done()
+		listener.Close()
+	}()
+
+	var activeConns sync.WaitGroup
+	for {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			// A cancelled context means the close above caused this: clean shutdown,
+			// so drain and return nil rather than reporting an accept error.
+			if ctx.Err() != nil {
+				s.logger.Info("shutdown requested, draining active connections")
+				activeConns.Wait()
+				return nil
+			}
+			return fmt.Errorf("accept on %s: %w", listener.Addr(), acceptErr)
+		}
+
+		activeConns.Add(1)
+		go func() {
+			defer activeConns.Done()
+			s.handleConn(ctx, conn)
+		}()
+	}
+}
+
+// handleConn services one local adb client. All errors are logged and swallowed; one bad
+// connection must never take the daemon down.
+//
+// The connection context has no deadline; websocket age is bounded by the refresh cadence.
+// Its cancel func is registered with the active device so a `device remove` severs traffic.
+//
+// Nothing is dialed until the client's service request has been read (readOpening), so a
+// client that only selects a transport, or says nothing, mints no session. A forward-family
+// request is answered from the local table and never dials at all; while reverse is off, a
+// reverse-family request gets a local FAIL and never dials either. With reverse on, a
+// reverse-family request gets a local FAIL at once while the server's notifier slot is held
+// elsewhere; else it waits until the attachment's clear of the server's reverse rules settles,
+// or gets a local FAIL at the bound. Every other request takes one of the attachment's
+// device-stream slots before the dial. No free slot, no dial. A reverse install past the
+// attachment's rule limit is refused after that, still with no dial.
+func (s *AdbProxyServer) handleConn(ctx context.Context, tcp net.Conn) {
+	connLogger := s.logger.With("client", tcp.RemoteAddr().String())
+	defer tcp.Close()
+
+	connCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Read and register in one locked step (see trackConn). ok=false means no
+	// device bound. The forwarding is this attachment's own table, so a rule cannot
+	// outlive the device it was installed for.
+	info, forwarding, untrack, ok := s.device.trackConn(cancel)
+	if !ok {
+		connLogger.Warn("local adb client connected but no device is attached; closing")
+		return
+	}
+	defer untrack()
+	connLogger.Debug("local adb client connected", "device", info.Label)
+
+	// The serial comes from the same snapshot as the forwarding. It is empty until the
+	// keep-alive probe parses one, and an empty serial matches every selector.
+	clientOpening, err := readOpening(connCtx, tcp, info.Serial)
+	if err != nil {
+		if errors.Is(err, errSelectRefused) {
+			connLogger.Warn("refused a transport select; closing", "error", err)
+		} else {
+			connLogger.Debug("no request completed before the client went away; closing", "error", err)
+		}
+		return
+	}
+
+	if respondForwardLocally(tcp, clientOpening, forwarding, info.Serial, connLogger) {
+		connLogger.Debug("answered the forward request locally", "service", clientOpening.service)
+		return
+	}
+	if refuseReverseFamily(tcp, clientOpening, forwarding, connLogger) {
+		connLogger.Debug("refused a reverse request: reverse is off", "service", clientOpening.service)
+		return
+	}
+	if !awaitServerRulesCleared(connCtx, tcp, clientOpening, forwarding, reverseClearTimeout, connLogger) {
+		return
+	}
+
+	// Budget check sits after the steps that never dial (forward family, reverse-off refusal,
+	// reverse hold) and before the dial, so a refusal costs no websocket. A swap redials inside
+	// the session and takes no second slot. An attachment built without features has no budget.
+	if forwarding != nil {
+		if !forwarding.budget.admit() {
+			refuseOverBudget(tcp, clientOpening, forwarding, connLogger)
+			return
+		}
+		defer forwarding.budget.release()
+	}
+
+	// The reverse family is relayed but counted. An install's hold on its slot ends with the
+	// connection, before the budget slot returns; release says what an unanswered one counts as.
+	countedRequest, refused := screenReverseRule(tcp, clientOpening, forwarding, connLogger)
+	if refused {
+		return
+	}
+	defer countedRequest.release()
+
+	ws, err := s.dialer.Dial(connCtx, info.Endpoint, RouteAdb)
+	if err != nil {
+		connLogger.Error("failed to dial remote websocket; closing client", "error", err)
+		return
+	}
+
+	activity := newActivityTracker(nil, s.device.MarkActivity)
+	session := newAdbConn(s.dialer, s.device, info.ARN, RouteAdb, ws, s.refresh, activity, connLogger)
+	refresher := func(done <-chan struct{}) {
+		runRefresher(connCtx, session, s.refresh, done)
+	}
+
+	if relayErr := relayRequest(connCtx, tcp, session, clientOpening.pending, clientOpening.selected); relayErr != nil {
+		connLogger.Error("failed to hand the client's request to the device; closing", "error", relayErr)
+		session.Close()
+		return
+	}
+	countedRequest.markRelayed()
+
+	// The reply's first status word settles a counted reverse request on its way to the client.
+	if pipeErr := pipeConn(connCtx, tcp, countedRequest.watching(session), refresher); pipeErr != nil {
+		connLogger.Error("pipe ended with error", "error", pipeErr)
+		return
+	}
+	connLogger.Debug("connection closed cleanly")
+}
